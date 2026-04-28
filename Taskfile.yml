@@ -1,0 +1,44 @@
+version: "3"
+
+tasks:
+  default:
+    desc: 利用可能なタスクを表示する
+    cmds:
+      - task --list
+
+  fmt:
+    desc: Rust コードを整形する
+    cmds:
+      - cargo fmt --all
+
+  fmt:check:
+    desc: Rust コードの整形差分を確認する
+    cmds:
+      - cargo fmt --all --check
+
+  test:
+    desc: workspace 全体のテストを実行する
+    cmds:
+      - cargo test --workspace
+
+  lint:
+    desc: Clippy で警告をエラーとして検査する
+    cmds:
+      - cargo clippy --workspace -- -D warnings
+
+  check:
+    desc: 整形、テスト、lint をまとめて実行する
+    deps:
+      - fmt:check
+      - test
+      - lint
+
+  list:
+    desc: サンプル設定で list を実行する
+    cmds:
+      - cargo run -p fwd-deck-cli --bin fwd-deck -- list --config fwd-deck.example.toml --no-global
+
+  validate:
+    desc: サンプル設定で validate を実行する
+    cmds:
+      - cargo run -p fwd-deck-cli --bin fwd-deck -- validate --config fwd-deck.example.toml --no-global

@@ -1,0 +1,11 @@
+[[tunnels]]
+id = "dev-db"
+description = "Development database"
+local_host = "127.0.0.1"
+local_port = 15432
+remote_host = "127.0.0.1"
+remote_port = 5432
+ssh_user = "ec2-user"
+ssh_host = "bastion.example.com"
+ssh_port = 22
+identity_file = "~/.ssh/id_ed25519"

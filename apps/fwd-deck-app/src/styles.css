@@ -37,3 +37,9 @@ input {
   background:
     linear-gradient(180deg, rgba(248, 250, 252, 0.94) 0%, rgba(238, 242, 247, 0.98) 42%), #eef2f7;
 }
+
+.tracked-runtime-shell {
+  box-shadow:
+    0 22px 54px rgba(15, 23, 42, 0.24),
+    0 6px 16px rgba(15, 23, 42, 0.12);
+}

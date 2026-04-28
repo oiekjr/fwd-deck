@@ -4,6 +4,8 @@ import {
   AlertTriangle,
   ArrowRight,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   CirclePlus,
   CircleStop,
   Clock3,
@@ -33,6 +35,8 @@ type TunnelStatus = RuntimeState | "idle";
 type StatusFilter = "all" | TunnelStatus;
 
 type ScopeFilter = "all" | ConfigScope;
+
+type AppView = "dashboard" | "add" | "settings";
 
 interface PathSelection {
   localConfigPath: string;
@@ -151,6 +155,7 @@ interface TunnelFilters {
   query: string;
   status: StatusFilter;
   scope: ScopeFilter;
+  tags: string[];
 }
 
 const initialPaths: PathSelection = {
@@ -179,7 +184,10 @@ const initialFilters: TunnelFilters = {
   query: "",
   status: "all",
   scope: "all",
+  tags: [],
 };
+
+const searchDebounceMilliseconds = 200;
 
 const statusFilterOptions: ReadonlyArray<{ value: StatusFilter; label: string }> = [
   { value: "all", label: "All" },
@@ -202,6 +210,8 @@ function App(): ReactElement {
   const [paths, setPaths] = useState<PathSelection>(initialPaths);
   const [form, setForm] = useState<TunnelFormState>(initialForm);
   const [filters, setFilters] = useState<TunnelFilters>(initialFilters);
+  const [queryInput, setQueryInput] = useState<string>(initialFilters.query);
+  const [activeView, setActiveView] = useState<AppView>("dashboard");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<TunnelView | null>(null);
   const [message, setMessage] = useState<AppMessage | null>(null);
@@ -209,11 +219,26 @@ function App(): ReactElement {
 
   const stats = useMemo<DashboardStats>(() => calculateStats(dashboard), [dashboard]);
   const selectedIdList = useMemo<string[]>(() => Array.from(selectedIds), [selectedIds]);
+  const availableTags = useMemo<string[]>(
+    () => collectAvailableTags(dashboard?.tunnels ?? []),
+    [dashboard],
+  );
   const filteredTunnels = useMemo<TunnelView[]>(
     () => filterTunnels(dashboard?.tunnels ?? [], filters),
     [dashboard, filters],
   );
-  const hasActiveFilters = useMemo<boolean>(() => hasActiveTunnelFilters(filters), [filters]);
+  const filteredTunnelIds = useMemo<string[]>(
+    () => filteredTunnels.map((tunnel) => tunnel.id),
+    [filteredTunnels],
+  );
+  const selectedVisibleCount = useMemo<number>(
+    () => filteredTunnelIds.filter((id) => selectedIds.has(id)).length,
+    [filteredTunnelIds, selectedIds],
+  );
+  const hasActiveFilters = useMemo<boolean>(
+    () => hasActiveTunnelFilters(filters) || queryInput.trim().length > 0,
+    [filters, queryInput],
+  );
 
   useEffect(() => {
     async function loadInitialDashboard(): Promise<void> {
@@ -237,6 +262,20 @@ function App(): ReactElement {
 
     void loadInitialDashboard();
   }, []);
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      setFilters((current) => {
+        if (current.query === queryInput) {
+          return current;
+        }
+
+        return { ...current, query: queryInput };
+      });
+    }, searchDebounceMilliseconds);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [queryInput]);
 
   /**
    * 現在のパス設定に基づいてダッシュボードを再取得する
@@ -335,6 +374,7 @@ function App(): ReactElement {
       setPaths(loaded.paths);
       setForm({ ...initialForm, scope: form.scope });
       setMessage({ kind: "success", text: `${tunnel.id} を設定に追加しました` });
+      setActiveView("dashboard");
     } catch (error) {
       setMessage({ kind: "error", text: stringifyError(error) });
     } finally {
@@ -389,6 +429,20 @@ function App(): ReactElement {
   }
 
   /**
+   * 表示中のトンネルを選択状態へ追加する
+   */
+  function selectVisibleTunnels(): void {
+    setSelectedIds((current) => addSelections(current, filteredTunnelIds));
+  }
+
+  /**
+   * 表示中のトンネルを選択状態から除外する
+   */
+  function deselectVisibleTunnels(): void {
+    setSelectedIds((current) => removeSelections(current, filteredTunnelIds));
+  }
+
+  /**
    * 一覧の絞り込み条件を反映する
    */
   function updateFilter<K extends keyof TunnelFilters>(field: K, value: TunnelFilters[K]): void {
@@ -396,67 +450,81 @@ function App(): ReactElement {
   }
 
   /**
+   * 検索入力値を即時反映し、一覧への適用は遅延させる
+   */
+  function updateQueryInput(value: string): void {
+    setQueryInput(value);
+  }
+
+  /**
+   * タグ絞り込みの選択状態を切り替える
+   */
+  function toggleTagFilter(tag: string): void {
+    setFilters((current) => ({ ...current, tags: toggleTag(current.tags, tag) }));
+  }
+
+  /**
    * 一覧の絞り込み条件を初期状態へ戻す
    */
   function resetFilters(): void {
+    setQueryInput(initialFilters.query);
     setFilters(initialFilters);
   }
 
   return (
     <main className="app-shell min-h-screen text-base-content">
       <div className="mx-auto flex w-full max-w-[90rem] flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
-        <AppHeader stats={stats} isBusy={isBusy} onRefresh={() => void refreshDashboard()} />
+        <AppHeader
+          stats={stats}
+          activeView={activeView}
+          isBusy={isBusy}
+          onViewChange={setActiveView}
+          onRefresh={() => void refreshDashboard()}
+        />
 
-        <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_25rem]">
-          <section className="flex min-w-0 flex-col gap-4">
-            <MessagePanel message={message} />
-            <ValidationPanel dashboard={dashboard} />
-            <TunnelOperationsPanel
-              selectedCount={selectedIdList.length}
-              totalCount={dashboard?.tunnels.length ?? 0}
-              visibleCount={filteredTunnels.length}
-              filters={filters}
-              hasActiveFilters={hasActiveFilters}
-              isBusy={isBusy}
-              onFilterChange={updateFilter}
-              onResetFilters={resetFilters}
-              onStart={() => void startSelected(selectedIdList)}
-              onStop={() => void stopSelected(selectedIdList)}
-              onClear={() => setSelectedIds(new Set())}
-            />
-            <TunnelDeck
-              dashboard={dashboard}
-              tunnels={filteredTunnels}
-              hasActiveFilters={hasActiveFilters}
-              selectedIds={selectedIds}
-              isBusy={isBusy}
-              onToggle={toggleSelection}
-              onStart={(id) => void startSelected([id])}
-              onStop={(id) => void stopSelected([id])}
-              onRemove={setDeleteTarget}
-            />
-            <TrackedPanel
-              dashboard={dashboard}
-              isBusy={isBusy}
-              onStop={(id) => void stopSelected([id])}
-            />
-          </section>
+        <MessagePanel message={message} />
 
-          <aside className="flex flex-col gap-4 xl:sticky xl:top-5 xl:self-start">
-            <TunnelForm
-              form={form}
-              isBusy={isBusy}
-              onChange={updateForm}
-              onSubmit={(event) => void submitTunnel(event)}
-            />
-            <PathPanel
-              paths={paths}
-              isBusy={isBusy}
-              onChange={updatePath}
-              onReload={() => void refreshDashboard(paths)}
-            />
-          </aside>
-        </div>
+        {activeView === "dashboard" ? (
+          <DashboardView
+            dashboard={dashboard}
+            filteredTunnels={filteredTunnels}
+            hasActiveFilters={hasActiveFilters}
+            selectedIds={selectedIds}
+            selectedCount={selectedIdList.length}
+            selectedVisibleCount={selectedVisibleCount}
+            availableTags={availableTags}
+            isBusy={isBusy}
+            queryInput={queryInput}
+            filters={filters}
+            onQueryInputChange={updateQueryInput}
+            onFilterChange={updateFilter}
+            onToggleTag={toggleTagFilter}
+            onResetFilters={resetFilters}
+            onClearSelection={() => setSelectedIds(new Set())}
+            onSelectVisible={selectVisibleTunnels}
+            onDeselectVisible={deselectVisibleTunnels}
+            onToggleSelection={toggleSelection}
+            onStartSelected={() => void startSelected(selectedIdList)}
+            onStopSelected={() => void stopSelected(selectedIdList)}
+            onStartTunnel={(id) => void startSelected([id])}
+            onStopTunnel={(id) => void stopSelected([id])}
+            onRemoveTunnel={setDeleteTarget}
+          />
+        ) : activeView === "add" ? (
+          <AddTunnelView
+            form={form}
+            isBusy={isBusy}
+            onChange={updateForm}
+            onSubmit={(event) => void submitTunnel(event)}
+          />
+        ) : (
+          <SettingsView
+            paths={paths}
+            isBusy={isBusy}
+            onChange={updatePath}
+            onReload={() => void refreshDashboard(paths)}
+          />
+        )}
       </div>
       <ConfirmRemoveModal
         tunnel={deleteTarget}
@@ -476,14 +544,22 @@ interface DashboardStats {
 
 interface AppHeaderProps {
   stats: DashboardStats;
+  activeView: AppView;
   isBusy: boolean;
+  onViewChange: (view: AppView) => void;
   onRefresh: () => void;
 }
 
 /**
  * アプリ全体の操作状況と再読み込み導線を表示する
  */
-function AppHeader({ stats, isBusy, onRefresh }: AppHeaderProps): ReactElement {
+function AppHeader({
+  stats,
+  activeView,
+  isBusy,
+  onViewChange,
+  onRefresh,
+}: AppHeaderProps): ReactElement {
   return (
     <header className="overflow-hidden rounded-lg border border-base-300 bg-base-100 shadow-sm">
       <div className="flex flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
@@ -496,28 +572,62 @@ function AppHeader({ stats, isBusy, onRefresh }: AppHeaderProps): ReactElement {
             SSH tunnel operations for local development
           </p>
         </div>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-[repeat(3,minmax(7rem,1fr))_auto] lg:w-auto">
-          <StatusMetric label="Configured" value={stats.configured} icon={<Gauge size={17} />} />
-          <StatusMetric
-            label="Running"
-            value={stats.running}
-            tone="success"
-            icon={<Activity size={17} />}
-          />
-          <StatusMetric
-            label="Stale"
-            value={stats.stale}
-            tone="warning"
-            icon={<Clock3 size={17} />}
-          />
-          <IconButton
-            label="再読み込み"
-            className="btn btn-square btn-ghost h-full min-h-16 w-full border border-base-300 sm:w-16"
-            onClick={onRefresh}
-            disabled={isBusy}
-          >
-            {isBusy ? <Loader2 className="animate-spin" size={18} /> : <RefreshCw size={18} />}
-          </IconButton>
+        <div className="flex flex-col gap-3">
+          <div className="join w-full self-start lg:w-auto lg:self-end">
+            <button
+              type="button"
+              className={`btn btn-sm join-item flex-1 lg:flex-none ${
+                activeView === "dashboard" ? "btn-primary" : "btn-outline"
+              }`}
+              onClick={() => onViewChange("dashboard")}
+            >
+              <ListFilter size={15} />
+              Dashboard
+            </button>
+            <button
+              type="button"
+              className={`btn btn-sm join-item flex-1 lg:flex-none ${
+                activeView === "add" ? "btn-primary" : "btn-outline"
+              }`}
+              onClick={() => onViewChange("add")}
+            >
+              <CirclePlus size={15} />
+              Add tunnel
+            </button>
+            <button
+              type="button"
+              className={`btn btn-sm join-item flex-1 lg:flex-none ${
+                activeView === "settings" ? "btn-primary" : "btn-outline"
+              }`}
+              onClick={() => onViewChange("settings")}
+            >
+              <Settings2 size={15} />
+              Settings
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-[repeat(3,minmax(7rem,1fr))_auto] lg:w-auto">
+            <StatusMetric label="Configured" value={stats.configured} icon={<Gauge size={17} />} />
+            <StatusMetric
+              label="Running"
+              value={stats.running}
+              tone="success"
+              icon={<Activity size={17} />}
+            />
+            <StatusMetric
+              label="Stale"
+              value={stats.stale}
+              tone="warning"
+              icon={<Clock3 size={17} />}
+            />
+            <IconButton
+              label="再読み込み"
+              className="btn btn-square btn-ghost h-full min-h-16 w-full border border-base-300 sm:w-16"
+              onClick={onRefresh}
+              disabled={isBusy}
+            >
+              {isBusy ? <Loader2 className="animate-spin" size={18} /> : <RefreshCw size={18} />}
+            </IconButton>
+          </div>
         </div>
       </div>
     </header>
@@ -578,6 +688,146 @@ function IconButton({
         {children}
       </button>
     </div>
+  );
+}
+
+interface DashboardViewProps {
+  dashboard: DashboardState | null;
+  filteredTunnels: TunnelView[];
+  hasActiveFilters: boolean;
+  selectedIds: Set<string>;
+  selectedCount: number;
+  selectedVisibleCount: number;
+  availableTags: string[];
+  queryInput: string;
+  filters: TunnelFilters;
+  isBusy: boolean;
+  onQueryInputChange: (value: string) => void;
+  onFilterChange: <K extends keyof TunnelFilters>(field: K, value: TunnelFilters[K]) => void;
+  onToggleTag: (tag: string) => void;
+  onResetFilters: () => void;
+  onClearSelection: () => void;
+  onSelectVisible: () => void;
+  onDeselectVisible: () => void;
+  onToggleSelection: (id: string) => void;
+  onStartSelected: () => void;
+  onStopSelected: () => void;
+  onStartTunnel: (id: string) => void;
+  onStopTunnel: (id: string) => void;
+  onRemoveTunnel: (tunnel: TunnelView) => void;
+}
+
+/**
+ * 運用対象の一覧と実行操作を表示する
+ */
+function DashboardView({
+  dashboard,
+  filteredTunnels,
+  hasActiveFilters,
+  selectedIds,
+  selectedCount,
+  selectedVisibleCount,
+  availableTags,
+  queryInput,
+  filters,
+  isBusy,
+  onQueryInputChange,
+  onFilterChange,
+  onToggleTag,
+  onResetFilters,
+  onClearSelection,
+  onSelectVisible,
+  onDeselectVisible,
+  onToggleSelection,
+  onStartSelected,
+  onStopSelected,
+  onStartTunnel,
+  onStopTunnel,
+  onRemoveTunnel,
+}: DashboardViewProps): ReactElement {
+  const [isTrackedPanelCollapsed, setIsTrackedPanelCollapsed] = useState<boolean>(true);
+  const hasTrackedRuntime = (dashboard?.trackedTunnels.length ?? 0) > 0;
+
+  return (
+    <section
+      className={`flex min-w-0 flex-col gap-4 ${hasTrackedRuntime ? (isTrackedPanelCollapsed ? "pb-20" : "pb-56") : ""}`}
+    >
+      <ValidationPanel dashboard={dashboard} />
+      <TunnelOperationsPanel
+        selectedCount={selectedCount}
+        totalCount={dashboard?.tunnels.length ?? 0}
+        visibleCount={filteredTunnels.length}
+        selectedVisibleCount={selectedVisibleCount}
+        availableTags={availableTags}
+        queryInput={queryInput}
+        filters={filters}
+        hasActiveFilters={hasActiveFilters}
+        isBusy={isBusy}
+        onQueryInputChange={onQueryInputChange}
+        onFilterChange={onFilterChange}
+        onToggleTag={onToggleTag}
+        onResetFilters={onResetFilters}
+        onSelectVisible={onSelectVisible}
+        onDeselectVisible={onDeselectVisible}
+        onStart={onStartSelected}
+        onStop={onStopSelected}
+        onClear={onClearSelection}
+      />
+      <TunnelDeck
+        dashboard={dashboard}
+        tunnels={filteredTunnels}
+        hasActiveFilters={hasActiveFilters}
+        selectedIds={selectedIds}
+        isBusy={isBusy}
+        onToggle={onToggleSelection}
+        onStart={onStartTunnel}
+        onStop={onStopTunnel}
+        onRemove={onRemoveTunnel}
+      />
+      <TrackedPanel
+        dashboard={dashboard}
+        isCollapsed={isTrackedPanelCollapsed}
+        isBusy={isBusy}
+        onToggleCollapsed={() => setIsTrackedPanelCollapsed((current) => !current)}
+        onStop={onStopTunnel}
+      />
+    </section>
+  );
+}
+
+interface AddTunnelViewProps {
+  form: TunnelFormState;
+  isBusy: boolean;
+  onChange: (field: keyof TunnelFormState, value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}
+
+/**
+ * トンネル追加専用の入力画面を表示する
+ */
+function AddTunnelView({ form, isBusy, onChange, onSubmit }: AddTunnelViewProps): ReactElement {
+  return (
+    <section className="mx-auto flex w-full max-w-6xl flex-col gap-4">
+      <TunnelForm form={form} isBusy={isBusy} onChange={onChange} onSubmit={onSubmit} />
+    </section>
+  );
+}
+
+interface SettingsViewProps {
+  paths: PathSelection;
+  isBusy: boolean;
+  onChange: (field: keyof PathSelection, value: string | boolean) => void;
+  onReload: () => void;
+}
+
+/**
+ * 設定ファイルと状態ファイルの参照先を編集する
+ */
+function SettingsView({ paths, isBusy, onChange, onReload }: SettingsViewProps): ReactElement {
+  return (
+    <section className="mx-auto w-full max-w-4xl">
+      <PathPanel paths={paths} isBusy={isBusy} onChange={onChange} onReload={onReload} />
+    </section>
   );
 }
 
@@ -659,7 +909,7 @@ function ValidationPanel({ dashboard }: ValidationPanelProps): ReactElement | nu
   if (!dashboard.hasConfig) {
     return (
       <AlertMessage kind="warning">
-        設定ファイルが見つかりません。右側のフォームから local または global 設定を作成できます。
+        設定ファイルが見つかりません。Add tunnel から local または global 設定を作成できます。
       </AlertMessage>
     );
   }
@@ -694,21 +944,37 @@ interface AlertMessageProps {
 }
 
 /**
- * daisyUI の alert 表示を生成する
+ * 通知メッセージを状態別の視認性で表示する
  */
 function AlertMessage({ kind, children }: AlertMessageProps): ReactElement {
-  const icon = kind === "success" ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />;
-  const className =
+  const iconClassName =
     kind === "success"
-      ? "alert alert-success"
+      ? "text-success"
       : kind === "warning"
-        ? "alert alert-warning"
+        ? "text-warning"
         : kind === "error"
-          ? "alert alert-error"
-          : "alert alert-info";
+          ? "text-error"
+          : "text-info";
+  const toneClassName =
+    kind === "success"
+      ? "border-success/30 bg-success/10"
+      : kind === "warning"
+        ? "border-warning/40 bg-warning/15"
+        : kind === "error"
+          ? "border-error/35 bg-error/10"
+          : "border-info/35 bg-info/10";
+  const icon =
+    kind === "success" ? (
+      <CheckCircle2 className={iconClassName} size={18} />
+    ) : (
+      <AlertTriangle className={iconClassName} size={18} />
+    );
 
   return (
-    <div className={`${className} py-3 text-sm`}>
+    <div
+      className={`flex items-center gap-3 rounded-lg border px-4 py-3 text-sm text-base-content shadow-sm ${toneClassName}`}
+      role={kind === "error" ? "alert" : "status"}
+    >
       {icon}
       <span>{children}</span>
     </div>
@@ -736,11 +1002,18 @@ interface TunnelOperationsPanelProps {
   selectedCount: number;
   totalCount: number;
   visibleCount: number;
+  selectedVisibleCount: number;
+  availableTags: string[];
+  queryInput: string;
   filters: TunnelFilters;
   hasActiveFilters: boolean;
   isBusy: boolean;
+  onQueryInputChange: (value: string) => void;
   onFilterChange: <K extends keyof TunnelFilters>(field: K, value: TunnelFilters[K]) => void;
+  onToggleTag: (tag: string) => void;
   onResetFilters: () => void;
+  onSelectVisible: () => void;
+  onDeselectVisible: () => void;
   onStart: () => void;
   onStop: () => void;
   onClear: () => void;
@@ -753,11 +1026,18 @@ function TunnelOperationsPanel({
   selectedCount,
   totalCount,
   visibleCount,
+  selectedVisibleCount,
+  availableTags,
+  queryInput,
   filters,
   hasActiveFilters,
   isBusy,
+  onQueryInputChange,
   onFilterChange,
+  onToggleTag,
   onResetFilters,
+  onSelectVisible,
+  onDeselectVisible,
   onStart,
   onStop,
   onClear,
@@ -779,6 +1059,22 @@ function TunnelOperationsPanel({
             </p>
           </div>
           <div className="flex flex-wrap gap-2 lg:justify-end">
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={onSelectVisible}
+              disabled={isBusy || visibleCount === 0 || selectedVisibleCount === visibleCount}
+            >
+              Select visible
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={onDeselectVisible}
+              disabled={isBusy || selectedVisibleCount === 0}
+            >
+              Deselect visible
+            </button>
             <button
               type="button"
               className="btn btn-primary btn-sm"
@@ -816,18 +1112,18 @@ function TunnelOperationsPanel({
             />
             <input
               className="input input-bordered input-sm w-full pr-9 pl-9"
-              value={filters.query}
+              value={queryInput}
               onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                onFilterChange("query", event.target.value)
+                onQueryInputChange(event.target.value)
               }
               placeholder="Search ID, tag, endpoint"
               aria-label="Search tunnels"
             />
-            {filters.query.length > 0 ? (
+            {queryInput.length > 0 ? (
               <button
                 type="button"
                 className="btn btn-square btn-ghost btn-xs absolute top-1/2 right-1 -translate-y-1/2"
-                onClick={() => onFilterChange("query", "")}
+                onClick={() => onQueryInputChange("")}
                 aria-label="検索条件を消去"
                 title="検索条件を消去"
               >
@@ -877,6 +1173,28 @@ function TunnelOperationsPanel({
             Reset
           </button>
         </div>
+
+        {availableTags.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2 border-t border-base-300 pt-3">
+            <span className="text-xs font-bold uppercase tracking-wide text-base-content/50">
+              Tags
+            </span>
+            {availableTags.map((tag) => {
+              const selected = filters.tags.includes(tag);
+              return (
+                <button
+                  key={tag}
+                  type="button"
+                  className={`btn btn-xs rounded-full ${selected ? "btn-primary" : "btn-outline"}`}
+                  onClick={() => onToggleTag(tag)}
+                  aria-pressed={selected}
+                >
+                  {tag}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
       </div>
     </section>
   );
@@ -931,7 +1249,7 @@ function TunnelDeck({
   if (dashboard.tunnels.length === 0) {
     return (
       <EmptyState title="No configured tunnels">
-        右側のフォームから新しい接続を追加できます。
+        Add tunnel から新しい接続を追加できます。
       </EmptyState>
     );
   }
@@ -945,7 +1263,7 @@ function TunnelDeck({
   }
 
   return (
-    <section className="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+    <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
       {tunnels.map((tunnel) => (
         <TunnelCard
           key={tunnel.id}
@@ -1183,64 +1501,88 @@ function EndpointRow({ icon, label, value }: EndpointRowProps): ReactElement {
 
 interface TrackedPanelProps {
   dashboard: DashboardState | null;
+  isCollapsed: boolean;
   isBusy: boolean;
+  onToggleCollapsed: () => void;
   onStop: (id: string) => void;
 }
 
 /**
  * 状態ファイルで追跡中のトンネルを表示する
  */
-function TrackedPanel({ dashboard, isBusy, onStop }: TrackedPanelProps): ReactElement | null {
+function TrackedPanel({
+  dashboard,
+  isCollapsed,
+  isBusy,
+  onToggleCollapsed,
+  onStop,
+}: TrackedPanelProps): ReactElement | null {
   if (dashboard === null || dashboard.trackedTunnels.length === 0) {
     return null;
   }
 
   return (
-    <section className="rounded-lg border border-base-300 bg-base-100 shadow-sm">
-      <div className="flex flex-col gap-3 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Activity className="text-primary" size={18} />
-            <h2 className="text-base font-bold">Tracked runtime</h2>
-          </div>
-          <span className="badge badge-neutral badge-sm">{dashboard.trackedTunnels.length}</span>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="table table-sm">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Endpoint</th>
-                <th>Status</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {dashboard.trackedTunnels.map((tracked) => (
-                <tr key={tracked.id}>
-                  <td className="font-bold">{tracked.id}</td>
-                  <td className="max-w-md truncate font-mono text-xs">
-                    {tracked.local} {" -> "} {tracked.remote}
-                  </td>
-                  <td>
-                    <StatusBadge status={tracked.status.state} />
-                  </td>
-                  <td className="text-right">
-                    <button
-                      type="button"
-                      className="btn btn-outline btn-xs"
-                      onClick={() => onStop(tracked.id)}
-                      disabled={isBusy}
-                    >
-                      <CircleStop size={13} />
-                      Stop
-                    </button>
-                  </td>
+    <section className="pointer-events-none fixed right-4 bottom-4 left-4 z-40 sm:left-1/2 sm:right-auto sm:-translate-x-1/2">
+      <div className="tracked-runtime-shell pointer-events-auto w-full overflow-hidden rounded-xl bg-base-100 sm:w-[42rem]">
+        <button
+          type="button"
+          className="flex w-full items-center justify-between gap-3 bg-primary/5 px-3.5 py-2.5 text-left"
+          onClick={onToggleCollapsed}
+          aria-expanded={!isCollapsed}
+        >
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="rounded-md bg-primary/10 p-1.5 text-primary">
+              <Activity className="shrink-0" size={18} />
+            </span>
+            <span className="truncate text-sm font-bold sm:text-base">Tracked runtime</span>
+            <span className="badge badge-primary badge-outline badge-sm">
+              {dashboard.trackedTunnels.length}
+            </span>
+          </span>
+          <span className="flex shrink-0 items-center gap-2 text-xs text-base-content/60">
+            {isCollapsed ? "Show" : "Hide"}
+            {isCollapsed ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+          </span>
+        </button>
+
+        {!isCollapsed ? (
+          <div className="max-h-44 overflow-auto border-t border-base-200">
+            <table className="table table-xs table-pin-rows">
+              <thead>
+                <tr>
+                  <th className="bg-base-100 text-xs text-base-content/55">ID</th>
+                  <th className="bg-base-100 text-xs text-base-content/55">Endpoint</th>
+                  <th className="bg-base-100 text-xs text-base-content/55">Status</th>
+                  <th></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {dashboard.trackedTunnels.map((tracked) => (
+                  <tr key={tracked.id}>
+                    <td className="font-bold">{tracked.id}</td>
+                    <td className="max-w-md truncate font-mono text-xs">
+                      {tracked.local} {" -> "} {tracked.remote}
+                    </td>
+                    <td>
+                      <StatusBadge status={tracked.status.state} />
+                    </td>
+                    <td className="text-right">
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-xs"
+                        onClick={() => onStop(tracked.id)}
+                        disabled={isBusy}
+                      >
+                        <CircleStop size={13} />
+                        Stop
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
       </div>
     </section>
   );
@@ -1258,17 +1600,17 @@ interface TunnelFormProps {
  */
 function TunnelForm({ form, isBusy, onChange, onSubmit }: TunnelFormProps): ReactElement {
   return (
-    <form className="rounded-lg border border-base-300 bg-base-100 shadow-sm" onSubmit={onSubmit}>
-      <div className="flex flex-col gap-4 p-5">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <CirclePlus className="text-primary" size={18} />
-            <h2 className="text-base font-bold">Add tunnel</h2>
-          </div>
-          <span className="badge badge-outline badge-sm">{form.scope}</span>
+    <form
+      className="overflow-hidden rounded-lg border border-base-300 bg-base-100 shadow-sm"
+      onSubmit={onSubmit}
+    >
+      <div className="flex flex-col gap-4 border-b border-base-300 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2">
+          <CirclePlus className="text-primary" size={18} />
+          <h2 className="text-base font-bold">Add tunnel</h2>
         </div>
 
-        <div className="join w-full rounded-md bg-base-200/60 p-1">
+        <div className="join w-full rounded-md bg-base-200/60 p-1 sm:w-72">
           <button
             type="button"
             className={`btn btn-sm join-item flex-1 ${
@@ -1288,8 +1630,10 @@ function TunnelForm({ form, isBusy, onChange, onSubmit }: TunnelFormProps): Reac
             Global
           </button>
         </div>
+      </div>
 
-        <div className="flex flex-col gap-3 border-t border-base-300 pt-4">
+      <div className="grid grid-cols-1 gap-5 p-5 xl:grid-cols-3">
+        <section className="flex flex-col gap-3">
           <h3 className="text-xs font-bold uppercase tracking-wide text-base-content/50">
             Identity
           </h3>
@@ -1310,9 +1654,9 @@ function TunnelForm({ form, isBusy, onChange, onSubmit }: TunnelFormProps): Reac
             onChange={(value) => onChange("tags", value)}
             placeholder="dev,project-a"
           />
-        </div>
+        </section>
 
-        <div className="flex flex-col gap-3 border-t border-base-300 pt-4">
+        <section className="flex flex-col gap-3 border-t border-base-300 pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-5">
           <h3 className="text-xs font-bold uppercase tracking-wide text-base-content/50">
             Routing
           </h3>
@@ -1346,9 +1690,9 @@ function TunnelForm({ form, isBusy, onChange, onSubmit }: TunnelFormProps): Reac
               required
             />
           </div>
-        </div>
+        </section>
 
-        <div className="flex flex-col gap-3 border-t border-base-300 pt-4">
+        <section className="flex flex-col gap-3 border-t border-base-300 pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-5">
           <h3 className="text-xs font-bold uppercase tracking-wide text-base-content/50">SSH</h3>
           <TextField
             label="SSH user"
@@ -1376,9 +1720,11 @@ function TunnelForm({ form, isBusy, onChange, onSubmit }: TunnelFormProps): Reac
             onChange={(value) => onChange("identityFile", value)}
             placeholder="~/.ssh/id_ed25519"
           />
-        </div>
+        </section>
+      </div>
 
-        <button className="btn btn-primary btn-sm w-full" type="submit" disabled={isBusy}>
+      <div className="flex justify-end border-t border-base-300 px-5 py-4">
+        <button className="btn btn-primary btn-sm" type="submit" disabled={isBusy}>
           <CirclePlus size={16} />
           Add tunnel
         </button>
@@ -1485,10 +1831,24 @@ function filterTunnels(tunnels: TunnelView[], filters: TunnelFilters): TunnelVie
     const status = tunnelStatus(tunnel);
     const matchesStatus = filters.status === "all" || filters.status === status;
     const matchesScope = filters.scope === "all" || filters.scope === tunnel.source;
+    const matchesTags = filters.tags.every((tag) => tunnel.tags.includes(tag));
     const matchesQuery = query.length === 0 || tunnelContainsQuery(tunnel, query);
 
-    return matchesStatus && matchesScope && matchesQuery;
+    return matchesStatus && matchesScope && matchesTags && matchesQuery;
   });
+}
+
+/**
+ * 設定済みトンネルから利用可能なタグ一覧を抽出する
+ */
+function collectAvailableTags(tunnels: TunnelView[]): string[] {
+  const tags = new Set<string>();
+
+  tunnels.forEach((tunnel) => {
+    tunnel.tags.forEach((tag) => tags.add(tag));
+  });
+
+  return Array.from(tags).sort((left, right) => left.localeCompare(right));
 }
 
 /**
@@ -1498,7 +1858,8 @@ function hasActiveTunnelFilters(filters: TunnelFilters): boolean {
   return (
     filters.query.trim().length > 0 ||
     filters.status !== initialFilters.status ||
-    filters.scope !== initialFilters.scope
+    filters.scope !== initialFilters.scope ||
+    filters.tags.length > 0
   );
 }
 
@@ -1650,12 +2011,41 @@ function toggleId(current: Set<string>, id: string): Set<string> {
 }
 
 /**
+ * 指定 ID 群を選択状態へ追加する
+ */
+function addSelections(current: Set<string>, ids: string[]): Set<string> {
+  const next = new Set(current);
+  ids.forEach((id) => next.add(id));
+  return next;
+}
+
+/**
  * 指定 ID を選択状態から除外する
  */
 function removeSelection(current: Set<string>, id: string): Set<string> {
   const next = new Set(current);
   next.delete(id);
   return next;
+}
+
+/**
+ * 指定 ID 群を選択状態から除外する
+ */
+function removeSelections(current: Set<string>, ids: string[]): Set<string> {
+  const next = new Set(current);
+  ids.forEach((id) => next.delete(id));
+  return next;
+}
+
+/**
+ * タグ絞り込みの選択状態を切り替える
+ */
+function toggleTag(current: string[], tag: string): string[] {
+  if (current.includes(tag)) {
+    return current.filter((currentTag) => currentTag !== tag);
+  }
+
+  return [...current, tag];
 }
 
 /**

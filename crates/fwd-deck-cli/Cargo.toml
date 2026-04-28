@@ -15,6 +15,7 @@ clap_complete.workspace = true
 fwd-deck-core = { path = "../fwd-deck-core" }
 inquire.workspace = true
 thiserror.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

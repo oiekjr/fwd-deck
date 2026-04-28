@@ -245,6 +245,7 @@ dependencies = [
  "inquire",
  "tempfile",
  "thiserror",
+ "unicode-width",
 ]
 
 [[package]]

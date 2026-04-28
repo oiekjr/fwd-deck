@@ -46,6 +46,28 @@ fn list_query_matches_description() {
     output.assert_stdout_not_contains("dev-db");
 }
 
+/// list --wide が REMOTE の省略有無を切り替えることを検証する
+#[test]
+fn list_wide_displays_full_remote_host() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(long_remote_config());
+
+    let output = workspace.run(["list"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("...:5432");
+    output.assert_stdout_not_contains(
+        "japandb-as.cluster-clpmwhbh0sfa.ap-northeast-1.rds.amazonaws.com:5432",
+    );
+
+    let output = workspace.run(["list", "--wide"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains(
+        "japandb-as.cluster-clpmwhbh0sfa.ap-northeast-1.rds.amazonaws.com:5432",
+    );
+}
+
 /// show が description を含むトンネル詳細を表示することを検証する
 #[test]
 fn show_displays_tunnel_details() {
@@ -263,6 +285,20 @@ local_host = "127.0.0.1"
 local_port = 16379
 remote_host = "127.0.0.1"
 remote_port = 6379
+ssh_user = "ec2-user"
+ssh_host = "bastion.example.com"
+"#
+}
+
+/// 長い remote host を持つテスト用設定を生成する
+fn long_remote_config() -> &'static str {
+    r#"
+[[tunnels]]
+id = "prod-db"
+local_host = "127.0.0.1"
+local_port = 15432
+remote_host = "japandb-as.cluster-clpmwhbh0sfa.ap-northeast-1.rds.amazonaws.com"
+remote_port = 5432
 ssh_user = "ec2-user"
 ssh_host = "bastion.example.com"
 "#

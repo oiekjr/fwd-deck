@@ -164,12 +164,14 @@ fwd-deck --state /tmp/fwd-deck-state.toml status
 
 ```sh
 fwd-deck list
+fwd-deck list --wide
 fwd-deck list --query db
 fwd-deck list --tag dev
 fwd-deck list --tag dev --query db
 ```
 
 `list --query` は、`id` と `description` に対して大文字小文字を区別しない部分一致検索を行います。
+通常の `list` は `REMOTE` の host 部分を省略表示し、`--wide` は `REMOTE` を省略せずに表示します。
 `--tag` は複数指定でき、指定したタグをすべて持つトンネルだけを表示します。
 `--tag` と `--query` を併用した場合は、両方に一致するトンネルだけを表示します。
 

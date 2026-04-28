@@ -22,8 +22,16 @@ use fwd_deck_core::{
 };
 use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
 use thiserror::Error;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const DEFAULT_WATCH_INTERVAL_SECONDS: u64 = 5;
+const LIST_ID_MIN_WIDTH: usize = 24;
+const LIST_LOCAL_MIN_WIDTH: usize = 24;
+const LIST_REMOTE_MIN_WIDTH: usize = 32;
+const LIST_REMOTE_HOST_MAX_WIDTH: usize = 40;
+const LIST_SSH_MIN_WIDTH: usize = 32;
+const LIST_TAGS_MIN_WIDTH: usize = 24;
+const TRUNCATION_MARKER: &str = "...";
 
 /// fwd-deck の CLI 引数を表現する
 #[derive(Debug, Parser)]
@@ -77,6 +85,8 @@ enum Command {
             help = "Filter tunnels by id or description"
         )]
         query: Option<String>,
+        #[arg(long, help = "Show full remote hosts without truncation")]
+        wide: bool,
     },
     #[command(about = "Show configured tunnel details")]
     Show {
@@ -208,9 +218,9 @@ fn run() -> Result<ExitCode, CliError> {
     let state_path = cli.state.clone();
 
     match &cli.command {
-        Command::List { tags, query } => {
+        Command::List { tags, query, wide } => {
             let config = load_config(&cli)?;
-            list_command(&config, tags.clone(), query.clone())
+            list_command(&config, tags.clone(), query.clone(), *wide)
         }
         Command::Show { id } => {
             let config = load_config(&cli)?;
@@ -417,6 +427,7 @@ fn list_command(
     config: &EffectiveConfig,
     tags: Vec<String>,
     query: Option<String>,
+    wide: bool,
 ) -> Result<ExitCode, CliError> {
     let tags = normalize_cli_tags(&tags)?;
     let query = normalize_list_query(query);
@@ -441,7 +452,7 @@ fn list_command(
         return Ok(ExitCode::SUCCESS);
     }
 
-    print_list(&tunnels);
+    print_list(&tunnels, wide);
     Ok(ExitCode::SUCCESS)
 }
 
@@ -471,29 +482,149 @@ fn show_command(config: &EffectiveConfig, id: &str) -> Result<ExitCode, CliError
 }
 
 /// 統合済みトンネル設定の一覧を表示する
-fn print_list(tunnels: &[&ResolvedTunnelConfig]) {
+fn print_list(tunnels: &[&ResolvedTunnelConfig], wide: bool) {
+    let widths = list_column_widths(tunnels, wide);
+
     println!(
-        "{:<24} {:<24} {:<32} {:<32} {:<24} SOURCE",
-        "ID", "LOCAL", "REMOTE", "SSH", "TAGS"
+        "{} {} {} {} {} SOURCE",
+        pad_display_width("ID", widths.id),
+        pad_display_width("LOCAL", widths.local),
+        pad_display_width("REMOTE", widths.remote),
+        pad_display_width("SSH", widths.ssh),
+        pad_display_width("TAGS", widths.tags)
     );
 
     for resolved in tunnels {
-        print_tunnel_row(resolved);
+        print_tunnel_row(resolved, widths, wide);
     }
 }
 
 /// トンネル設定の一覧行を表示する
-fn print_tunnel_row(resolved: &ResolvedTunnelConfig) {
+fn print_tunnel_row(resolved: &ResolvedTunnelConfig, widths: ListColumnWidths, wide: bool) {
     let tunnel = &resolved.tunnel;
     let local = format_local_endpoint(tunnel);
-    let remote = format_remote_endpoint(tunnel);
+    let remote = format_list_remote_endpoint(tunnel, wide);
     let ssh = format_ssh_endpoint(tunnel);
     let tags = format_tag_list(&tunnel.tags);
 
     println!(
-        "{:<24} {:<24} {:<32} {:<32} {:<24} {}",
-        tunnel.id, local, remote, ssh, tags, resolved.source.kind
+        "{} {} {} {} {} {}",
+        pad_display_width(&tunnel.id, widths.id),
+        pad_display_width(&local, widths.local),
+        pad_display_width(&remote, widths.remote),
+        pad_display_width(&ssh, widths.ssh),
+        pad_display_width(&tags, widths.tags),
+        resolved.source.kind
     );
+}
+
+/// list 表示の列幅を表現する
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ListColumnWidths {
+    id: usize,
+    local: usize,
+    remote: usize,
+    ssh: usize,
+    tags: usize,
+}
+
+impl ListColumnWidths {
+    /// 最小表示幅を初期値として列幅を初期化する
+    fn with_minimums() -> Self {
+        Self {
+            id: LIST_ID_MIN_WIDTH,
+            local: LIST_LOCAL_MIN_WIDTH,
+            remote: LIST_REMOTE_MIN_WIDTH,
+            ssh: LIST_SSH_MIN_WIDTH,
+            tags: LIST_TAGS_MIN_WIDTH,
+        }
+    }
+}
+
+/// list 表示対象の値から列幅を算出する
+fn list_column_widths(tunnels: &[&ResolvedTunnelConfig], wide: bool) -> ListColumnWidths {
+    tunnels
+        .iter()
+        .fold(ListColumnWidths::with_minimums(), |widths, resolved| {
+            let tunnel = &resolved.tunnel;
+
+            ListColumnWidths {
+                id: widths.id.max(display_width(&tunnel.id)),
+                local: widths
+                    .local
+                    .max(display_width(&format_local_endpoint(tunnel))),
+                remote: widths
+                    .remote
+                    .max(display_width(&format_list_remote_endpoint(tunnel, wide))),
+                ssh: widths.ssh.max(display_width(&format_ssh_endpoint(tunnel))),
+                tags: widths
+                    .tags
+                    .max(display_width(&format_tag_list(&tunnel.tags))),
+            }
+        })
+}
+
+/// list 表示用の remote endpoint 文字列を生成する
+fn format_list_remote_endpoint(tunnel: &TunnelConfig, wide: bool) -> String {
+    let remote_host = if wide {
+        tunnel.remote_host.clone()
+    } else {
+        truncate_display_width(&tunnel.remote_host, LIST_REMOTE_HOST_MAX_WIDTH)
+    };
+
+    format!("{}:{}", remote_host, tunnel.remote_port)
+}
+
+/// 指定表示幅を超える文字列を末尾省略する
+fn truncate_display_width(value: &str, max_width: usize) -> String {
+    if display_width(value) <= max_width {
+        return value.to_owned();
+    }
+
+    let marker_width = display_width(TRUNCATION_MARKER);
+    if max_width <= marker_width {
+        return TRUNCATION_MARKER
+            .chars()
+            .take(max_width)
+            .collect::<String>();
+    }
+
+    let content_width = max_width - marker_width;
+    let mut truncated = String::new();
+    let mut current_width = 0;
+
+    for character in value.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if current_width + character_width > content_width {
+            break;
+        }
+
+        truncated.push(character);
+        current_width += character_width;
+    }
+
+    truncated.push_str(TRUNCATION_MARKER);
+    truncated
+}
+
+/// 端末上の表示幅に基づいて文字列を左詰めする
+fn pad_display_width(value: &str, width: usize) -> String {
+    let display_width = display_width(value);
+
+    if display_width >= width {
+        return value.to_owned();
+    }
+
+    let padding_width = width - display_width;
+    let mut padded = String::with_capacity(value.len() + padding_width);
+    padded.push_str(value);
+    padded.push_str(&" ".repeat(padding_width));
+    padded
+}
+
+/// 端末上で占有する表示幅を取得する
+fn display_width(value: &str) -> usize {
+    UnicodeWidthStr::width(value)
 }
 
 /// トンネル設定の詳細を表示する
@@ -1977,6 +2108,70 @@ mod tests {
         let quoted = shell_quote("/tmp/key file's name");
 
         assert_eq!(quoted, "'/tmp/key file'\\''s name'");
+    }
+
+    /// 表示幅の広い文字を含む値が指定幅まで補完されることを検証する
+    #[test]
+    fn pad_display_width_handles_wide_characters() {
+        let value = "prod-ポリゴンDB";
+
+        let padded = pad_display_width(value, 24);
+
+        assert!(padded.starts_with(value));
+        assert_eq!(UnicodeWidthStr::width(padded.as_str()), 24);
+    }
+
+    /// 指定幅より長い値は省略されないことを検証する
+    #[test]
+    fn pad_display_width_keeps_long_values() {
+        let value = "japandb-as.cluster-clpmwhbh0sfa.ap-northeast-1.rds.amazonaws.com:5432";
+
+        let padded = pad_display_width(value, 24);
+
+        assert_eq!(padded, value);
+    }
+
+    /// list 表示の列幅が最長 ID に合わせて拡張されることを検証する
+    #[test]
+    fn list_column_widths_expands_id_to_longest_value() {
+        let config = effective_config_with_tunnels(vec![
+            tunnel("db", 15432),
+            tunnel("prod-登記情報管理システム", 15433),
+        ]);
+        let tunnels = config.tunnels.iter().collect::<Vec<_>>();
+
+        let widths = list_column_widths(&tunnels, false);
+
+        assert_eq!(widths.id, display_width("prod-登記情報管理システム"));
+    }
+
+    /// list 表示では remote host を省略して remote port を保持することを検証する
+    #[test]
+    fn format_list_remote_endpoint_truncates_host_and_keeps_port() {
+        let mut tunnel = tunnel("db", 15432);
+        tunnel.remote_host =
+            "japandb-as.cluster-clpmwhbh0sfa.ap-northeast-1.rds.amazonaws.com".to_owned();
+
+        let remote = format_list_remote_endpoint(&tunnel, false);
+        let Some((host, port)) = remote.rsplit_once(':') else {
+            panic!("remote endpoint should include a port");
+        };
+
+        assert_eq!(display_width(host), LIST_REMOTE_HOST_MAX_WIDTH);
+        assert!(host.ends_with(TRUNCATION_MARKER));
+        assert_eq!(port, "5432");
+    }
+
+    /// wide 指定では remote host を省略しないことを検証する
+    #[test]
+    fn format_list_remote_endpoint_keeps_full_host_when_wide() {
+        let mut tunnel = tunnel("db", 15432);
+        tunnel.remote_host =
+            "japandb-as.cluster-clpmwhbh0sfa.ap-northeast-1.rds.amazonaws.com".to_owned();
+
+        let remote = format_list_remote_endpoint(&tunnel, true);
+
+        assert_eq!(remote, format_remote_endpoint(&tunnel));
     }
 
     /// list query が ID に対して大文字小文字を区別せず一致することを検証する

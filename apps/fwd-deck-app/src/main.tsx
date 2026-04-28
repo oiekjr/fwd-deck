@@ -2357,10 +2357,10 @@ function TunnelCard({
 
   return (
     <article
-      className={`tunnel-card tunnel-card-${status} flex h-full flex-col rounded-lg border bg-base-100 shadow-sm transition ${
+      className={`tunnel-card tunnel-card-${status} flex h-full flex-col rounded-lg border shadow-sm transition ${
         checked
-          ? "border-primary ring-2 ring-primary/20"
-          : "border-base-300 hover:border-base-content/20"
+          ? "tunnel-card-selected border-base-300"
+          : "border-base-300 bg-base-100 hover:border-base-content/20"
       }`}
     >
       <div className="flex h-full flex-col gap-4 p-5">
@@ -2463,7 +2463,7 @@ function StatusBadge({ status }: StatusBadgeProps): ReactElement {
     status === "running"
       ? "badge badge-success badge-sm"
       : status === "stale"
-        ? "badge badge-warning badge-sm"
+        ? "badge status-badge-stale badge-sm font-semibold"
         : "badge badge-ghost badge-sm";
 
   return <span className={className}>{status}</span>;

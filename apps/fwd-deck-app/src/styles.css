@@ -98,6 +98,10 @@ input {
   border-left-width: 4px;
 }
 
+.tunnel-card-selected {
+  background: color-mix(in oklab, var(--color-primary) 8%, var(--color-base-100));
+}
+
 .tunnel-card-running {
   border-left-color: #16a34a;
 }
@@ -114,4 +118,10 @@ input {
   box-shadow:
     0 14px 34px rgba(15, 23, 42, 0.08),
     0 2px 8px rgba(15, 23, 42, 0.06);
+}
+
+.status-badge-stale {
+  border-color: color-mix(in oklab, var(--color-warning) 48%, var(--color-base-100));
+  background: color-mix(in oklab, var(--color-warning) 18%, var(--color-base-100));
+  color: #7c2d12;
 }

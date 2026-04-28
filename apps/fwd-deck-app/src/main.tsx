@@ -176,10 +176,21 @@ interface TunnelInput {
   identityFile: string | null;
 }
 
+type AppMessageKind = "success" | "error" | "info";
+
 interface AppMessage {
-  kind: "success" | "error" | "info";
+  kind: AppMessageKind;
   text: string;
 }
+
+interface OperationToastMessage {
+  id: number;
+  kind: AppMessageKind;
+  summary: string;
+  detail?: string;
+}
+
+type OperationToastInput = Omit<OperationToastMessage, "id">;
 
 interface RefreshDashboardOptions {
   silent?: boolean;
@@ -233,6 +244,7 @@ const initialFilters: TunnelFilters = {
 
 const searchDebounceMilliseconds = 200;
 const autoRefreshIntervalMilliseconds = 2_000;
+const operationToastDismissMilliseconds = 4_000;
 const missingTauriRuntimeMessage =
   "Tauri 実行環境が見つかりません。アプリの操作確認は npm run tauri dev またはビルド済みアプリから実行してください";
 
@@ -263,9 +275,11 @@ function App(): ReactElement {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<TunnelView | null>(null);
   const [message, setMessage] = useState<AppMessage | null>(null);
+  const [operationToast, setOperationToast] = useState<OperationToastMessage | null>(null);
   const [isBusy, setIsBusy] = useState<boolean>(false);
   const [hasCompletedInitialLoad, setHasCompletedInitialLoad] = useState<boolean>(false);
   const autoRefreshInFlightRef = useRef<boolean>(false);
+  const operationToastIdRef = useRef<number>(0);
 
   const stats = useMemo<DashboardStats>(() => calculateStats(dashboard), [dashboard]);
   const selectedIdList = useMemo<string[]>(() => Array.from(selectedIds), [selectedIds]);
@@ -321,6 +335,19 @@ function App(): ReactElement {
 
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isBusy, paths]);
+
+  useEffect(() => {
+    if (operationToast === null) {
+      return;
+    }
+
+    const toastId = operationToast.id;
+    const timeoutId = window.setTimeout(() => {
+      setOperationToast((current) => (current?.id === toastId ? null : current));
+    }, operationToastDismissMilliseconds);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [operationToast]);
 
   /**
    * 現在のパス設定に基づいてダッシュボードを再取得する
@@ -425,11 +452,27 @@ function App(): ReactElement {
   }, [hasCompletedInitialLoad, paths, refreshDashboard]);
 
   /**
+   * 操作結果トーストを表示する
+   */
+  function showOperationToast(message: OperationToastInput): void {
+    operationToastIdRef.current += 1;
+    setMessage(null);
+    setOperationToast({ ...message, id: operationToastIdRef.current });
+  }
+
+  /**
+   * 表示中の操作結果トーストを閉じる
+   */
+  function dismissOperationToast(): void {
+    setOperationToast(null);
+  }
+
+  /**
    * 指定 ID のトンネルを開始する
    */
   async function startSelected(ids: string[]): Promise<void> {
     if (ids.length === 0) {
-      setMessage({ kind: "info", text: "開始するトンネルを選択してください" });
+      showOperationToast({ kind: "info", summary: "開始するトンネルを選択してください" });
       return;
     }
 
@@ -444,7 +487,7 @@ function App(): ReactElement {
    */
   async function stopSelected(ids: string[]): Promise<void> {
     if (ids.length === 0) {
-      setMessage({ kind: "info", text: "停止するトンネルを選択してください" });
+      showOperationToast({ kind: "info", summary: "停止するトンネルを選択してください" });
       return;
     }
 
@@ -477,9 +520,9 @@ function App(): ReactElement {
       });
 
       await refreshDashboard(paths, { silent: true });
-      setMessage(operationMessage(report));
+      showOperationToast(operationMessage(report));
     } catch (error) {
-      setMessage({ kind: "error", text: stringifyError(error) });
+      showOperationToast({ kind: "error", summary: stringifyError(error) });
     } finally {
       setIsBusy(false);
     }
@@ -492,9 +535,9 @@ function App(): ReactElement {
     event.preventDefault();
 
     if (form.scope === "local" && paths.workspacePath.trim().length === 0) {
-      setMessage({
+      showOperationToast({
         kind: "error",
-        text: "local 設定に追加するにはワークスペースを選択してください",
+        summary: "local 設定に追加するにはワークスペースを選択してください",
       });
       return;
     }
@@ -503,7 +546,7 @@ function App(): ReactElement {
     try {
       tunnel = formToTunnelInput(form);
     } catch (error) {
-      setMessage({ kind: "error", text: stringifyError(error) });
+      showOperationToast({ kind: "error", summary: stringifyError(error) });
       return;
     }
 
@@ -519,10 +562,10 @@ function App(): ReactElement {
       setDashboard(loaded);
       setPaths(loaded.paths);
       setForm({ ...initialForm, scope: form.scope });
-      setMessage({ kind: "success", text: `${tunnel.id} を設定に追加しました` });
+      showOperationToast({ kind: "success", summary: `${tunnel.id} を設定に追加しました` });
       setActiveView("dashboard");
     } catch (error) {
-      setMessage({ kind: "error", text: stringifyError(error) });
+      showOperationToast({ kind: "error", summary: stringifyError(error) });
     } finally {
       setIsBusy(false);
     }
@@ -545,9 +588,9 @@ function App(): ReactElement {
       setDashboard(loaded);
       setPaths(loaded.paths);
       setSelectedIds((current) => removeSelection(current, tunnel.id));
-      setMessage({ kind: "success", text: `${tunnel.id} を設定から削除しました` });
+      showOperationToast({ kind: "success", summary: `${tunnel.id} を設定から削除しました` });
     } catch (error) {
-      setMessage({ kind: "error", text: stringifyError(error) });
+      showOperationToast({ kind: "error", summary: stringifyError(error) });
     } finally {
       setIsBusy(false);
     }
@@ -789,6 +832,7 @@ function App(): ReactElement {
         onCancel={() => setDeleteTarget(null)}
         onConfirm={(tunnel) => void removeTunnel(tunnel)}
       />
+      <ToastViewport toast={operationToast} onDismiss={dismissOperationToast} />
     </main>
   );
 }
@@ -1441,35 +1485,12 @@ interface AlertMessageProps {
  * 通知メッセージを状態別の視認性で表示する
  */
 function AlertMessage({ kind, children }: AlertMessageProps): ReactElement {
-  const iconClassName =
-    kind === "success"
-      ? "text-[#047857]"
-      : kind === "warning"
-        ? "text-[#b45309]"
-        : kind === "error"
-          ? "text-[#b91c1c]"
-          : "text-[#1d4ed8]";
-  const toneClassName =
-    kind === "success"
-      ? "border-[#86efac] bg-[#ecfdf3]"
-      : kind === "warning"
-        ? "border-[#f59e0b] bg-[#fff7dc]"
-        : kind === "error"
-          ? "border-[#fca5a5] bg-[#fef2f2]"
-          : "border-[#93c5fd] bg-[#eff6ff]";
-  const icon =
-    kind === "success" ? (
-      <CheckCircle2 className={iconClassName} size={18} />
-    ) : (
-      <AlertTriangle className={iconClassName} size={18} />
-    );
-
   return (
     <div
-      className={`flex items-center gap-3 rounded-lg border px-4 py-3 text-sm text-base-content shadow-sm ${toneClassName}`}
+      className={`flex items-center gap-3 rounded-lg border px-4 py-3 text-sm text-base-content shadow-sm ${alertToneClassName(kind)}`}
       role={kind === "error" ? "alert" : "status"}
     >
-      <span className="shrink-0">{icon}</span>
+      <span className="shrink-0">{alertIcon(kind, 18)}</span>
       <div className="min-w-0 flex-1">{children}</div>
     </div>
   );
@@ -1761,7 +1782,7 @@ interface MessagePanelProps {
 }
 
 /**
- * 操作結果メッセージを表示する
+ * ページ全体の状態メッセージを表示する
  */
 function MessagePanel({ message }: MessagePanelProps): ReactElement | null {
   if (message === null) {
@@ -1770,6 +1791,62 @@ function MessagePanel({ message }: MessagePanelProps): ReactElement | null {
 
   const kind = message.kind === "error" ? "error" : message.kind === "success" ? "success" : "info";
   return <AlertMessage kind={kind}>{message.text}</AlertMessage>;
+}
+
+interface ToastViewportProps {
+  toast: OperationToastMessage | null;
+  onDismiss: () => void;
+}
+
+/**
+ * 操作結果トーストの固定表示領域を描画する
+ */
+function ToastViewport({ toast, onDismiss }: ToastViewportProps): ReactElement | null {
+  if (toast === null) {
+    return null;
+  }
+
+  return (
+    <section className="pointer-events-none fixed top-4 right-4 left-4 z-[60] sm:left-auto sm:w-[30rem]">
+      <OperationToast toast={toast} onDismiss={onDismiss} />
+    </section>
+  );
+}
+
+interface OperationToastProps {
+  toast: OperationToastMessage;
+  onDismiss: () => void;
+}
+
+/**
+ * 操作結果の要約と詳細をトーストとして表示する
+ */
+function OperationToast({ toast, onDismiss }: OperationToastProps): ReactElement {
+  return (
+    <div
+      className={`pointer-events-auto flex max-h-[min(22rem,calc(100vh-2rem))] w-full overflow-hidden rounded-lg border px-4 py-3 text-sm text-base-content shadow-lg ${alertToneClassName(toast.kind)}`}
+      role={toast.kind === "error" ? "alert" : "status"}
+    >
+      <span className="mt-0.5 shrink-0">{alertIcon(toast.kind, 20)}</span>
+      <div className="min-w-0 flex-1 px-3">
+        <p className="[overflow-wrap:anywhere] leading-6 font-semibold">{toast.summary}</p>
+        {toast.detail ? (
+          <p className="mt-1 max-h-52 overflow-auto [overflow-wrap:anywhere] leading-6 whitespace-pre-wrap text-base-content/80">
+            {toast.detail}
+          </p>
+        ) : null}
+      </div>
+      <button
+        type="button"
+        className="btn btn-ghost btn-square btn-xs -mt-1 -mr-2 shrink-0"
+        onClick={onDismiss}
+        aria-label="通知を閉じる"
+        title="通知を閉じる"
+      >
+        <X size={14} />
+      </button>
+    </div>
+  );
 }
 
 interface TunnelDeckProps {
@@ -2852,22 +2929,62 @@ function toggleTag(current: string[], tag: string): string[] {
 /**
  * 操作結果を通知文へ変換する
  */
-function operationMessage(report: OperationReport): AppMessage {
+function operationMessage(report: OperationReport): OperationToastInput {
   const successCount = report.succeeded.length;
   const failureCount = report.failed.length;
 
   if (failureCount === 0) {
     return {
       kind: "success",
-      text: `${successCount} 件の操作が完了しました`,
+      summary: `${successCount} 件の操作が完了しました`,
     };
   }
 
-  const failed = report.failed.map((failure) => `${failure.id}: ${failure.message}`).join(" / ");
+  const failed = report.failed.map((failure) => `${failure.id}: ${failure.message}`).join("\n");
   return {
     kind: successCount > 0 ? "info" : "error",
-    text: `${successCount} 件成功、${failureCount} 件失敗しました。${failed}`,
+    summary: `${successCount} 件成功、${failureCount} 件失敗しました`,
+    detail: failed,
   };
+}
+
+/**
+ * 通知種別に対応する配色クラスを取得する
+ */
+function alertToneClassName(kind: AlertMessageProps["kind"]): string {
+  if (kind === "success") {
+    return "border-[#86efac] bg-[#ecfdf3]";
+  }
+
+  if (kind === "warning") {
+    return "border-[#f59e0b] bg-[#fff7dc]";
+  }
+
+  if (kind === "error") {
+    return "border-[#fca5a5] bg-[#fef2f2]";
+  }
+
+  return "border-[#93c5fd] bg-[#eff6ff]";
+}
+
+/**
+ * 通知種別に対応するアイコンを生成する
+ */
+function alertIcon(kind: AlertMessageProps["kind"], size: number): ReactElement {
+  const iconClassName =
+    kind === "success"
+      ? "text-[#047857]"
+      : kind === "warning"
+        ? "text-[#b45309]"
+        : kind === "error"
+          ? "text-[#b91c1c]"
+          : "text-[#1d4ed8]";
+
+  if (kind === "success") {
+    return <CheckCircle2 className={iconClassName} size={size} />;
+  }
+
+  return <AlertTriangle className={iconClassName} size={size} />;
 }
 
 /**

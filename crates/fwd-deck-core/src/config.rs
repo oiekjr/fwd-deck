@@ -12,6 +12,10 @@ use thiserror::Error;
 const GLOBAL_CONFIG_RELATIVE_PATH: &str = ".config/fwd-deck/config.toml";
 const LOCAL_CONFIG_FILE_NAME: &str = "fwd-deck.toml";
 pub const DEFAULT_LOCAL_HOST: &str = "127.0.0.1";
+pub const DEFAULT_CONNECT_TIMEOUT_SECONDS: u32 = 15;
+pub const DEFAULT_SERVER_ALIVE_INTERVAL_SECONDS: u32 = 30;
+pub const DEFAULT_SERVER_ALIVE_COUNT_MAX: u32 = 3;
+pub const DEFAULT_START_GRACE_MILLISECONDS: u64 = 300;
 
 /// 読み込む設定ファイルの位置を表現する
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +63,92 @@ impl ConfigSource {
     }
 }
 
+/// TOML に記述するタイムアウト設定を表現する
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TimeoutConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_seconds: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_alive_interval_seconds: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_alive_count_max: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_grace_milliseconds: Option<u64>,
+}
+
+impl TimeoutConfig {
+    /// TOML 出力を省略できる空設定かを判定する
+    pub fn is_empty(&self) -> bool {
+        self.connect_timeout_seconds.is_none()
+            && self.server_alive_interval_seconds.is_none()
+            && self.server_alive_count_max.is_none()
+            && self.start_grace_milliseconds.is_none()
+    }
+
+    /// 優先度の高い設定で上書きしたタイムアウト設定を生成する
+    fn apply_overrides(&self, overrides: &Self) -> Self {
+        Self {
+            connect_timeout_seconds: overrides
+                .connect_timeout_seconds
+                .or(self.connect_timeout_seconds),
+            server_alive_interval_seconds: overrides
+                .server_alive_interval_seconds
+                .or(self.server_alive_interval_seconds),
+            server_alive_count_max: overrides
+                .server_alive_count_max
+                .or(self.server_alive_count_max),
+            start_grace_milliseconds: overrides
+                .start_grace_milliseconds
+                .or(self.start_grace_milliseconds),
+        }
+    }
+
+    /// 既定値を補って実行時タイムアウト設定を生成する
+    fn resolve_with_defaults(&self) -> ResolvedTimeoutConfig {
+        self.resolve_with_base(ResolvedTimeoutConfig::default())
+    }
+
+    /// 基準値を補って実行時タイムアウト設定を生成する
+    fn resolve_with_base(&self, base: ResolvedTimeoutConfig) -> ResolvedTimeoutConfig {
+        ResolvedTimeoutConfig {
+            connect_timeout_seconds: self
+                .connect_timeout_seconds
+                .unwrap_or(base.connect_timeout_seconds),
+            server_alive_interval_seconds: self
+                .server_alive_interval_seconds
+                .unwrap_or(base.server_alive_interval_seconds),
+            server_alive_count_max: self
+                .server_alive_count_max
+                .unwrap_or(base.server_alive_count_max),
+            start_grace_milliseconds: self
+                .start_grace_milliseconds
+                .unwrap_or(base.start_grace_milliseconds),
+        }
+    }
+}
+
+/// 実行時に使用する解決済みタイムアウト設定を表現する
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedTimeoutConfig {
+    pub connect_timeout_seconds: u32,
+    pub server_alive_interval_seconds: u32,
+    pub server_alive_count_max: u32,
+    pub start_grace_milliseconds: u64,
+}
+
+impl Default for ResolvedTimeoutConfig {
+    /// 未指定時のタイムアウト設定を初期化する
+    fn default() -> Self {
+        Self {
+            connect_timeout_seconds: DEFAULT_CONNECT_TIMEOUT_SECONDS,
+            server_alive_interval_seconds: DEFAULT_SERVER_ALIVE_INTERVAL_SECONDS,
+            server_alive_count_max: DEFAULT_SERVER_ALIVE_COUNT_MAX,
+            start_grace_milliseconds: DEFAULT_START_GRACE_MILLISECONDS,
+        }
+    }
+}
+
 /// TOML に記述するトンネル設定を表現する
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +169,8 @@ pub struct TunnelConfig {
     pub ssh_host: String,
     pub ssh_port: Option<u16>,
     pub identity_file: Option<String>,
+    #[serde(default, skip_serializing_if = "TimeoutConfig::is_empty")]
+    pub timeouts: TimeoutConfig,
 }
 
 impl TunnelConfig {
@@ -92,21 +184,38 @@ impl TunnelConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedConfigFile {
     pub source: ConfigSource,
+    pub timeouts: TimeoutConfig,
     pub tunnels: Vec<TunnelConfig>,
 }
 
 impl LoadedConfigFile {
     /// 読み込み済み設定ファイルを初期化する
     pub fn new(source: ConfigSource, tunnels: Vec<TunnelConfig>) -> Self {
-        Self { source, tunnels }
+        Self::with_timeouts(source, TimeoutConfig::default(), tunnels)
+    }
+
+    /// タイムアウト設定を含む読み込み済み設定ファイルを初期化する
+    pub fn with_timeouts(
+        source: ConfigSource,
+        timeouts: TimeoutConfig,
+        tunnels: Vec<TunnelConfig>,
+    ) -> Self {
+        Self {
+            source,
+            timeouts,
+            tunnels,
+        }
     }
 
     /// 設定ファイル内のトンネル設定を統合用の形式へ変換する
-    fn resolved_tunnels(&self) -> impl Iterator<Item = ResolvedTunnelConfig> + '_ {
-        self.tunnels
-            .iter()
-            .cloned()
-            .map(|tunnel| ResolvedTunnelConfig::new(self.source.clone(), tunnel))
+    fn resolved_tunnels(
+        &self,
+        base_timeouts: ResolvedTimeoutConfig,
+    ) -> impl Iterator<Item = ResolvedTunnelConfig> + '_ {
+        self.tunnels.iter().cloned().map(move |tunnel| {
+            let timeouts = tunnel.timeouts.resolve_with_base(base_timeouts);
+            ResolvedTunnelConfig::new_with_timeouts(self.source.clone(), tunnel, timeouts)
+        })
     }
 }
 
@@ -115,12 +224,26 @@ impl LoadedConfigFile {
 pub struct ResolvedTunnelConfig {
     pub source: ConfigSource,
     pub tunnel: TunnelConfig,
+    pub timeouts: ResolvedTimeoutConfig,
 }
 
 impl ResolvedTunnelConfig {
     /// 統合後のトンネル設定を初期化する
     pub fn new(source: ConfigSource, tunnel: TunnelConfig) -> Self {
-        Self { source, tunnel }
+        Self::new_with_timeouts(source, tunnel, ResolvedTimeoutConfig::default())
+    }
+
+    /// 解決済みタイムアウト設定を含む統合後のトンネル設定を初期化する
+    pub fn new_with_timeouts(
+        source: ConfigSource,
+        tunnel: TunnelConfig,
+        timeouts: ResolvedTimeoutConfig,
+    ) -> Self {
+        Self {
+            source,
+            tunnel,
+            timeouts,
+        }
     }
 }
 
@@ -146,6 +269,8 @@ impl EffectiveConfig {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfigFile {
+    #[serde(default, skip_serializing_if = "TimeoutConfig::is_empty")]
+    timeouts: TimeoutConfig,
     #[serde(default)]
     tunnels: Vec<TunnelConfig>,
 }
@@ -315,8 +440,9 @@ pub fn read_config_file(
             source,
         })?;
 
-    Ok(Some(LoadedConfigFile::new(
+    Ok(Some(LoadedConfigFile::with_timeouts(
         ConfigSource::new(kind, path.to_path_buf()),
+        raw.timeouts,
         normalize_tunnels(raw.tunnels),
     )))
 }
@@ -338,7 +464,7 @@ pub fn add_tunnel_to_config_file(
     }
 
     file.tunnels.push(tunnel);
-    write_config_file(path, &file.tunnels)?;
+    write_config_file(path, &file)?;
 
     Ok(file)
 }
@@ -358,7 +484,7 @@ pub fn remove_tunnel_from_config_file(
     };
 
     file.tunnels.remove(position);
-    write_config_file(path, &file.tunnels)?;
+    write_config_file(path, &file)?;
 
     Ok(file)
 }
@@ -479,9 +605,10 @@ fn validate_tags(config: &EffectiveConfig, report: &mut ValidationReport) {
 fn merge_tunnels(sources: &[LoadedConfigFile]) -> Vec<ResolvedTunnelConfig> {
     let mut tunnels = Vec::new();
     let mut positions = HashMap::<String, usize>::new();
+    let base_timeouts = merge_timeout_config(sources).resolve_with_defaults();
 
     for file in sources {
-        for resolved in file.resolved_tunnels() {
+        for resolved in file.resolved_tunnels(base_timeouts) {
             match positions.entry(resolved.tunnel.id.clone()) {
                 Entry::Occupied(entry) => {
                     tunnels[*entry.get()] = resolved;
@@ -495,6 +622,15 @@ fn merge_tunnels(sources: &[LoadedConfigFile]) -> Vec<ResolvedTunnelConfig> {
     }
 
     tunnels
+}
+
+/// 設定ファイルの優先順位に従って共通タイムアウト設定を統合する
+fn merge_timeout_config(sources: &[LoadedConfigFile]) -> TimeoutConfig {
+    sources
+        .iter()
+        .fold(TimeoutConfig::default(), |timeouts, file| {
+            timeouts.apply_overrides(&file.timeouts)
+        })
 }
 
 /// 存在する設定ファイルを既定の優先順位で読み込む
@@ -545,14 +681,15 @@ fn read_config_file_for_edit(
             source,
         })?;
 
-    Ok(LoadedConfigFile::new(
+    Ok(LoadedConfigFile::with_timeouts(
         ConfigSource::new(kind, path.to_path_buf()),
+        raw.timeouts,
         normalize_tunnels(raw.tunnels),
     ))
 }
 
 /// 設定ファイルへトンネル一覧を書き込む
-fn write_config_file(path: &Path, tunnels: &[TunnelConfig]) -> Result<(), ConfigEditError> {
+fn write_config_file(path: &Path, file: &LoadedConfigFile) -> Result<(), ConfigEditError> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -564,7 +701,8 @@ fn write_config_file(path: &Path, tunnels: &[TunnelConfig]) -> Result<(), Config
     }
 
     let raw = RawConfigFile {
-        tunnels: normalize_tunnels(tunnels.to_vec()),
+        timeouts: file.timeouts.clone(),
+        tunnels: normalize_tunnels(file.tunnels.clone()),
     };
     let content = toml::to_string_pretty(&raw).map_err(|source| ConfigEditError::Serialize {
         path: path.to_path_buf(),
@@ -782,6 +920,149 @@ ssh_host = "local-bastion.example.com"
         assert_eq!(tunnel.effective_local_host(), "127.0.0.1");
     }
 
+    /// タイムアウト未指定時に既定値が使われることを検証する
+    #[test]
+    fn timeout_settings_fall_back_to_defaults_when_omitted() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        fs::write(
+            &path,
+            r#"
+[[tunnels]]
+id = "db"
+local_port = 15432
+remote_host = "db.internal"
+remote_port = 5432
+ssh_user = "user"
+ssh_host = "bastion.example.com"
+"#,
+        )
+        .expect("write configuration");
+
+        let config = load_effective_config(&ConfigPaths::new(None, path)).expect("load config");
+
+        assert_eq!(config.tunnels[0].timeouts, ResolvedTimeoutConfig::default());
+    }
+
+    /// 共通タイムアウト設定が各トンネルへ適用されることを検証する
+    #[test]
+    fn top_level_timeout_settings_apply_to_tunnels() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        fs::write(
+            &path,
+            r#"
+[timeouts]
+connect_timeout_seconds = 20
+server_alive_interval_seconds = 40
+server_alive_count_max = 4
+start_grace_milliseconds = 500
+
+[[tunnels]]
+id = "db"
+local_port = 15432
+remote_host = "db.internal"
+remote_port = 5432
+ssh_user = "user"
+ssh_host = "bastion.example.com"
+"#,
+        )
+        .expect("write configuration");
+
+        let config = load_effective_config(&ConfigPaths::new(None, path)).expect("load config");
+
+        assert_eq!(
+            config.tunnels[0].timeouts,
+            ResolvedTimeoutConfig {
+                connect_timeout_seconds: 20,
+                server_alive_interval_seconds: 40,
+                server_alive_count_max: 4,
+                start_grace_milliseconds: 500,
+            }
+        );
+    }
+
+    /// トンネル固有タイムアウト設定が共通設定を上書きすることを検証する
+    #[test]
+    fn tunnel_timeout_settings_override_top_level_settings() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        fs::write(
+            &path,
+            r#"
+[timeouts]
+connect_timeout_seconds = 20
+server_alive_interval_seconds = 40
+server_alive_count_max = 4
+start_grace_milliseconds = 500
+
+[[tunnels]]
+id = "db"
+local_port = 15432
+remote_host = "db.internal"
+remote_port = 5432
+ssh_user = "user"
+ssh_host = "bastion.example.com"
+
+[tunnels.timeouts]
+connect_timeout_seconds = 5
+start_grace_milliseconds = 50
+"#,
+        )
+        .expect("write configuration");
+
+        let config = load_effective_config(&ConfigPaths::new(None, path)).expect("load config");
+
+        assert_eq!(
+            config.tunnels[0].timeouts,
+            ResolvedTimeoutConfig {
+                connect_timeout_seconds: 5,
+                server_alive_interval_seconds: 40,
+                server_alive_count_max: 4,
+                start_grace_milliseconds: 50,
+            }
+        );
+    }
+
+    /// ローカル設定の共通タイムアウトがグローバル設定を上書きすることを検証する
+    #[test]
+    fn local_top_level_timeout_settings_override_global_settings() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let global_path = temp_dir.path().join("global.toml");
+        let local_path = temp_dir.path().join("fwd-deck.toml");
+        fs::write(
+            &global_path,
+            r#"
+[timeouts]
+connect_timeout_seconds = 20
+server_alive_interval_seconds = 40
+
+[[tunnels]]
+id = "db"
+local_port = 15432
+remote_host = "db.internal"
+remote_port = 5432
+ssh_user = "user"
+ssh_host = "bastion.example.com"
+"#,
+        )
+        .expect("write global configuration");
+        fs::write(
+            &local_path,
+            r#"
+[timeouts]
+connect_timeout_seconds = 10
+"#,
+        )
+        .expect("write local configuration");
+
+        let config = load_effective_config(&ConfigPaths::new(Some(global_path), local_path))
+            .expect("load configuration");
+
+        assert_eq!(config.tunnels[0].timeouts.connect_timeout_seconds, 10);
+        assert_eq!(config.tunnels[0].timeouts.server_alive_interval_seconds, 40);
+    }
+
     /// 同一設定ファイル内の ID 重複が検証エラーになることを検証する
     #[test]
     fn validation_reports_duplicate_ids_in_same_file() {
@@ -900,6 +1181,62 @@ ssh_host = "local-bastion.example.com"
         );
     }
 
+    /// タイムアウト設定を TOML として保存し、同じ内容で読み戻せることを検証する
+    #[test]
+    fn timeout_settings_round_trip_as_toml() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        let mut tunnel = tunnel("db", 15432);
+        tunnel.timeouts.connect_timeout_seconds = Some(5);
+        tunnel.timeouts.start_grace_milliseconds = Some(50);
+
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel).expect("add tunnel");
+        let loaded = read_config_file(&path, ConfigSourceKind::Local)
+            .expect("read configuration")
+            .expect("configuration file exists");
+        let content = fs::read_to_string(path).expect("read configuration content");
+
+        assert_eq!(loaded.tunnels[0].timeouts.connect_timeout_seconds, Some(5));
+        assert_eq!(
+            loaded.tunnels[0].timeouts.start_grace_milliseconds,
+            Some(50)
+        );
+        assert!(content.contains("[[tunnels]]"));
+        assert!(content.contains("[tunnels.timeouts]"));
+    }
+
+    /// 設定編集時に共通タイムアウト設定が保持されることを検証する
+    #[test]
+    fn add_tunnel_preserves_top_level_timeout_settings() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        fs::write(
+            &path,
+            r#"
+[timeouts]
+connect_timeout_seconds = 20
+
+[[tunnels]]
+id = "db"
+local_port = 15432
+remote_host = "db.internal"
+remote_port = 5432
+ssh_user = "user"
+ssh_host = "bastion.example.com"
+"#,
+        )
+        .expect("write configuration");
+
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel("cache", 16379))
+            .expect("add tunnel");
+        let loaded = read_config_file(&path, ConfigSourceKind::Local)
+            .expect("read configuration")
+            .expect("configuration file exists");
+
+        assert_eq!(loaded.timeouts.connect_timeout_seconds, Some(20));
+        assert_eq!(loaded.tunnels.len(), 2);
+    }
+
     /// タグなし設定では保存時に tags を出力しないことを検証する
     #[test]
     fn empty_tags_are_omitted_when_serializing() {
@@ -1006,6 +1343,7 @@ ssh_host = "local-bastion.example.com"
             ssh_host: "bastion.example.com".to_owned(),
             ssh_port: None,
             identity_file: None,
+            timeouts: TimeoutConfig::default(),
         }
     }
 }

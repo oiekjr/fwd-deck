@@ -50,10 +50,14 @@ cargo run -p fwd-deck-cli --bin fwd-deck -- validate
 同じ `id` がある場合は、ローカル設定がグローバル設定を上書きします。
 `local_host` を省略した場合は `127.0.0.1` として扱います。
 `tags` は小文字 ASCII の `a-z`, `0-9`, `-`, `_`, `.`, `/` を使えます。
+`[timeouts]` は全体共通のタイムアウト設定です。
+各 `[[tunnels]]` の `[tunnels.timeouts]` は、そのトンネルだけの上書き設定です。
+タイムアウト設定を省略した場合は、`connect_timeout_seconds = 15`, `server_alive_interval_seconds = 30`, `server_alive_count_max = 3`, `start_grace_milliseconds = 300` を使います。
 `local_port` が `1024` 未満の場合、`validate` は権限が必要になる可能性を warning として表示します。
 `fwd-deck.toml` はローカル環境用の設定として git 管理から除外しています。
 `config add` は対象ファイルが存在しない場合に新規作成します。
 `config add` は、既存の有効設定と重複する `id` と `local_port` を入力時に拒否します。
+`config add` はタイムアウト設定を入力しないため、必要な場合は TOML を直接編集します。
 `config remove` は対象ファイル内のトンネルだけを削除対象として表示します。
 
 ```sh
@@ -61,6 +65,12 @@ cp fwd-deck.example.toml fwd-deck.toml
 ```
 
 ```toml
+[timeouts]
+connect_timeout_seconds = 15
+server_alive_interval_seconds = 30
+server_alive_count_max = 3
+start_grace_milliseconds = 300
+
 [[tunnels]]
 id = "dev-db"
 description = "Development database"
@@ -73,6 +83,9 @@ ssh_user = "ec2-user"
 ssh_host = "bastion.example.com"
 ssh_port = 22
 identity_file = "~/.ssh/id_ed25519"
+
+[tunnels.timeouts]
+connect_timeout_seconds = 10
 ```
 
 ## 状態ファイル

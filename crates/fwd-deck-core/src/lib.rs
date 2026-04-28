@@ -6,7 +6,9 @@ pub mod tunnel;
 
 pub use config::{
     ConfigEditError, ConfigLoadError, ConfigPaths, ConfigSource, ConfigSourceKind,
-    DEFAULT_LOCAL_HOST, EffectiveConfig, ResolvedTunnelConfig, TunnelConfig, ValidationError,
+    DEFAULT_CONNECT_TIMEOUT_SECONDS, DEFAULT_LOCAL_HOST, DEFAULT_SERVER_ALIVE_COUNT_MAX,
+    DEFAULT_SERVER_ALIVE_INTERVAL_SECONDS, DEFAULT_START_GRACE_MILLISECONDS, EffectiveConfig,
+    ResolvedTimeoutConfig, ResolvedTunnelConfig, TimeoutConfig, TunnelConfig, ValidationError,
     ValidationReport, ValidationWarning, add_tunnel_to_config_file, default_global_config_path,
     default_local_config_path, filter_tunnels_by_tags, load_effective_config, normalize_tag,
     normalize_tags, read_config_file, remove_tunnel_from_config_file, tag_is_valid,

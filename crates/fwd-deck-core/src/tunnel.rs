@@ -10,14 +10,9 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    ResolvedTunnelConfig, TunnelState,
+    ResolvedTimeoutConfig, ResolvedTunnelConfig, TunnelState,
     state::{StateFileError, read_state_file, write_state_file},
 };
-
-const SSH_CONNECT_TIMEOUT_SECONDS: &str = "15";
-const SSH_SERVER_ALIVE_INTERVAL_SECONDS: &str = "30";
-const SSH_SERVER_ALIVE_COUNT_MAX: &str = "3";
-const SSH_START_GRACE_PERIOD: Duration = Duration::from_millis(300);
 
 /// 起動中プロセスの状態を表現する
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +93,7 @@ pub fn start_tunnel(
     ensure_local_endpoint_available(resolved)?;
 
     let mut child = spawn_ssh_tunnel(resolved)?;
-    thread::sleep(SSH_START_GRACE_PERIOD);
+    thread::sleep(start_grace_period(resolved.timeouts));
 
     if let Some(status) = child
         .try_wait()
@@ -170,6 +165,7 @@ pub fn stop_tunnel(id: &str, state_path: &Path) -> Result<StoppedTunnel, TunnelR
 /// SSH 起動引数を構築する
 fn build_ssh_args(resolved: &ResolvedTunnelConfig) -> Vec<String> {
     let tunnel = &resolved.tunnel;
+    let timeouts = resolved.timeouts;
     let local_forward = format!(
         "{}:{}:{}:{}",
         tunnel.effective_local_host(),
@@ -184,11 +180,14 @@ fn build_ssh_args(resolved: &ResolvedTunnelConfig) -> Vec<String> {
         "-o".to_owned(),
         "ExitOnForwardFailure=yes".to_owned(),
         "-o".to_owned(),
-        format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}"),
+        format!("ConnectTimeout={}", timeouts.connect_timeout_seconds),
         "-o".to_owned(),
-        format!("ServerAliveInterval={SSH_SERVER_ALIVE_INTERVAL_SECONDS}"),
+        format!(
+            "ServerAliveInterval={}",
+            timeouts.server_alive_interval_seconds
+        ),
         "-o".to_owned(),
-        format!("ServerAliveCountMax={SSH_SERVER_ALIVE_COUNT_MAX}"),
+        format!("ServerAliveCountMax={}", timeouts.server_alive_count_max),
     ];
 
     if let Some(port) = tunnel.ssh_port {
@@ -204,6 +203,11 @@ fn build_ssh_args(resolved: &ResolvedTunnelConfig) -> Vec<String> {
     args.push(format!("{}@{}", tunnel.ssh_user, tunnel.ssh_host));
 
     args
+}
+
+/// 起動後の早期終了確認までの待機時間を取得する
+fn start_grace_period(timeouts: ResolvedTimeoutConfig) -> Duration {
+    Duration::from_millis(timeouts.start_grace_milliseconds)
 }
 
 /// SSH 子プロセスを起動する
@@ -300,7 +304,7 @@ fn expand_home_path(path: &str) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::{ConfigSource, ConfigSourceKind, TunnelConfig};
+    use crate::{ConfigSource, ConfigSourceKind, TimeoutConfig, TunnelConfig};
 
     use super::*;
 
@@ -316,6 +320,39 @@ mod tests {
         assert!(args.contains(&"127.0.0.1:15432:db.internal:5432".to_owned()));
         assert!(args.contains(&"ConnectTimeout=15".to_owned()));
         assert!(args.contains(&"user@bastion.example.com".to_owned()));
+    }
+
+    /// SSH 起動引数が解決済みタイムアウト設定から生成されることを検証する
+    #[test]
+    fn build_ssh_args_uses_timeout_settings() {
+        let mut resolved = resolved_tunnel();
+        resolved.timeouts = ResolvedTimeoutConfig {
+            connect_timeout_seconds: 5,
+            server_alive_interval_seconds: 10,
+            server_alive_count_max: 2,
+            start_grace_milliseconds: 50,
+        };
+
+        let args = build_ssh_args(&resolved);
+
+        assert!(args.contains(&"ConnectTimeout=5".to_owned()));
+        assert!(args.contains(&"ServerAliveInterval=10".to_owned()));
+        assert!(args.contains(&"ServerAliveCountMax=2".to_owned()));
+    }
+
+    /// 起動確認待機時間が解決済みタイムアウト設定から生成されることを検証する
+    #[test]
+    fn start_grace_period_uses_timeout_settings() {
+        let timeouts = ResolvedTimeoutConfig {
+            connect_timeout_seconds: 5,
+            server_alive_interval_seconds: 10,
+            server_alive_count_max: 2,
+            start_grace_milliseconds: 50,
+        };
+
+        let duration = start_grace_period(timeouts);
+
+        assert_eq!(duration, Duration::from_millis(50));
     }
 
     /// `~/` 形式の identity_file が HOME 配下へ展開されることを検証する
@@ -344,6 +381,7 @@ mod tests {
                 ssh_host: "bastion.example.com".to_owned(),
                 ssh_port: None,
                 identity_file: Some("~/.ssh/id_ed25519".to_owned()),
+                timeouts: TimeoutConfig::default(),
             },
         )
     }

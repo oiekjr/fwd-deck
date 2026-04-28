@@ -1,3 +1,9 @@
+[timeouts]
+connect_timeout_seconds = 15
+server_alive_interval_seconds = 30
+server_alive_count_max = 3
+start_grace_milliseconds = 300
+
 [[tunnels]]
 id = "dev-db"
 description = "Development database"
@@ -10,3 +16,6 @@ ssh_user = "ec2-user"
 ssh_host = "bastion.example.com"
 ssh_port = 22
 identity_file = "~/.ssh/id_ed25519"
+
+[tunnels.timeouts]
+connect_timeout_seconds = 10

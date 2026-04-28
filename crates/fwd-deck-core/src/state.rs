@@ -223,6 +223,7 @@ mod tests {
                 ssh_host: "bastion.example.com".to_owned(),
                 ssh_port: None,
                 identity_file: None,
+                timeouts: crate::TimeoutConfig::default(),
             },
         );
 

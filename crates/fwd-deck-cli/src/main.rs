@@ -10,7 +10,7 @@ use std::{
 use clap::{Parser, Subcommand, ValueEnum};
 use fwd_deck_core::{
     ConfigEditError, ConfigPaths, ConfigSourceKind, DEFAULT_LOCAL_HOST, EffectiveConfig,
-    ProcessState, ResolvedTunnelConfig, StartedTunnel, StoppedTunnel, TunnelConfig,
+    ProcessState, ResolvedTunnelConfig, StartedTunnel, StoppedTunnel, TimeoutConfig, TunnelConfig,
     TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport, add_tunnel_to_config_file,
     default_global_config_path, default_local_config_path, default_state_file_path,
     filter_tunnels_by_tags, load_effective_config, normalize_tag, read_config_file,
@@ -784,6 +784,7 @@ fn prompt_tunnel_config(config: &EffectiveConfig) -> Result<TunnelConfig, CliErr
         ssh_host,
         ssh_port,
         identity_file,
+        timeouts: TimeoutConfig::default(),
     })
 }
 
@@ -1532,6 +1533,7 @@ mod tests {
             ssh_host: "bastion.example.com".to_owned(),
             ssh_port: None,
             identity_file: None,
+            timeouts: TimeoutConfig::default(),
         }
     }
 }

@@ -43,6 +43,13 @@ type ScopeFilter = "all" | ConfigScope;
 
 type AppView = "dashboard" | "add";
 
+type AppCommand =
+  | "load_dashboard"
+  | "start_tunnels"
+  | "stop_tunnels"
+  | "add_tunnel_entry"
+  | "remove_tunnel_entry";
+
 interface WorkspaceSelection {
   workspacePath: string;
   workspaceHistory: string[];
@@ -174,6 +181,12 @@ interface AppMessage {
   text: string;
 }
 
+interface TauriRuntimeWindow extends Window {
+  __TAURI_INTERNALS__?: {
+    invoke?: unknown;
+  };
+}
+
 interface TunnelFilters {
   query: string;
   status: StatusFilter;
@@ -214,6 +227,8 @@ const initialFilters: TunnelFilters = {
 };
 
 const searchDebounceMilliseconds = 200;
+const missingTauriRuntimeMessage =
+  "Tauri 実行環境が見つかりません。アプリの操作確認は npm run tauri dev またはビルド済みアプリから実行してください";
 
 const statusFilterOptions: ReadonlyArray<{ value: StatusFilter; label: string }> = [
   { value: "all", label: "All" },
@@ -243,6 +258,7 @@ function App(): ReactElement {
   const [deleteTarget, setDeleteTarget] = useState<TunnelView | null>(null);
   const [message, setMessage] = useState<AppMessage | null>(null);
   const [isBusy, setIsBusy] = useState<boolean>(false);
+  const [hasCompletedInitialLoad, setHasCompletedInitialLoad] = useState<boolean>(false);
 
   const stats = useMemo<DashboardStats>(() => calculateStats(dashboard), [dashboard]);
   const selectedIdList = useMemo<string[]>(() => Array.from(selectedIds), [selectedIds]);
@@ -272,7 +288,7 @@ function App(): ReactElement {
       setIsBusy(true);
 
       try {
-        const loaded = await invoke<DashboardState>("load_dashboard", {
+        const loaded = await invokeCommand<DashboardState>("load_dashboard", {
           paths: null,
         });
 
@@ -284,6 +300,7 @@ function App(): ReactElement {
         setMessage({ kind: "error", text: stringifyError(error) });
       } finally {
         setIsBusy(false);
+        setHasCompletedInitialLoad(true);
       }
     }
 
@@ -329,7 +346,7 @@ function App(): ReactElement {
     setIsBusy(true);
 
     try {
-      const loaded = await invoke<DashboardState>("load_dashboard", {
+      const loaded = await invokeCommand<DashboardState>("load_dashboard", {
         paths: normalizeWorkspaceSelection(nextPaths),
       });
 
@@ -393,7 +410,7 @@ function App(): ReactElement {
     setIsBusy(true);
 
     try {
-      const report = await invoke<OperationReport>(command, {
+      const report = await invokeCommand<OperationReport>(command, {
         paths: normalizeWorkspaceSelection(paths),
         targets,
       });
@@ -432,7 +449,7 @@ function App(): ReactElement {
     setIsBusy(true);
 
     try {
-      const loaded = await invoke<DashboardState>("add_tunnel_entry", {
+      const loaded = await invokeCommand<DashboardState>("add_tunnel_entry", {
         paths: normalizeWorkspaceSelection(paths),
         scope: form.scope,
         tunnel,
@@ -458,7 +475,7 @@ function App(): ReactElement {
     setIsBusy(true);
 
     try {
-      const loaded = await invoke<DashboardState>("remove_tunnel_entry", {
+      const loaded = await invokeCommand<DashboardState>("remove_tunnel_entry", {
         paths: normalizeWorkspaceSelection(paths),
         scope: tunnel.source,
         id: tunnel.id,
@@ -643,6 +660,7 @@ function App(): ReactElement {
       <div className="mx-auto flex w-full max-w-[90rem] flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
         <AppHeader
           stats={stats}
+          paths={paths}
           activeView={activeView}
           isBusy={isBusy}
           onViewChange={setActiveView}
@@ -650,13 +668,12 @@ function App(): ReactElement {
           onRefresh={() => void refreshDashboard()}
         />
 
-        <WorkspaceContextPanel paths={paths} isBusy={isBusy} onOpenSettings={openSettings} />
-
         <MessagePanel message={message} />
 
         {activeView === "dashboard" ? (
           <DashboardView
             dashboard={dashboard}
+            hasCompletedInitialLoad={hasCompletedInitialLoad}
             filteredTunnels={filteredTunnels}
             hasActiveFilters={hasActiveFilters}
             selectedIds={selectedIds}
@@ -723,6 +740,7 @@ interface DashboardStats {
 
 interface AppHeaderProps {
   stats: DashboardStats;
+  paths: WorkspaceSelection;
   activeView: AppView;
   isBusy: boolean;
   onViewChange: (view: AppView) => void;
@@ -735,6 +753,7 @@ interface AppHeaderProps {
  */
 function AppHeader({
   stats,
+  paths,
   activeView,
   isBusy,
   onViewChange,
@@ -743,21 +762,27 @@ function AppHeader({
 }: AppHeaderProps): ReactElement {
   return (
     <header className="overflow-hidden rounded-lg border border-base-300 bg-base-100 shadow-sm">
-      <div className="flex flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+      <div className="grid gap-4 px-5 py-4 xl:grid-cols-[minmax(20rem,1fr)_auto] xl:items-center">
         <div className="min-w-0">
-          <span className="text-xs font-bold uppercase tracking-wide text-primary">fwd-deck</span>
-          <h1 className="mt-1 truncate text-2xl leading-tight font-bold sm:text-3xl">
-            Port Forwarding Deck
-          </h1>
-          <p className="mt-1 text-sm text-base-content/60">
-            SSH tunnel operations for local development
-          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-bold uppercase tracking-wide text-primary">fwd-deck</span>
+            <span className="badge badge-ghost badge-sm">desktop console</span>
+          </div>
+          <div className="mt-2 flex flex-col gap-3 lg:flex-row lg:items-end">
+            <div className="min-w-0">
+              <h1 className="truncate text-2xl leading-tight font-bold">Port Forwarding Deck</h1>
+              <p className="mt-1 text-sm text-base-content/60">
+                SSH tunnel operations for local development
+              </p>
+            </div>
+            <WorkspacePill paths={paths} isBusy={isBusy} onOpenSettings={onOpenSettings} />
+          </div>
         </div>
-        <div className="flex flex-col gap-3">
-          <div className="join w-full self-start lg:w-auto lg:self-end">
+        <div className="flex flex-col gap-3 xl:items-end">
+          <div className="join w-full self-start xl:w-auto xl:self-end">
             <button
               type="button"
-              className={`btn btn-sm join-item flex-1 lg:flex-none ${
+              className={`btn btn-sm join-item flex-1 xl:flex-none ${
                 activeView === "dashboard" ? "btn-primary" : "btn-outline"
               }`}
               onClick={() => onViewChange("dashboard")}
@@ -767,7 +792,7 @@ function AppHeader({
             </button>
             <button
               type="button"
-              className={`btn btn-sm join-item flex-1 lg:flex-none ${
+              className={`btn btn-sm join-item flex-1 xl:flex-none ${
                 activeView === "add" ? "btn-primary" : "btn-outline"
               }`}
               onClick={() => onViewChange("add")}
@@ -777,7 +802,7 @@ function AppHeader({
             </button>
             <button
               type="button"
-              className="btn btn-outline btn-sm join-item flex-1 lg:flex-none"
+              className="btn btn-outline btn-sm join-item flex-1 xl:flex-none"
               onClick={onOpenSettings}
               aria-label="Settings"
               title="Settings (Cmd/Ctrl + ,)"
@@ -786,7 +811,7 @@ function AppHeader({
               Settings
             </button>
           </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-[repeat(3,minmax(7rem,1fr))_auto] lg:w-auto">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-[repeat(3,minmax(6.5rem,1fr))_auto] xl:w-auto">
             <StatusMetric label="Configured" value={stats.configured} icon={<Gauge size={17} />} />
             <StatusMetric
               label="Running"
@@ -815,59 +840,54 @@ function AppHeader({
   );
 }
 
-interface WorkspaceContextPanelProps {
+interface WorkspacePillProps {
   paths: WorkspaceSelection;
   isBusy: boolean;
   onOpenSettings: () => void;
 }
 
 /**
- * 現在の作業対象ワークスペースを表示する
+ * 現在の作業対象ワークスペースをヘッダー内へ表示する
  */
-function WorkspaceContextPanel({
-  paths,
-  isBusy,
-  onOpenSettings,
-}: WorkspaceContextPanelProps): ReactElement {
+function WorkspacePill({ paths, isBusy, onOpenSettings }: WorkspacePillProps): ReactElement {
   const workspacePath = paths.workspacePath.trim();
   const hasWorkspace = workspacePath.length > 0;
 
   return (
-    <section className="rounded-lg border border-base-300 bg-base-100 shadow-sm">
-      <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex min-w-0 items-center gap-3">
-          <span
-            className={`rounded-md p-2 ${
-              hasWorkspace ? "bg-primary/10 text-primary" : "bg-warning/10 text-warning"
-            }`}
-          >
-            <FolderOpen size={17} />
-          </span>
-          <div className="min-w-0">
-            <div className="text-xs font-bold uppercase tracking-wide text-base-content/50">
-              Workspace
-            </div>
-            <div
-              className={`mt-0.5 truncate font-mono text-xs ${
-                hasWorkspace ? "text-base-content/85" : "text-warning"
-              }`}
-              title={workspacePath || "Not selected"}
-            >
-              {workspacePath || "Not selected"}
-            </div>
-          </div>
+    <div
+      className={`grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md border px-3 py-2 lg:w-[28rem] ${
+        hasWorkspace ? "border-base-300 bg-base-200/50" : "border-warning/40 bg-warning/10"
+      }`}
+    >
+      <span
+        className={`rounded-md p-2 ${
+          hasWorkspace ? "bg-primary/10 text-primary" : "bg-warning/15 text-warning"
+        }`}
+      >
+        <FolderOpen size={17} />
+      </span>
+      <div className="min-w-0">
+        <div className="text-[0.65rem] font-bold uppercase tracking-wide text-base-content/50">
+          Workspace
         </div>
-        <button
-          type="button"
-          className="btn btn-outline btn-sm self-start sm:self-auto"
-          onClick={onOpenSettings}
-          disabled={isBusy}
+        <div
+          className={`mt-0.5 truncate font-mono text-xs ${
+            hasWorkspace ? "text-base-content/85" : "text-warning"
+          }`}
+          title={workspacePath || "Not selected"}
         >
-          <Settings2 size={15} />
-          Settings
-        </button>
+          {workspacePath || "Not selected"}
+        </div>
       </div>
-    </section>
+      <IconButton
+        label="ワークスペース設定"
+        className="btn btn-square btn-ghost btn-sm"
+        onClick={onOpenSettings}
+        disabled={isBusy}
+      >
+        <Settings2 size={15} />
+      </IconButton>
+    </div>
   );
 }
 
@@ -930,6 +950,7 @@ function IconButton({
 
 interface DashboardViewProps {
   dashboard: DashboardState | null;
+  hasCompletedInitialLoad: boolean;
   filteredTunnels: TunnelView[];
   hasActiveFilters: boolean;
   selectedIds: Set<string>;
@@ -961,6 +982,7 @@ interface DashboardViewProps {
  */
 function DashboardView({
   dashboard,
+  hasCompletedInitialLoad,
   filteredTunnels,
   hasActiveFilters,
   selectedIds,
@@ -1016,6 +1038,7 @@ function DashboardView({
       />
       <TunnelDeck
         dashboard={dashboard}
+        hasCompletedInitialLoad={hasCompletedInitialLoad}
         tunnels={filteredTunnels}
         hasActiveFilters={hasActiveFilters}
         selectedIds={selectedIds}
@@ -1454,161 +1477,221 @@ function TunnelOperationsPanel({
 }: TunnelOperationsPanelProps): ReactElement {
   return (
     <section className="rounded-lg border border-base-300 bg-base-100 shadow-sm">
-      <div className="flex flex-col gap-4 p-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <ListFilter className="text-primary" size={18} />
-              <h2 className="text-base leading-6 font-bold">Tunnels</h2>
-              <span className="badge badge-neutral badge-sm">
-                {visibleCount} / {totalCount}
-              </span>
+      <div className="grid grid-cols-1 gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
+        <div className="flex min-w-0 flex-col gap-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <ListFilter className="text-primary" size={18} />
+                <h2 className="text-base leading-6 font-bold">Tunnels</h2>
+                <span className="badge badge-neutral badge-sm">
+                  {visibleCount} / {totalCount}
+                </span>
+              </div>
+              <p className="mt-1 text-sm text-base-content/60">
+                Filter by status, scope, tag, and endpoint before operating in bulk
+              </p>
             </div>
-            <p className="mt-1 text-sm text-base-content/60">
-              {selectedCount} selected across the current dashboard
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2 lg:justify-end">
             <button
               type="button"
-              className="btn btn-outline btn-sm"
-              onClick={onSelectVisible}
-              disabled={isBusy || visibleCount === 0 || selectedVisibleCount === visibleCount}
+              className="btn btn-ghost btn-sm self-start lg:self-auto"
+              onClick={onResetFilters}
+              disabled={!hasActiveFilters}
             >
-              Select visible
-            </button>
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={onDeselectVisible}
-              disabled={isBusy || selectedVisibleCount === 0}
-            >
-              Deselect visible
-            </button>
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              onClick={onStart}
-              disabled={isBusy || selectedCount === 0}
-            >
-              <Play size={16} />
-              Start
-            </button>
-            <button
-              type="button"
-              className="btn btn-outline btn-sm"
-              onClick={onStop}
-              disabled={isBusy || selectedCount === 0}
-            >
-              <CircleStop size={16} />
-              Stop
-            </button>
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={onClear}
-              disabled={isBusy || selectedCount === 0}
-            >
-              Clear
+              Reset filters
             </button>
           </div>
-        </div>
 
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(14rem,1fr)_auto_auto_auto] lg:items-center">
-          <div className="relative">
-            <Search
-              className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-base-content/40"
-              size={16}
-            />
-            <input
-              className="input input-bordered input-sm w-full pr-9 pl-9"
-              value={queryInput}
-              onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                onQueryInputChange(event.target.value)
-              }
-              placeholder="Search ID, tag, endpoint"
-              aria-label="Search tunnels"
-            />
-            {queryInput.length > 0 ? (
-              <button
-                type="button"
-                className="btn btn-square btn-ghost btn-xs absolute top-1/2 right-1 -translate-y-1/2"
-                onClick={() => onQueryInputChange("")}
-                aria-label="検索条件を消去"
-                title="検索条件を消去"
-              >
-                <X size={14} />
-              </button>
-            ) : null}
-          </div>
-
-          <div className="join">
-            {statusFilterOptions.map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                className={`btn btn-sm join-item ${
-                  filters.status === option.value ? "btn-neutral" : "btn-outline"
-                }`}
-                onClick={() => onFilterChange("status", option.value)}
-                aria-pressed={filters.status === option.value}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-
-          <div className="join">
-            {scopeFilterOptions.map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                className={`btn btn-sm join-item ${
-                  filters.scope === option.value ? "btn-neutral" : "btn-outline"
-                }`}
-                onClick={() => onFilterChange("scope", option.value)}
-                aria-pressed={filters.scope === option.value}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            onClick={onResetFilters}
-            disabled={!hasActiveFilters}
-          >
-            Reset
-          </button>
-        </div>
-
-        {availableTags.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-2 border-t border-base-300 pt-3">
-            <span className="text-xs font-bold uppercase tracking-wide text-base-content/50">
-              Tags
-            </span>
-            {availableTags.map((tag) => {
-              const selected = filters.tags.includes(tag);
-              return (
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(16rem,1fr)_auto_auto] lg:items-center">
+            <div className="relative">
+              <Search
+                className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-base-content/40"
+                size={16}
+              />
+              <input
+                className="input input-bordered input-sm w-full pr-9 pl-9"
+                value={queryInput}
+                onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                  onQueryInputChange(event.target.value)
+                }
+                placeholder="Search ID, tag, endpoint"
+                aria-label="Search tunnels"
+              />
+              {queryInput.length > 0 ? (
                 <button
-                  key={tag}
                   type="button"
-                  className={`btn btn-xs rounded-full ${
-                    selected ? "btn-primary" : "btn-outline tag-outline"
-                  }`}
-                  onClick={() => onToggleTag(tag)}
-                  aria-pressed={selected}
+                  className="btn btn-square btn-ghost btn-xs absolute top-1/2 right-1 -translate-y-1/2"
+                  onClick={() => onQueryInputChange("")}
+                  aria-label="検索条件を消去"
+                  title="検索条件を消去"
                 >
-                  {tag}
+                  <X size={14} />
                 </button>
-              );
-            })}
+              ) : null}
+            </div>
+
+            <div className="join">
+              {statusFilterOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={`btn btn-sm join-item ${
+                    filters.status === option.value ? "btn-neutral" : "btn-outline"
+                  }`}
+                  onClick={() => onFilterChange("status", option.value)}
+                  aria-pressed={filters.status === option.value}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="join">
+              {scopeFilterOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={`btn btn-sm join-item ${
+                    filters.scope === option.value ? "btn-neutral" : "btn-outline"
+                  }`}
+                  onClick={() => onFilterChange("scope", option.value)}
+                  aria-pressed={filters.scope === option.value}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
           </div>
-        ) : null}
+
+          {availableTags.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-2 border-t border-base-300 pt-3">
+              <span className="text-xs font-bold uppercase tracking-wide text-base-content/50">
+                Tags
+              </span>
+              {availableTags.map((tag) => {
+                const selected = filters.tags.includes(tag);
+                return (
+                  <button
+                    key={tag}
+                    type="button"
+                    className={`btn btn-xs rounded-full ${
+                      selected ? "btn-primary" : "btn-outline tag-outline"
+                    }`}
+                    onClick={() => onToggleTag(tag)}
+                    aria-pressed={selected}
+                  >
+                    {tag}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+
+        <BulkActionPanel
+          selectedCount={selectedCount}
+          visibleCount={visibleCount}
+          selectedVisibleCount={selectedVisibleCount}
+          isBusy={isBusy}
+          onSelectVisible={onSelectVisible}
+          onDeselectVisible={onDeselectVisible}
+          onStart={onStart}
+          onStop={onStop}
+          onClear={onClear}
+        />
       </div>
     </section>
+  );
+}
+
+interface BulkActionPanelProps {
+  selectedCount: number;
+  visibleCount: number;
+  selectedVisibleCount: number;
+  isBusy: boolean;
+  onSelectVisible: () => void;
+  onDeselectVisible: () => void;
+  onStart: () => void;
+  onStop: () => void;
+  onClear: () => void;
+}
+
+/**
+ * 選択中トンネルの一括操作をまとめて表示する
+ */
+function BulkActionPanel({
+  selectedCount,
+  visibleCount,
+  selectedVisibleCount,
+  isBusy,
+  onSelectVisible,
+  onDeselectVisible,
+  onStart,
+  onStop,
+  onClear,
+}: BulkActionPanelProps): ReactElement {
+  return (
+    <aside className="flex h-full flex-col gap-3 rounded-lg border border-base-300 bg-base-200/45 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-bold uppercase tracking-wide text-base-content/50">
+            Selection
+          </div>
+          <div className="mt-1 text-sm text-base-content/70">
+            {selectedVisibleCount} selected in view
+          </div>
+        </div>
+        <span className="badge badge-primary badge-lg">{selectedCount}</span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          className="btn btn-outline btn-sm"
+          onClick={onSelectVisible}
+          disabled={isBusy || visibleCount === 0 || selectedVisibleCount === visibleCount}
+        >
+          Select visible
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={onDeselectVisible}
+          disabled={isBusy || selectedVisibleCount === 0}
+        >
+          Deselect
+        </button>
+      </div>
+
+      <div className="mt-auto grid grid-cols-3 gap-2">
+        <button
+          type="button"
+          className="btn btn-primary btn-sm"
+          onClick={onStart}
+          disabled={isBusy || selectedCount === 0}
+        >
+          <Play size={16} />
+          Start
+        </button>
+        <button
+          type="button"
+          className="btn btn-outline btn-sm"
+          onClick={onStop}
+          disabled={isBusy || selectedCount === 0}
+        >
+          <CircleStop size={16} />
+          Stop
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={onClear}
+          disabled={isBusy || selectedCount === 0}
+        >
+          Clear
+        </button>
+      </div>
+    </aside>
   );
 }
 
@@ -1630,6 +1713,7 @@ function MessagePanel({ message }: MessagePanelProps): ReactElement | null {
 
 interface TunnelDeckProps {
   dashboard: DashboardState | null;
+  hasCompletedInitialLoad: boolean;
   tunnels: TunnelView[];
   hasActiveFilters: boolean;
   selectedIds: Set<string>;
@@ -1646,6 +1730,7 @@ interface TunnelDeckProps {
  */
 function TunnelDeck({
   dashboard,
+  hasCompletedInitialLoad,
   tunnels,
   hasActiveFilters,
   selectedIds,
@@ -1657,6 +1742,14 @@ function TunnelDeck({
   onAddTunnel,
 }: TunnelDeckProps): ReactElement {
   if (dashboard === null) {
+    if (hasCompletedInitialLoad) {
+      return (
+        <EmptyState title="Dashboard unavailable">
+          アプリ実行環境または設定を確認してから再読み込みしてください。
+        </EmptyState>
+      );
+    }
+
     return <EmptyState title="Loading tunnels">設定と実行状態を読み込んでいます。</EmptyState>;
   }
 
@@ -1753,7 +1846,7 @@ function TunnelCard({
 
   return (
     <article
-      className={`flex h-full flex-col rounded-lg border bg-base-100 shadow-sm transition ${
+      className={`tunnel-card tunnel-card-${status} flex h-full flex-col rounded-lg border bg-base-100 shadow-sm transition ${
         checked
           ? "border-primary ring-2 ring-primary/20"
           : "border-base-300 hover:border-base-content/20"
@@ -1785,32 +1878,17 @@ function TunnelCard({
         <TagList tags={tunnel.tags} />
         <EndpointList tunnel={tunnel} />
 
-        <div className="grid grid-cols-2 gap-2 text-xs">
-          <div className="rounded-md border border-base-300 bg-base-200/40 px-3 py-2">
-            <div className="font-semibold text-base-content/50">Source</div>
-            <div className="mt-1 font-mono text-base-content/80">{tunnel.source}</div>
-          </div>
-          <div className="rounded-md border border-base-300 bg-base-200/40 px-3 py-2">
-            <div className="font-semibold text-base-content/50">Runtime</div>
-            <div className="mt-1 font-mono text-base-content/80">
-              {tunnel.status ? `pid ${tunnel.status.pid}` : "not tracked"}
-            </div>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap gap-2 text-xs text-base-content/60">
-          <span className="badge badge-ghost badge-sm">
-            {tunnel.timeouts.connectTimeoutSeconds}s connect
-          </span>
-          <span className="badge badge-ghost badge-sm">
-            {tunnel.timeouts.startGraceMilliseconds}ms grace
-          </span>
+        <div className="grid grid-cols-2 gap-2 text-xs xl:grid-cols-4">
+          <MetaItem label="Source" value={tunnel.source} />
+          <MetaItem label="Runtime" value={tunnel.status ? `pid ${tunnel.status.pid}` : "none"} />
+          <MetaItem label="Connect" value={`${tunnel.timeouts.connectTimeoutSeconds}s`} />
+          <MetaItem label="Grace" value={`${tunnel.timeouts.startGraceMilliseconds}ms`} />
         </div>
 
         <div className="mt-auto flex items-center justify-end gap-2 pt-1">
           <button
             type="button"
-            className="btn btn-primary btn-sm"
+            className={`btn btn-sm ${running ? "btn-ghost" : "btn-primary"}`}
             onClick={() => onStart(tunnel.id)}
             disabled={isBusy || running}
           >
@@ -1819,7 +1897,7 @@ function TunnelCard({
           </button>
           <button
             type="button"
-            className="btn btn-outline btn-sm"
+            className={`btn btn-sm ${running ? "btn-error" : "btn-outline"}`}
             onClick={() => onStop(tunnel.id)}
             disabled={isBusy || tunnel.status === null}
           >
@@ -1837,6 +1915,25 @@ function TunnelCard({
         </div>
       </div>
     </article>
+  );
+}
+
+interface MetaItemProps {
+  label: string;
+  value: string;
+}
+
+/**
+ * トンネルカード内の補助情報を一定幅で表示する
+ */
+function MetaItem({ label, value }: MetaItemProps): ReactElement {
+  return (
+    <div className="min-w-0 rounded-md border border-base-300 bg-base-200/40 px-3 py-2">
+      <div className="font-semibold text-base-content/50">{label}</div>
+      <div className="mt-1 truncate font-mono text-base-content/80" title={value}>
+        {value}
+      </div>
+    </div>
   );
 }
 
@@ -1891,34 +1988,58 @@ interface EndpointListProps {
 function EndpointList({ tunnel }: EndpointListProps): ReactElement {
   return (
     <div className="rounded-lg border border-base-300 bg-base-200/40 p-3">
-      <div className="grid gap-2">
-        <EndpointRow icon={<Server size={15} />} label="Local" value={tunnel.local} />
-        <div className="ml-3 h-3 border-l border-base-content/20" aria-hidden="true" />
-        <EndpointRow icon={<ArrowRight size={15} />} label="Remote" value={tunnel.remote} />
-        <div className="ml-3 h-3 border-l border-base-content/20" aria-hidden="true" />
-        <EndpointRow icon={<KeyRound size={15} />} label="SSH" value={tunnel.ssh} />
+      <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] xl:items-center">
+        <EndpointNode icon={<Server size={15} />} label="Local" value={tunnel.local} />
+        <RouteConnector />
+        <EndpointNode icon={<ArrowRight size={15} />} label="Remote" value={tunnel.remote} />
+        <RouteConnector />
+        <EndpointNode icon={<KeyRound size={15} />} label="SSH" value={tunnel.ssh} />
       </div>
     </div>
   );
 }
 
-interface EndpointRowProps {
+interface EndpointNodeProps {
   icon: ReactNode;
   label: string;
   value: string;
 }
 
 /**
- * 接続先情報の 1 行を表示する
+ * 接続先情報の 1 区間を表示する
  */
-function EndpointRow({ icon, label, value }: EndpointRowProps): ReactElement {
+function EndpointNode({ icon, label, value }: EndpointNodeProps): ReactElement {
   return (
-    <div className="grid grid-cols-[1.5rem_4.25rem_minmax(0,1fr)] items-center gap-2 text-sm">
-      <span className="text-base-content/50">{icon}</span>
-      <span className="font-semibold text-base-content/60">{label}</span>
-      <span className="truncate font-mono text-xs text-base-content/90" title={value}>
+    <div className="min-w-0 rounded-md border border-base-300 bg-base-100 px-3 py-2">
+      <div className="flex items-center gap-2 text-xs font-semibold text-base-content/55">
+        <span>{icon}</span>
+        <span>{label}</span>
+      </div>
+      <div className="mt-1 truncate font-mono text-xs text-base-content/90" title={value}>
         {value}
-      </span>
+      </div>
+    </div>
+  );
+}
+
+interface RouteConnectorProps {
+  horizontalAt?: "lg" | "xl";
+}
+
+/**
+ * 接続経路の方向を表示する
+ */
+function RouteConnector({ horizontalAt = "xl" }: RouteConnectorProps): ReactElement {
+  const verticalClassName = horizontalAt === "lg" ? "lg:hidden" : "xl:hidden";
+  const horizontalClassName = horizontalAt === "lg" ? "hidden lg:block" : "hidden xl:block";
+
+  return (
+    <div
+      className="flex items-center justify-center text-base-content/35 xl:w-5"
+      aria-hidden="true"
+    >
+      <div className={`h-3 border-l border-base-content/20 ${verticalClassName}`} />
+      <ArrowRight className={horizontalClassName} size={15} />
     </div>
   );
 }
@@ -2096,6 +2217,7 @@ function TunnelForm({
             </AlertMessage>
           </div>
         ) : null}
+        <TunnelDraftSummary form={form} />
         <section className="flex flex-col gap-3">
           <h3 className="text-xs font-bold uppercase tracking-wide text-base-content/50">
             Identity
@@ -2208,6 +2330,52 @@ function TunnelForm({
         </button>
       </div>
     </form>
+  );
+}
+
+interface TunnelDraftSummaryProps {
+  form: TunnelFormState;
+}
+
+/**
+ * 追加フォームの入力内容を接続経路として要約する
+ */
+function TunnelDraftSummary({ form }: TunnelDraftSummaryProps): ReactElement {
+  return (
+    <section className="rounded-lg border border-primary/20 bg-primary/5 p-4 xl:col-span-3">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-bold uppercase tracking-wide text-primary">
+              Draft route
+            </span>
+            <span className="badge badge-primary badge-outline badge-sm">{form.scope}</span>
+          </div>
+          <h3 className="mt-1 truncate text-base font-bold">
+            {form.id.trim() || "Untitled tunnel"}
+          </h3>
+        </div>
+        <div className="grid min-w-0 flex-1 gap-2 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-center">
+          <EndpointNode
+            icon={<Server size={15} />}
+            label="Local"
+            value={formatDraftEndpoint(form.localHost, form.localPort, "local host:port")}
+          />
+          <RouteConnector horizontalAt="lg" />
+          <EndpointNode
+            icon={<ArrowRight size={15} />}
+            label="Remote"
+            value={formatDraftEndpoint(form.remoteHost, form.remotePort, "remote host:port")}
+          />
+          <RouteConnector horizontalAt="lg" />
+          <EndpointNode
+            icon={<KeyRound size={15} />}
+            label="SSH"
+            value={formatDraftEndpoint(form.sshHost, form.sshPort, "ssh host:port")}
+          />
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -2394,6 +2562,45 @@ async function identityFileDialogDefaultPath(): Promise<string | undefined> {
 }
 
 /**
+ * Tauri command を実行環境の有無を確認して呼び出す
+ */
+async function invokeCommand<T>(command: AppCommand, args: Record<string, unknown>): Promise<T> {
+  if (!isTauriRuntimeAvailable()) {
+    throw new Error(missingTauriRuntimeMessage);
+  }
+
+  try {
+    return await invoke<T>(command, args);
+  } catch (error) {
+    if (isMissingTauriRuntimeError(error)) {
+      throw new Error(missingTauriRuntimeMessage);
+    }
+
+    throw error;
+  }
+}
+
+/**
+ * 現在の window が Tauri API を公開しているか判定する
+ */
+function isTauriRuntimeAvailable(): boolean {
+  return typeof (window as TauriRuntimeWindow).__TAURI_INTERNALS__?.invoke === "function";
+}
+
+/**
+ * Tauri API 未提供時の実行時エラーか判定する
+ */
+function isMissingTauriRuntimeError(error: unknown): boolean {
+  const message = stringifyError(error);
+
+  return (
+    message.includes("reading 'invoke'") ||
+    message.includes('reading "invoke"') ||
+    message.includes("__TAURI_INTERNALS__")
+  );
+}
+
+/**
  * フォーム入力を command 入力へ変換する
  */
 function formToTunnelInput(form: TunnelFormState): TunnelInput {
@@ -2444,6 +2651,28 @@ function parseTags(value: string): string[] {
     .split(",")
     .map((tag) => tag.trim().toLowerCase())
     .filter((tag) => tag.length > 0);
+}
+
+/**
+ * 入力途中の host と port を経路プレビュー用に整形する
+ */
+function formatDraftEndpoint(host: string, port: string, placeholder: string): string {
+  const trimmedHost = host.trim();
+  const trimmedPort = port.trim();
+
+  if (trimmedHost.length > 0 && trimmedPort.length > 0) {
+    return `${trimmedHost}:${trimmedPort}`;
+  }
+
+  if (trimmedHost.length > 0) {
+    return `${trimmedHost}:port`;
+  }
+
+  if (trimmedPort.length > 0) {
+    return `host:${trimmedPort}`;
+  }
+
+  return placeholder;
 }
 
 /**

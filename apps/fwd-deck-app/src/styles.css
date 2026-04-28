@@ -4,6 +4,20 @@
 :root {
   background: #eef2f7;
   color-scheme: light;
+  --color-base-100: #ffffff;
+  --color-base-200: #f6f8fb;
+  --color-base-300: #d9e0ea;
+  --color-base-content: #17202a;
+  --color-primary: #0f766e;
+  --color-primary-content: #ffffff;
+  --color-neutral: #1f2937;
+  --color-neutral-content: #f8fafc;
+  --color-success: #16a34a;
+  --color-success-content: #ffffff;
+  --color-warning: #d97706;
+  --color-warning-content: #1f1605;
+  --color-error: #dc2626;
+  --color-error-content: #ffffff;
   font-family:
     Inter,
     ui-sans-serif,
@@ -22,6 +36,7 @@ body {
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
+  color: var(--color-base-content);
 }
 
 button,
@@ -35,7 +50,7 @@ input {
 
 .app-shell {
   background:
-    linear-gradient(180deg, rgba(248, 250, 252, 0.94) 0%, rgba(238, 242, 247, 0.98) 42%), #eef2f7;
+    linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(237, 242, 248, 0.96) 44%), #eef2f7;
 }
 
 .tracked-runtime-shell {
@@ -67,4 +82,26 @@ input {
 
 .tag-outline.badge {
   --badge-bg: transparent;
+}
+
+.tunnel-card {
+  border-left-width: 4px;
+}
+
+.tunnel-card-running {
+  border-left-color: #16a34a;
+}
+
+.tunnel-card-stale {
+  border-left-color: #d97706;
+}
+
+.tunnel-card-idle {
+  border-left-color: #94a3b8;
+}
+
+.tunnel-card:is(:hover, :focus-within) {
+  box-shadow:
+    0 14px 34px rgba(15, 23, 42, 0.08),
+    0 2px 8px rgba(15, 23, 42, 0.06);
 }

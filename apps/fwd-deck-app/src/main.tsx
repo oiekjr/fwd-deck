@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { homeDir, join } from "@tauri-apps/api/path";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   Activity,
@@ -539,6 +540,27 @@ function App(): ReactElement {
   }
 
   /**
+   * ファイル選択ダイアログの結果を identity_file 入力へ反映する
+   */
+  async function browseIdentityFile(): Promise<void> {
+    try {
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        defaultPath: await identityFileDialogDefaultPath(),
+      });
+
+      if (typeof selected !== "string") {
+        return;
+      }
+
+      updateForm("identityFile", selected);
+    } catch (error) {
+      setMessage({ kind: "error", text: stringifyError(error) });
+    }
+  }
+
+  /**
    * 履歴から選択したワークスペースを未適用入力へ反映する
    */
   function selectWorkspaceFromHistory(workspacePath: string): void {
@@ -628,6 +650,8 @@ function App(): ReactElement {
           onRefresh={() => void refreshDashboard()}
         />
 
+        <WorkspaceContextPanel paths={paths} isBusy={isBusy} onOpenSettings={openSettings} />
+
         <MessagePanel message={message} />
 
         {activeView === "dashboard" ? (
@@ -666,6 +690,7 @@ function App(): ReactElement {
             onChange={updateForm}
             onSubmit={(event) => void submitTunnel(event)}
             onOpenSettings={openSettings}
+            onBrowseIdentityFile={() => void browseIdentityFile()}
           />
         ) : null}
       </div>
@@ -787,6 +812,62 @@ function AppHeader({
         </div>
       </div>
     </header>
+  );
+}
+
+interface WorkspaceContextPanelProps {
+  paths: WorkspaceSelection;
+  isBusy: boolean;
+  onOpenSettings: () => void;
+}
+
+/**
+ * 現在の作業対象ワークスペースを表示する
+ */
+function WorkspaceContextPanel({
+  paths,
+  isBusy,
+  onOpenSettings,
+}: WorkspaceContextPanelProps): ReactElement {
+  const workspacePath = paths.workspacePath.trim();
+  const hasWorkspace = workspacePath.length > 0;
+
+  return (
+    <section className="rounded-lg border border-base-300 bg-base-100 shadow-sm">
+      <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
+          <span
+            className={`rounded-md p-2 ${
+              hasWorkspace ? "bg-primary/10 text-primary" : "bg-warning/10 text-warning"
+            }`}
+          >
+            <FolderOpen size={17} />
+          </span>
+          <div className="min-w-0">
+            <div className="text-xs font-bold uppercase tracking-wide text-base-content/50">
+              Workspace
+            </div>
+            <div
+              className={`mt-0.5 truncate font-mono text-xs ${
+                hasWorkspace ? "text-base-content/85" : "text-warning"
+              }`}
+              title={workspacePath || "Not selected"}
+            >
+              {workspacePath || "Not selected"}
+            </div>
+          </div>
+        </div>
+        <button
+          type="button"
+          className="btn btn-outline btn-sm self-start sm:self-auto"
+          onClick={onOpenSettings}
+          disabled={isBusy}
+        >
+          <Settings2 size={15} />
+          Settings
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -963,6 +1044,7 @@ interface AddTunnelViewProps {
   onChange: (field: keyof TunnelFormState, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onOpenSettings: () => void;
+  onBrowseIdentityFile: () => void;
 }
 
 /**
@@ -975,6 +1057,7 @@ function AddTunnelView({
   onChange,
   onSubmit,
   onOpenSettings,
+  onBrowseIdentityFile,
 }: AddTunnelViewProps): ReactElement {
   return (
     <section className="mx-auto flex w-full max-w-6xl flex-col gap-4">
@@ -985,6 +1068,7 @@ function AddTunnelView({
         onChange={onChange}
         onSubmit={onSubmit}
         onOpenSettings={onOpenSettings}
+        onBrowseIdentityFile={onBrowseIdentityFile}
       />
     </section>
   );
@@ -1942,6 +2026,7 @@ interface TunnelFormProps {
   onChange: (field: keyof TunnelFormState, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onOpenSettings: () => void;
+  onBrowseIdentityFile: () => void;
 }
 
 /**
@@ -1954,6 +2039,7 @@ function TunnelForm({
   onChange,
   onSubmit,
   onOpenSettings,
+  onBrowseIdentityFile,
 }: TunnelFormProps): ReactElement {
   const localUnavailable = !canUseLocal;
 
@@ -2091,12 +2177,23 @@ function TunnelForm({
               inputMode="numeric"
             />
           </div>
-          <TextField
-            label="Identity file"
-            value={form.identityFile}
-            onChange={(value) => onChange("identityFile", value)}
-            placeholder="~/.ssh/id_ed25519"
-          />
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
+            <TextField
+              label="Identity file"
+              value={form.identityFile}
+              onChange={(value) => onChange("identityFile", value)}
+              placeholder="~/.ssh/id_ed25519"
+            />
+            <button
+              type="button"
+              className="btn btn-outline btn-sm mb-0"
+              onClick={onBrowseIdentityFile}
+              disabled={isBusy}
+            >
+              <FolderOpen size={15} />
+              Browse
+            </button>
+          </div>
         </section>
       </div>
 
@@ -2283,6 +2380,17 @@ function calculateStats(dashboard: DashboardState | null): DashboardStats {
       .length,
     stale: dashboard.trackedTunnels.filter((tracked) => tracked.status.state === "stale").length,
   };
+}
+
+/**
+ * identity_file 用ダイアログの開始パスを解決する
+ */
+async function identityFileDialogDefaultPath(): Promise<string | undefined> {
+  try {
+    return await join(await homeDir(), ".ssh");
+  } catch {
+    return undefined;
+  }
 }
 
 /**

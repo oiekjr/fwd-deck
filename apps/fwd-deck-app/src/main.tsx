@@ -26,7 +26,7 @@ import {
   X,
 } from "lucide-react";
 import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, FormEvent, ReactElement, ReactNode } from "react";
+import type { ChangeEvent, FormEvent, ReactElement, ReactNode, RefObject } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -209,6 +209,11 @@ interface TunnelFilters {
   status: StatusFilter;
   scope: ScopeFilter;
   tags: string[];
+}
+
+interface HighlightedTextPart {
+  text: string;
+  isMatch: boolean;
 }
 
 const initialPaths: WorkspaceSelection = {
@@ -1060,6 +1065,42 @@ function IconButton({
   );
 }
 
+/**
+ * 有効化された要素の表示高さを監視する
+ */
+function useMeasuredElementHeight<T extends HTMLElement>(
+  isEnabled: boolean,
+): [RefObject<T | null>, number] {
+  const elementRef = useRef<T | null>(null);
+  const [height, setHeight] = useState<number>(0);
+
+  useEffect(() => {
+    if (!isEnabled || elementRef.current === null) {
+      setHeight(0);
+      return;
+    }
+
+    const element = elementRef.current;
+    const updateHeight = (): void => {
+      const nextHeight = Math.ceil(element.getBoundingClientRect().height);
+      setHeight((current) => (current === nextHeight ? current : nextHeight));
+    };
+
+    updateHeight();
+
+    const resizeObserver = new ResizeObserver(updateHeight);
+    resizeObserver.observe(element);
+    window.addEventListener("resize", updateHeight);
+
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", updateHeight);
+    };
+  }, [isEnabled]);
+
+  return [elementRef, height];
+}
+
 interface DashboardViewProps {
   dashboard: DashboardState | null;
   hasCompletedInitialLoad: boolean;
@@ -1122,26 +1163,39 @@ function DashboardView({
 }: DashboardViewProps): ReactElement {
   const [isTrackedPanelCollapsed, setIsTrackedPanelCollapsed] = useState<boolean>(true);
   const hasTrackedRuntime = (dashboard?.trackedTunnels.length ?? 0) > 0;
+  const hasSelection = selectedCount > 0;
+  const shouldShowSelectionActionBar =
+    hasSelection || (hasActiveFilters && filteredTunnels.length > 0);
+  const [selectionBarRef, selectionBarHeight] = useMeasuredElementHeight<HTMLDivElement>(
+    shouldShowSelectionActionBar,
+  );
+  const [trackedPanelRef, trackedPanelHeight] =
+    useMeasuredElementHeight<HTMLDivElement>(hasTrackedRuntime);
+  const bottomPaddingPixels = dashboardBottomPaddingPixels(trackedPanelHeight, selectionBarHeight);
 
   return (
-    <section
-      className={`flex min-w-0 flex-col gap-4 ${hasTrackedRuntime ? (isTrackedPanelCollapsed ? "pb-20" : "pb-56") : ""}`}
-    >
+    <section className="flex min-w-0 flex-col gap-4" style={{ paddingBottom: bottomPaddingPixels }}>
       <ValidationPanel dashboard={dashboard} />
       <TunnelOperationsPanel
-        selectedCount={selectedCount}
         totalCount={dashboard?.tunnels.length ?? 0}
         visibleCount={filteredTunnels.length}
-        selectedVisibleCount={selectedVisibleCount}
         availableTags={availableTags}
         queryInput={queryInput}
         filters={filters}
         hasActiveFilters={hasActiveFilters}
-        isBusy={isBusy}
         onQueryInputChange={onQueryInputChange}
         onFilterChange={onFilterChange}
         onToggleTag={onToggleTag}
         onResetFilters={onResetFilters}
+      />
+      <SelectionActionBar
+        isVisible={shouldShowSelectionActionBar}
+        selectedCount={selectedCount}
+        visibleCount={filteredTunnels.length}
+        selectedVisibleCount={selectedVisibleCount}
+        trackedPanelHeight={trackedPanelHeight}
+        panelRef={selectionBarRef}
+        isBusy={isBusy}
         onSelectVisible={onSelectVisible}
         onDeselectVisible={onDeselectVisible}
         onStart={onStartSelected}
@@ -1152,6 +1206,7 @@ function DashboardView({
         dashboard={dashboard}
         hasCompletedInitialLoad={hasCompletedInitialLoad}
         tunnels={filteredTunnels}
+        filters={filters}
         hasActiveFilters={hasActiveFilters}
         selectedIds={selectedIds}
         isBusy={isBusy}
@@ -1160,10 +1215,12 @@ function DashboardView({
         onStop={onStopTunnel}
         onRemove={onRemoveTunnel}
         onAddTunnel={onAddTunnel}
+        onResetFilters={onResetFilters}
       />
       <TrackedPanel
         dashboard={dashboard}
         isCollapsed={isTrackedPanelCollapsed}
+        panelRef={trackedPanelRef}
         isBusy={isBusy}
         onToggleCollapsed={() => setIsTrackedPanelCollapsed((current) => !current)}
         onStop={onStopTracked}
@@ -1521,182 +1578,240 @@ function IssueRow({ issue, kind }: IssueRowProps): ReactElement {
 }
 
 interface TunnelOperationsPanelProps {
-  selectedCount: number;
   totalCount: number;
   visibleCount: number;
-  selectedVisibleCount: number;
   availableTags: string[];
   queryInput: string;
   filters: TunnelFilters;
   hasActiveFilters: boolean;
-  isBusy: boolean;
   onQueryInputChange: (value: string) => void;
   onFilterChange: <K extends keyof TunnelFilters>(field: K, value: TunnelFilters[K]) => void;
   onToggleTag: (tag: string) => void;
   onResetFilters: () => void;
-  onSelectVisible: () => void;
-  onDeselectVisible: () => void;
-  onStart: () => void;
-  onStop: () => void;
-  onClear: () => void;
 }
 
 /**
- * 一覧の絞り込みと複数選択操作を表示する
+ * 一覧の絞り込み条件を表示する
  */
 function TunnelOperationsPanel({
-  selectedCount,
   totalCount,
   visibleCount,
-  selectedVisibleCount,
   availableTags,
   queryInput,
   filters,
   hasActiveFilters,
-  isBusy,
   onQueryInputChange,
   onFilterChange,
   onToggleTag,
   onResetFilters,
-  onSelectVisible,
-  onDeselectVisible,
-  onStart,
-  onStop,
-  onClear,
 }: TunnelOperationsPanelProps): ReactElement {
+  const visibleTags = orderTagsBySelection(availableTags, filters.tags);
+
   return (
     <section className="rounded-lg border border-base-300 bg-base-100 shadow-sm">
-      <div className="grid grid-cols-1 gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
-        <div className="flex min-w-0 flex-col gap-4">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <ListFilter className="text-primary" size={18} />
-                <h2 className="text-base leading-6 font-bold">Tunnels</h2>
-                <span className="badge badge-neutral badge-sm">
-                  {visibleCount} / {totalCount}
-                </span>
-              </div>
-              <p className="mt-1 text-sm text-base-content/60">
-                Filter by status, scope, tag, and endpoint before operating in bulk
-              </p>
-            </div>
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm self-start lg:self-auto"
-              onClick={onResetFilters}
-              disabled={!hasActiveFilters}
-            >
-              Reset filters
-            </button>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(16rem,1fr)_auto_auto] lg:items-center">
-            <div className="relative">
-              <Search
-                className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-base-content/40"
-                size={16}
-              />
-              <input
-                className="input input-bordered input-sm w-full pr-9 pl-9"
-                value={queryInput}
-                onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                  onQueryInputChange(event.target.value)
-                }
-                placeholder="Search ID, tag, endpoint"
-                aria-label="Search tunnels"
-              />
-              {queryInput.length > 0 ? (
-                <button
-                  type="button"
-                  className="btn btn-square btn-ghost btn-xs absolute top-1/2 right-1 -translate-y-1/2"
-                  onClick={() => onQueryInputChange("")}
-                  aria-label="検索条件を消去"
-                  title="検索条件を消去"
-                >
-                  <X size={14} />
-                </button>
-              ) : null}
-            </div>
-
-            <div className="join">
-              {statusFilterOptions.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  className={`btn btn-sm join-item ${
-                    filters.status === option.value ? "btn-neutral" : "btn-outline"
-                  }`}
-                  onClick={() => onFilterChange("status", option.value)}
-                  aria-pressed={filters.status === option.value}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-
-            <div className="join">
-              {scopeFilterOptions.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  className={`btn btn-sm join-item ${
-                    filters.scope === option.value ? "btn-neutral" : "btn-outline"
-                  }`}
-                  onClick={() => onFilterChange("scope", option.value)}
-                  aria-pressed={filters.scope === option.value}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {availableTags.length > 0 ? (
-            <div className="flex flex-wrap items-center gap-2 border-t border-base-300 pt-3">
-              <span className="text-xs font-bold uppercase tracking-wide text-base-content/50">
-                Tags
+      <div className="flex min-w-0 flex-col gap-4 p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <ListFilter className="text-primary" size={18} />
+              <h2 className="text-base leading-6 font-bold">Tunnels</h2>
+              <span className="badge badge-neutral badge-sm">
+                {visibleCount} / {totalCount}
               </span>
-              {availableTags.map((tag) => {
-                const selected = filters.tags.includes(tag);
-                return (
-                  <button
-                    key={tag}
-                    type="button"
-                    className={`btn btn-xs rounded-full ${
-                      selected ? "btn-primary" : "btn-outline tag-outline"
-                    }`}
-                    onClick={() => onToggleTag(tag)}
-                    aria-pressed={selected}
-                  >
-                    {tag}
-                  </button>
-                );
-              })}
             </div>
-          ) : null}
+            <p className="mt-1 text-sm text-base-content/60">
+              Filter by status, scope, tag, and endpoint before selecting tunnels
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm self-start lg:self-auto"
+            onClick={onResetFilters}
+            disabled={!hasActiveFilters}
+          >
+            Reset filters
+          </button>
         </div>
 
-        <BulkActionPanel
-          selectedCount={selectedCount}
-          visibleCount={visibleCount}
-          selectedVisibleCount={selectedVisibleCount}
-          isBusy={isBusy}
-          onSelectVisible={onSelectVisible}
-          onDeselectVisible={onDeselectVisible}
-          onStart={onStart}
-          onStop={onStop}
-          onClear={onClear}
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(16rem,1fr)_auto_auto] lg:items-center">
+          <div className="relative">
+            <Search
+              className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-base-content/40"
+              size={16}
+            />
+            <input
+              className="input input-bordered input-sm w-full pr-9 pl-9"
+              value={queryInput}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                onQueryInputChange(event.target.value)
+              }
+              placeholder="Search ID, tag, endpoint"
+              aria-label="Search tunnels"
+            />
+            {queryInput.length > 0 ? (
+              <button
+                type="button"
+                className="btn btn-square btn-ghost btn-xs absolute top-1/2 right-1 -translate-y-1/2"
+                onClick={() => onQueryInputChange("")}
+                aria-label="検索条件を消去"
+                title="検索条件を消去"
+              >
+                <X size={14} />
+              </button>
+            ) : null}
+          </div>
+
+          <div className="join">
+            {statusFilterOptions.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={`btn btn-sm join-item ${
+                  filters.status === option.value ? "btn-neutral" : "btn-outline"
+                }`}
+                onClick={() => onFilterChange("status", option.value)}
+                aria-pressed={filters.status === option.value}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="join">
+            {scopeFilterOptions.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={`btn btn-sm join-item ${
+                  filters.scope === option.value ? "btn-neutral" : "btn-outline"
+                }`}
+                onClick={() => onFilterChange("scope", option.value)}
+                aria-pressed={filters.scope === option.value}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <ActiveFilterChips
+          queryInput={queryInput}
+          filters={filters}
+          onQueryInputChange={onQueryInputChange}
+          onFilterChange={onFilterChange}
+          onToggleTag={onToggleTag}
         />
+
+        {availableTags.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2 border-t border-base-300 pt-3">
+            <span className="text-xs font-bold uppercase tracking-wide text-base-content/50">
+              Tags
+            </span>
+            {visibleTags.map((tag) => {
+              const selected = filters.tags.includes(tag);
+              return (
+                <button
+                  key={tag}
+                  type="button"
+                  className={`btn btn-xs rounded-full ${
+                    selected ? "btn-primary" : "btn-outline tag-outline"
+                  }`}
+                  onClick={() => onToggleTag(tag)}
+                  aria-pressed={selected}
+                >
+                  {tag}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
       </div>
     </section>
   );
 }
 
-interface BulkActionPanelProps {
+interface ActiveFilterChipsProps {
+  queryInput: string;
+  filters: TunnelFilters;
+  onQueryInputChange: (value: string) => void;
+  onFilterChange: <K extends keyof TunnelFilters>(field: K, value: TunnelFilters[K]) => void;
+  onToggleTag: (tag: string) => void;
+}
+
+/**
+ * 有効な絞り込み条件を解除可能なチップとして表示する
+ */
+function ActiveFilterChips({
+  queryInput,
+  filters,
+  onQueryInputChange,
+  onFilterChange,
+  onToggleTag,
+}: ActiveFilterChipsProps): ReactElement | null {
+  const query = queryInput.trim();
+  const hasStatusFilter = filters.status !== initialFilters.status;
+  const hasScopeFilter = filters.scope !== initialFilters.scope;
+  const hasTagFilters = filters.tags.length > 0;
+
+  if (query.length === 0 && !hasStatusFilter && !hasScopeFilter && !hasTagFilters) {
+    return null;
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-md border border-base-300 bg-base-200/35 px-3 py-2">
+      <span className="text-xs font-bold uppercase tracking-wide text-base-content/50">Active</span>
+      {query.length > 0 ? (
+        <FilterChip label={`query: ${query}`} onRemove={() => onQueryInputChange("")} />
+      ) : null}
+      {hasStatusFilter ? (
+        <FilterChip
+          label={`status: ${filters.status}`}
+          onRemove={() => onFilterChange("status", initialFilters.status)}
+        />
+      ) : null}
+      {hasScopeFilter ? (
+        <FilterChip
+          label={`scope: ${filters.scope}`}
+          onRemove={() => onFilterChange("scope", initialFilters.scope)}
+        />
+      ) : null}
+      {filters.tags.map((tag) => (
+        <FilterChip key={tag} label={`tag: ${tag}`} onRemove={() => onToggleTag(tag)} />
+      ))}
+    </div>
+  );
+}
+
+interface FilterChipProps {
+  label: string;
+  onRemove: () => void;
+}
+
+/**
+ * 個別解除できる絞り込み条件を表示する
+ */
+function FilterChip({ label, onRemove }: FilterChipProps): ReactElement {
+  return (
+    <button
+      type="button"
+      className="btn btn-outline btn-xs max-w-full rounded-full border-base-300 bg-base-100"
+      onClick={onRemove}
+      title={`${label} を解除`}
+      aria-label={`${label} を解除`}
+    >
+      <span className="max-w-52 truncate">{label}</span>
+      <X size={12} />
+    </button>
+  );
+}
+
+interface SelectionActionBarProps {
+  isVisible: boolean;
   selectedCount: number;
   visibleCount: number;
   selectedVisibleCount: number;
+  trackedPanelHeight: number;
+  panelRef: RefObject<HTMLDivElement | null>;
   isBusy: boolean;
   onSelectVisible: () => void;
   onDeselectVisible: () => void;
@@ -1706,85 +1821,151 @@ interface BulkActionPanelProps {
 }
 
 /**
- * 選択中トンネルの一括操作をまとめて表示する
+ * 選択中トンネルの一括操作を横長バーで表示する
  */
-function BulkActionPanel({
+function SelectionActionBar({
+  isVisible,
   selectedCount,
   visibleCount,
   selectedVisibleCount,
+  trackedPanelHeight,
+  panelRef,
   isBusy,
   onSelectVisible,
   onDeselectVisible,
   onStart,
   onStop,
   onClear,
-}: BulkActionPanelProps): ReactElement {
+}: SelectionActionBarProps): ReactElement | null {
+  if (!isVisible) {
+    return null;
+  }
+
+  const hiddenSelectedCount = selectedCount - selectedVisibleCount;
+  const bottomPixels = selectionActionBarBottomPixels(trackedPanelHeight);
+  const selectedInViewLabel =
+    selectedCount === 0
+      ? `${visibleCount} visible results`
+      : `${selectedVisibleCount} in current view`;
+
   return (
-    <aside className="flex h-full flex-col gap-3 rounded-lg border border-base-300 bg-base-200/45 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="text-xs font-bold uppercase tracking-wide text-base-content/50">
-            Selection
+    <section
+      className="pointer-events-none fixed right-4 left-4 z-50"
+      style={{ bottom: bottomPixels }}
+      aria-live="polite"
+    >
+      <div
+        ref={panelRef}
+        className="pointer-events-auto mx-auto flex max-h-[min(18rem,calc(100vh-2rem))] w-full max-w-[90rem] flex-col gap-3 overflow-auto rounded-lg border border-primary/30 bg-base-100/95 px-4 py-3 shadow-2xl backdrop-blur xl:flex-row xl:items-center xl:justify-between"
+      >
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <CheckCircle2 className="text-primary" size={18} />
+            <h2 className="text-sm leading-6 font-bold">Selection</h2>
+            <span className="badge badge-primary badge-sm">{selectedCount} total selected</span>
+            <span className="badge badge-ghost badge-sm">{selectedInViewLabel}</span>
+            {hiddenSelectedCount > 0 ? (
+              <span className="badge badge-warning badge-sm">
+                {hiddenSelectedCount} hidden by filters included
+              </span>
+            ) : null}
           </div>
-          <div className="mt-1 text-sm text-base-content/70">
-            {selectedVisibleCount} selected in view
+          <p className="mt-1 text-xs text-base-content/60">
+            Start and Stop operate on every selected tunnel, including hidden selections.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-2 xl:flex-row xl:items-center xl:justify-end">
+          <div className="grid grid-cols-2 gap-2 xl:grid-cols-[repeat(2,max-content)]">
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={onStart}
+              disabled={isBusy || selectedCount === 0}
+            >
+              <Play size={16} />
+              Start selected
+            </button>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={onStop}
+              disabled={isBusy || selectedCount === 0}
+            >
+              <CircleStop size={16} />
+              Stop selected
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 xl:grid-cols-[repeat(3,max-content)]">
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={onSelectVisible}
+              disabled={isBusy || visibleCount === 0 || selectedVisibleCount === visibleCount}
+            >
+              <CheckCircle2 size={16} />
+              Select all visible
+            </button>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={onDeselectVisible}
+              disabled={isBusy || selectedVisibleCount === 0}
+            >
+              <Minus size={16} />
+              Deselect visible
+            </button>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={onClear}
+              disabled={isBusy || selectedCount === 0}
+            >
+              <X size={16} />
+              Clear all
+            </button>
           </div>
         </div>
-        <span className="badge badge-primary badge-lg">{selectedCount}</span>
       </div>
-
-      <div className="grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          className="btn btn-outline btn-sm"
-          onClick={onSelectVisible}
-          disabled={isBusy || visibleCount === 0 || selectedVisibleCount === visibleCount}
-        >
-          <CheckCircle2 size={16} />
-          Select visible
-        </button>
-        <button
-          type="button"
-          className="btn btn-outline btn-sm"
-          onClick={onDeselectVisible}
-          disabled={isBusy || selectedVisibleCount === 0}
-        >
-          <Minus size={16} />
-          Deselect
-        </button>
-      </div>
-
-      <div className="mt-auto grid grid-cols-3 gap-2">
-        <button
-          type="button"
-          className="btn btn-primary btn-sm"
-          onClick={onStart}
-          disabled={isBusy || selectedCount === 0}
-        >
-          <Play size={16} />
-          Start
-        </button>
-        <button
-          type="button"
-          className="btn btn-outline btn-sm"
-          onClick={onStop}
-          disabled={isBusy || selectedCount === 0}
-        >
-          <CircleStop size={16} />
-          Stop
-        </button>
-        <button
-          type="button"
-          className="btn btn-outline btn-sm"
-          onClick={onClear}
-          disabled={isBusy || selectedCount === 0}
-        >
-          <X size={16} />
-          Clear
-        </button>
-      </div>
-    </aside>
+    </section>
   );
+}
+
+/**
+ * 固定表示される下部パネルに応じた一覧末尾の余白を算出する
+ */
+function dashboardBottomPaddingPixels(
+  trackedPanelHeight: number,
+  selectionBarHeight: number,
+): number {
+  const viewportMarginPixels = 16;
+  const floatingPanelGapPixels = 12;
+  const contentMarginPixels = 24;
+  const hasTrackedPanel = trackedPanelHeight > 0;
+  const hasSelectionBar = selectionBarHeight > 0;
+  const interPanelGapPixels = hasTrackedPanel && hasSelectionBar ? floatingPanelGapPixels : 0;
+  const floatingPanelsHeight = trackedPanelHeight + selectionBarHeight + interPanelGapPixels;
+
+  if (floatingPanelsHeight === 0) {
+    return 0;
+  }
+
+  return viewportMarginPixels + floatingPanelsHeight + contentMarginPixels;
+}
+
+/**
+ * tracked runtime パネルとの重なりを避けるための固定位置を算出する
+ */
+function selectionActionBarBottomPixels(trackedPanelHeight: number): number {
+  const viewportMarginPixels = 16;
+  const floatingPanelGapPixels = 12;
+
+  if (trackedPanelHeight === 0) {
+    return viewportMarginPixels;
+  }
+
+  return viewportMarginPixels + trackedPanelHeight + floatingPanelGapPixels;
 }
 
 interface MessagePanelProps {
@@ -1863,6 +2044,7 @@ interface TunnelDeckProps {
   dashboard: DashboardState | null;
   hasCompletedInitialLoad: boolean;
   tunnels: TunnelView[];
+  filters: TunnelFilters;
   hasActiveFilters: boolean;
   selectedIds: Set<string>;
   isBusy: boolean;
@@ -1871,6 +2053,7 @@ interface TunnelDeckProps {
   onStop: (id: string) => void;
   onRemove: (tunnel: TunnelView) => void;
   onAddTunnel: () => void;
+  onResetFilters: () => void;
 }
 
 /**
@@ -1880,6 +2063,7 @@ function TunnelDeck({
   dashboard,
   hasCompletedInitialLoad,
   tunnels,
+  filters,
   hasActiveFilters,
   selectedIds,
   isBusy,
@@ -1888,6 +2072,7 @@ function TunnelDeck({
   onStop,
   onRemove,
   onAddTunnel,
+  onResetFilters,
 }: TunnelDeckProps): ReactElement {
   if (dashboard === null) {
     if (hasCompletedInitialLoad) {
@@ -1919,7 +2104,15 @@ function TunnelDeck({
 
   if (tunnels.length === 0 && hasActiveFilters) {
     return (
-      <EmptyState title="No matching tunnels">
+      <EmptyState
+        title="No matching tunnels"
+        action={
+          <button className="btn btn-outline btn-sm" type="button" onClick={onResetFilters}>
+            <X size={16} />
+            Reset filters
+          </button>
+        }
+      >
         検索条件またはフィルターを変更してください。
       </EmptyState>
     );
@@ -1931,6 +2124,7 @@ function TunnelDeck({
         <TunnelCard
           key={tunnel.id}
           tunnel={tunnel}
+          query={filters.query}
           checked={selectedIds.has(tunnel.id)}
           isBusy={isBusy}
           onToggle={onToggle}
@@ -1969,6 +2163,7 @@ function EmptyState({ title, children, action }: EmptyStateProps): ReactElement 
 
 interface TunnelCardProps {
   tunnel: TunnelView;
+  query: string;
   checked: boolean;
   isBusy: boolean;
   onToggle: (id: string) => void;
@@ -1982,6 +2177,7 @@ interface TunnelCardProps {
  */
 function TunnelCard({
   tunnel,
+  query,
   checked,
   isBusy,
   onToggle,
@@ -1991,6 +2187,7 @@ function TunnelCard({
 }: TunnelCardProps): ReactElement {
   const running = tunnel.status?.state === "running";
   const status = tunnel.status?.state ?? "idle";
+  const highlightQuery = query.trim();
 
   return (
     <article
@@ -2010,9 +2207,11 @@ function TunnelCard({
               onChange={() => onToggle(tunnel.id)}
             />
             <span className="min-w-0">
-              <span className="block truncate text-base leading-6 font-bold">{tunnel.id}</span>
+              <span className="block truncate text-base leading-6 font-bold">
+                <HighlightedText text={tunnel.id} query={highlightQuery} />
+              </span>
               <span className="mt-0.5 block truncate text-xs text-base-content/50">
-                {tunnel.sourcePath}
+                <HighlightedText text={tunnel.sourcePath} query={highlightQuery} />
               </span>
             </span>
           </label>
@@ -2020,14 +2219,14 @@ function TunnelCard({
         </div>
 
         <p className="min-h-10 text-sm leading-5 text-base-content/60">
-          {tunnel.description ?? "No description"}
+          <HighlightedText text={tunnel.description ?? "No description"} query={highlightQuery} />
         </p>
 
-        <TagList tags={tunnel.tags} />
-        <EndpointList tunnel={tunnel} />
+        <TagList tags={tunnel.tags} query={highlightQuery} />
+        <EndpointList tunnel={tunnel} query={highlightQuery} />
 
         <div className="grid grid-cols-2 gap-2 text-xs xl:grid-cols-4">
-          <MetaItem label="Source" value={tunnel.source} />
+          <MetaItem label="Source" value={tunnel.source} query={highlightQuery} />
           <MetaItem label="Runtime" value={tunnel.status ? `pid ${tunnel.status.pid}` : "none"} />
           <MetaItem label="Connect" value={`${tunnel.timeouts.connectTimeoutSeconds}s`} />
           <MetaItem label="Grace" value={`${tunnel.timeouts.startGraceMilliseconds}ms`} />
@@ -2069,17 +2268,18 @@ function TunnelCard({
 interface MetaItemProps {
   label: string;
   value: string;
+  query?: string;
 }
 
 /**
  * トンネルカード内の補助情報を一定幅で表示する
  */
-function MetaItem({ label, value }: MetaItemProps): ReactElement {
+function MetaItem({ label, value, query = "" }: MetaItemProps): ReactElement {
   return (
     <div className="min-w-0 rounded-md border border-base-300 bg-base-200/40 px-3 py-2">
       <div className="font-semibold text-base-content/50">{label}</div>
       <div className="mt-1 truncate font-mono text-base-content/80" title={value}>
-        {value}
+        <HighlightedText text={value} query={query} />
       </div>
     </div>
   );
@@ -2105,12 +2305,13 @@ function StatusBadge({ status }: StatusBadgeProps): ReactElement {
 
 interface TagListProps {
   tags: string[];
+  query: string;
 }
 
 /**
  * タグ一覧を表示する
  */
-function TagList({ tags }: TagListProps): ReactElement {
+function TagList({ tags, query }: TagListProps): ReactElement {
   if (tags.length === 0) {
     return <div className="min-h-6 text-xs leading-6 text-base-content/50">No tags</div>;
   }
@@ -2119,7 +2320,7 @@ function TagList({ tags }: TagListProps): ReactElement {
     <div className="flex min-h-6 flex-wrap items-center gap-1">
       {tags.map((tag) => (
         <span className="badge badge-primary badge-outline badge-sm tag-outline" key={tag}>
-          {tag}
+          <HighlightedText text={tag} query={query} />
         </span>
       ))}
     </div>
@@ -2128,20 +2329,31 @@ function TagList({ tags }: TagListProps): ReactElement {
 
 interface EndpointListProps {
   tunnel: TunnelView;
+  query: string;
 }
 
 /**
  * 接続先情報を表示する
  */
-function EndpointList({ tunnel }: EndpointListProps): ReactElement {
+function EndpointList({ tunnel, query }: EndpointListProps): ReactElement {
   return (
     <div className="rounded-lg border border-base-300 bg-base-200/40 p-3">
       <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] xl:items-center">
-        <EndpointNode icon={<Server size={15} />} label="Local" value={tunnel.local} />
+        <EndpointNode
+          icon={<Server size={15} />}
+          label="Local"
+          value={tunnel.local}
+          query={query}
+        />
         <RouteConnector />
-        <EndpointNode icon={<ArrowRight size={15} />} label="Remote" value={tunnel.remote} />
+        <EndpointNode
+          icon={<ArrowRight size={15} />}
+          label="Remote"
+          value={tunnel.remote}
+          query={query}
+        />
         <RouteConnector />
-        <EndpointNode icon={<KeyRound size={15} />} label="SSH" value={tunnel.ssh} />
+        <EndpointNode icon={<KeyRound size={15} />} label="SSH" value={tunnel.ssh} query={query} />
       </div>
     </div>
   );
@@ -2151,12 +2363,13 @@ interface EndpointNodeProps {
   icon: ReactNode;
   label: string;
   value: string;
+  query?: string;
 }
 
 /**
  * 接続先情報の 1 区間を表示する
  */
-function EndpointNode({ icon, label, value }: EndpointNodeProps): ReactElement {
+function EndpointNode({ icon, label, value, query = "" }: EndpointNodeProps): ReactElement {
   return (
     <div className="min-w-0 rounded-md border border-base-300 bg-base-100 px-3 py-2">
       <div className="flex items-center gap-2 text-xs font-semibold text-base-content/55">
@@ -2164,9 +2377,42 @@ function EndpointNode({ icon, label, value }: EndpointNodeProps): ReactElement {
         <span>{label}</span>
       </div>
       <div className="mt-1 truncate font-mono text-xs text-base-content/90" title={value}>
-        {value}
+        <HighlightedText text={value} query={query} />
       </div>
     </div>
+  );
+}
+
+interface HighlightedTextProps {
+  text: string;
+  query: string;
+}
+
+/**
+ * 検索語に一致する部分へ強調表示を適用する
+ */
+function HighlightedText({ text, query }: HighlightedTextProps): ReactElement {
+  const normalizedQuery = query.trim().toLowerCase();
+
+  if (normalizedQuery.length === 0) {
+    return <>{text}</>;
+  }
+
+  return (
+    <>
+      {splitTextBySearchQuery(text, normalizedQuery).map((part, index) =>
+        part.isMatch ? (
+          <mark
+            key={`${part.text}:${index}`}
+            className="rounded bg-warning/25 px-0.5 text-base-content"
+          >
+            {part.text}
+          </mark>
+        ) : (
+          <span key={`${part.text}:${index}`}>{part.text}</span>
+        ),
+      )}
+    </>
   );
 }
 
@@ -2195,6 +2441,7 @@ function RouteConnector({ horizontalAt = "xl" }: RouteConnectorProps): ReactElem
 interface TrackedPanelProps {
   dashboard: DashboardState | null;
   isCollapsed: boolean;
+  panelRef: RefObject<HTMLDivElement | null>;
   isBusy: boolean;
   onToggleCollapsed: () => void;
   onStop: (target: OperationTarget) => void;
@@ -2206,6 +2453,7 @@ interface TrackedPanelProps {
 function TrackedPanel({
   dashboard,
   isCollapsed,
+  panelRef,
   isBusy,
   onToggleCollapsed,
   onStop,
@@ -2215,11 +2463,14 @@ function TrackedPanel({
   }
 
   return (
-    <section className="pointer-events-none fixed right-4 bottom-4 left-4 z-40 sm:left-1/2 sm:right-auto sm:-translate-x-1/2">
-      <div className="tracked-runtime-shell pointer-events-auto w-full overflow-hidden rounded-xl bg-base-100 sm:w-[42rem]">
+    <section className="pointer-events-none fixed right-4 bottom-4 left-4 z-40">
+      <div
+        ref={panelRef}
+        className="pointer-events-auto mx-auto w-full max-w-[90rem] overflow-hidden rounded-lg border border-primary/30 bg-base-100/95 shadow-2xl backdrop-blur"
+      >
         <button
           type="button"
-          className="flex w-full items-center justify-between gap-3 bg-primary/5 px-3.5 py-2.5 text-left"
+          className="flex w-full items-center justify-between gap-3 bg-primary/5 px-4 py-3 text-left"
           onClick={onToggleCollapsed}
           aria-expanded={!isCollapsed}
         >
@@ -2239,14 +2490,14 @@ function TrackedPanel({
         </button>
 
         {!isCollapsed ? (
-          <div className="max-h-44 overflow-auto border-t border-base-200">
+          <div className="max-h-44 overflow-auto border-t border-primary/10 bg-base-100/55">
             <table className="table table-xs table-pin-rows">
               <thead>
                 <tr>
-                  <th className="bg-base-100 text-xs text-base-content/55">ID</th>
-                  <th className="bg-base-100 text-xs text-base-content/55">Endpoint</th>
-                  <th className="bg-base-100 text-xs text-base-content/55">Status</th>
-                  <th></th>
+                  <th className="bg-base-200/80 text-xs text-base-content/55">ID</th>
+                  <th className="bg-base-200/80 text-xs text-base-content/55">Endpoint</th>
+                  <th className="bg-base-200/80 text-xs text-base-content/55">Status</th>
+                  <th className="bg-base-200/80"></th>
                 </tr>
               </thead>
               <tbody>
@@ -2646,6 +2897,24 @@ function collectAvailableTags(tunnels: TunnelView[]): string[] {
 }
 
 /**
+ * 選択中タグを先頭へ寄せてタグ一覧を並べ替える
+ */
+function orderTagsBySelection(tags: string[], selectedTags: string[]): string[] {
+  const selected = new Set(selectedTags);
+
+  return [...tags].sort((left, right) => {
+    const leftSelected = selected.has(left);
+    const rightSelected = selected.has(right);
+
+    if (leftSelected !== rightSelected) {
+      return leftSelected ? -1 : 1;
+    }
+
+    return left.localeCompare(right);
+  });
+}
+
+/**
  * 絞り込み条件が初期状態から変更されているか判定する
  */
 function hasActiveTunnelFilters(filters: TunnelFilters): boolean {
@@ -2680,6 +2949,34 @@ function tunnelContainsQuery(tunnel: TunnelView, query: string): boolean {
   ];
 
   return fields.some((field) => field.toLowerCase().includes(query));
+}
+
+/**
+ * 検索語との一致有無に応じて表示テキストを分割する
+ */
+function splitTextBySearchQuery(text: string, normalizedQuery: string): HighlightedTextPart[] {
+  const normalizedText = text.toLowerCase();
+  const parts: HighlightedTextPart[] = [];
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    const matchIndex = normalizedText.indexOf(normalizedQuery, cursor);
+
+    if (matchIndex === -1) {
+      parts.push({ text: text.slice(cursor), isMatch: false });
+      break;
+    }
+
+    if (matchIndex > cursor) {
+      parts.push({ text: text.slice(cursor, matchIndex), isMatch: false });
+    }
+
+    const matchEnd = matchIndex + normalizedQuery.length;
+    parts.push({ text: text.slice(matchIndex, matchEnd), isMatch: true });
+    cursor = matchEnd;
+  }
+
+  return parts.length > 0 ? parts : [{ text, isMatch: false }];
 }
 
 /**

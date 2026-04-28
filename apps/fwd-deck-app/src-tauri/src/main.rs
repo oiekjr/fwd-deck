@@ -9,11 +9,11 @@ use fwd_deck_core::{
     ResolvedTimeoutConfig, ResolvedTunnelConfig, StartedTunnel, StoppedTunnel, TimeoutConfig,
     TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport,
     add_tunnel_to_config_file, default_global_config_path, default_local_config_path,
-    default_state_file_path, load_effective_config, remove_tunnel_from_config_file, start_tunnel,
-    stop_tunnel, tag_is_valid, tunnel_statuses, validate_config,
+    default_state_file_path, load_effective_config, remove_tunnel_from_config_file,
+    start_tunnels_with_progress, stop_tunnel, tag_is_valid, tunnel_statuses, validate_config,
 };
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use thiserror::Error;
 
 const APP_PREFERENCES_FILE_NAME: &str = "preferences.toml";
@@ -21,6 +21,8 @@ const APP_PREFERENCES_VERSION: u32 = 1;
 const WORKSPACE_HISTORY_LIMIT: usize = 10;
 const WORKSPACE_STATES_DIR: &str = "workspace-states";
 const STATE_FILE_NAME: &str = "state.toml";
+const START_TUNNELS_PARALLELISM: usize = 4;
+const OPERATION_PROGRESS_EVENT: &str = "operation-progress";
 
 /// Tauri アプリを起動する
 fn main() {
@@ -200,6 +202,15 @@ struct OperationFailureView {
     message: String,
 }
 
+/// フロントエンドへ通知する一括操作の進捗を表現する
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperationProgressEvent {
+    operation_id: String,
+    completed_count: usize,
+    total_count: usize,
+}
+
 /// 設定編集対象のスコープを表現する
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -242,6 +253,67 @@ impl std::fmt::Display for RuntimeScope {
 struct OperationTargetInput {
     id: String,
     runtime_scope: Option<RuntimeScope>,
+}
+
+/// 一括操作の進捗通知を送信する
+struct OperationProgressEmitter<'a> {
+    app: &'a tauri::AppHandle,
+    operation_id: &'a str,
+    total_count: usize,
+    completed_count: usize,
+}
+
+impl<'a> OperationProgressEmitter<'a> {
+    /// 一括操作の進捗通知を初期化する
+    fn new(app: &'a tauri::AppHandle, operation_id: &'a str, total_count: usize) -> Self {
+        Self {
+            app,
+            operation_id,
+            total_count,
+            completed_count: 0,
+        }
+    }
+
+    /// 完了件数を 1 件進めて通知する
+    fn advance(&mut self) {
+        self.completed_count = self.completed_count.saturating_add(1).min(self.total_count);
+        self.emit_current();
+    }
+
+    /// 現在の進捗をフロントエンドへ通知する
+    fn emit_current(&self) {
+        let _ = self.app.emit(
+            OPERATION_PROGRESS_EVENT,
+            OperationProgressEvent {
+                operation_id: self.operation_id.to_owned(),
+                completed_count: self.completed_count,
+                total_count: self.total_count,
+            },
+        );
+    }
+}
+
+/// 開始対象の入力順と解決済み設定を保持する
+#[derive(Debug, Clone)]
+struct StartOperationTarget {
+    index: usize,
+    target: OperationTargetInput,
+    tunnel: ResolvedTunnelConfig,
+}
+
+/// 同一 state file に対する開始対象を保持する
+#[derive(Debug, Clone)]
+struct StartOperationGroup {
+    state_path: PathBuf,
+    targets: Vec<StartOperationTarget>,
+}
+
+/// 一括操作 1 件の結果を保持する
+#[derive(Debug, Clone)]
+enum OperationOutcome {
+    Succeeded(OperationSuccessView),
+    Failed(OperationFailureView),
+    Skipped,
 }
 
 /// runtime scope を付与したトンネル状態を表現する
@@ -353,8 +425,9 @@ fn start_tunnels(
     app: tauri::AppHandle,
     paths: Option<WorkspaceSelection>,
     targets: Vec<OperationTargetInput>,
+    operation_id: String,
 ) -> Result<OperationReport, String> {
-    command_result(start_tunnels_inner(&app, paths, targets))
+    command_result(start_tunnels_inner(&app, paths, targets, &operation_id))
 }
 
 /// 指定トンネルを停止する
@@ -363,8 +436,9 @@ fn stop_tunnels(
     app: tauri::AppHandle,
     paths: Option<WorkspaceSelection>,
     targets: Vec<OperationTargetInput>,
+    operation_id: String,
 ) -> Result<OperationReport, String> {
-    command_result(stop_tunnels_inner(&app, paths, targets))
+    command_result(stop_tunnels_inner(&app, paths, targets, &operation_id))
 }
 
 /// 設定ファイルへトンネルを追加する
@@ -417,23 +491,15 @@ fn start_tunnels_inner(
     app: &tauri::AppHandle,
     paths: Option<WorkspaceSelection>,
     targets: Vec<OperationTargetInput>,
+    operation_id: &str,
 ) -> Result<OperationReport, AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
     let tunnels_by_id = tunnel_index_by_id(&config);
 
     ensure_valid_config(&config)?;
-    run_tunnel_operations(&targets, |target| {
-        let tunnel = tunnels_by_id
-            .get(target.id.as_str())
-            .copied()
-            .ok_or_else(|| {
-                AppError::InvalidInput(format!("未定義のトンネル ID です: {}", target.id))
-            })?;
-        let state_path = state_path_for_source(&runtime_paths, tunnel.source.kind)?;
-
-        start_tunnel_for_app(tunnel, state_path)
-    })
+    let mut progress = OperationProgressEmitter::new(app, operation_id, targets.len());
+    run_start_tunnel_operations(&runtime_paths, &targets, &tunnels_by_id, &mut progress)
 }
 
 /// トンネル停止処理を実行する
@@ -441,27 +507,37 @@ fn stop_tunnels_inner(
     app: &tauri::AppHandle,
     paths: Option<WorkspaceSelection>,
     targets: Vec<OperationTargetInput>,
+    operation_id: &str,
 ) -> Result<OperationReport, AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
     let tunnels_by_id = tunnel_index_by_id(&config);
+    let mut progress = OperationProgressEmitter::new(app, operation_id, targets.len());
 
-    run_tunnel_operations(&targets, |target| {
-        let state_path = match target.runtime_scope {
-            Some(scope) => state_path_for_runtime_scope(&runtime_paths, scope)?,
-            None => {
-                let tunnel = tunnels_by_id
-                    .get(target.id.as_str())
-                    .copied()
-                    .ok_or_else(|| {
-                        AppError::InvalidInput(format!("未定義のトンネル ID です: {}", target.id))
-                    })?;
-                state_path_for_source(&runtime_paths, tunnel.source.kind)?
-            }
-        };
+    run_tunnel_operations_with_progress(
+        &targets,
+        |target| {
+            let state_path = match target.runtime_scope {
+                Some(scope) => state_path_for_runtime_scope(&runtime_paths, scope)?,
+                None => {
+                    let tunnel =
+                        tunnels_by_id
+                            .get(target.id.as_str())
+                            .copied()
+                            .ok_or_else(|| {
+                                AppError::InvalidInput(format!(
+                                    "未定義のトンネル ID です: {}",
+                                    target.id
+                                ))
+                            })?;
+                    state_path_for_source(&runtime_paths, tunnel.source.kind)?
+                }
+            };
 
-        stop_tunnel_for_app(&target.id, state_path)
-    })
+            stop_tunnel_for_app(&target.id, state_path)
+        },
+        |_target| progress.advance(),
+    )
 }
 
 /// トンネル追加処理を実行する
@@ -1091,12 +1167,135 @@ fn ensure_required(name: &str, value: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-/// アプリの開始操作としてトンネルを開始する
-fn start_tunnel_for_app(
-    tunnel: &ResolvedTunnelConfig,
-    state_path: &Path,
+/// アプリの一括開始操作としてトンネルを開始する
+fn run_start_tunnel_operations(
+    paths: &RuntimePaths,
+    targets: &[OperationTargetInput],
+    tunnels_by_id: &HashMap<&str, &ResolvedTunnelConfig>,
+    progress: &mut OperationProgressEmitter<'_>,
+) -> Result<OperationReport, AppError> {
+    ensure_operation_targets_selected(targets)?;
+
+    let mut outcomes = (0..targets.len()).map(|_| None).collect::<Vec<_>>();
+    let mut groups = Vec::new();
+
+    for (index, target) in targets.iter().enumerate() {
+        match resolve_start_operation_target(paths, tunnels_by_id, index, target) {
+            Ok((state_path, operation_target)) => {
+                push_start_operation_group(&mut groups, state_path, operation_target);
+            }
+            Err(error) => {
+                outcomes[index] = Some(operation_failure_outcome(target, error.to_string()));
+                progress.advance();
+            }
+        }
+    }
+
+    for group in groups {
+        let tunnels = group
+            .targets
+            .iter()
+            .map(|target| target.tunnel.clone())
+            .collect::<Vec<_>>();
+        let mut reported_count = 0;
+
+        match start_tunnels_with_progress(
+            &tunnels,
+            &group.state_path,
+            START_TUNNELS_PARALLELISM,
+            |_index, _result| {
+                reported_count += 1;
+                progress.advance();
+            },
+        ) {
+            Ok(results) => {
+                for (target, result) in group.targets.into_iter().zip(results) {
+                    outcomes[target.index] =
+                        Some(start_operation_result_outcome(&target.target, result));
+                }
+            }
+            Err(error) => {
+                let message = AppError::Runtime(error).to_string();
+                let remaining_count = group.targets.len().saturating_sub(reported_count);
+                for target in group.targets {
+                    outcomes[target.index] =
+                        Some(operation_failure_outcome(&target.target, message.clone()));
+                }
+                for _ in 0..remaining_count {
+                    progress.advance();
+                }
+            }
+        }
+    }
+
+    Ok(operation_report_from_outcomes(outcomes))
+}
+
+/// 開始操作の入力を状態ファイル単位の実行対象へ変換する
+fn resolve_start_operation_target(
+    paths: &RuntimePaths,
+    tunnels_by_id: &HashMap<&str, &ResolvedTunnelConfig>,
+    index: usize,
+    target: &OperationTargetInput,
+) -> Result<(PathBuf, StartOperationTarget), AppError> {
+    let tunnel = tunnels_by_id
+        .get(target.id.as_str())
+        .copied()
+        .ok_or_else(|| {
+            AppError::InvalidInput(format!("未定義のトンネル ID です: {}", target.id))
+        })?;
+    let state_path = state_path_for_source(paths, tunnel.source.kind)?.to_path_buf();
+
+    Ok((
+        state_path,
+        StartOperationTarget {
+            index,
+            target: target.clone(),
+            tunnel: (*tunnel).clone(),
+        },
+    ))
+}
+
+/// 同一 state file の開始対象を同じ実行グループへ追加する
+fn push_start_operation_group(
+    groups: &mut Vec<StartOperationGroup>,
+    state_path: PathBuf,
+    target: StartOperationTarget,
+) {
+    if let Some(group) = groups
+        .iter_mut()
+        .find(|group| group.state_path == state_path)
+    {
+        group.targets.push(target);
+        return;
+    }
+
+    groups.push(StartOperationGroup {
+        state_path,
+        targets: vec![target],
+    });
+}
+
+/// 開始結果をアプリ表示用の一括操作結果へ変換する
+fn start_operation_result_outcome(
+    target: &OperationTargetInput,
+    result: Result<StartedTunnel, TunnelRuntimeError>,
+) -> OperationOutcome {
+    match start_tunnel_result_for_app(result) {
+        Ok(Some(message)) => OperationOutcome::Succeeded(OperationSuccessView {
+            id: operation_target_label(target),
+            message,
+        }),
+        Ok(None) => OperationOutcome::Skipped,
+        Err(error) => operation_failure_outcome(target, error.to_string()),
+    }
+}
+
+/// 単体開始結果をアプリ表示用メッセージへ変換する
+fn start_tunnel_result_for_app(
+    result: Result<StartedTunnel, TunnelRuntimeError>,
 ) -> Result<Option<String>, AppError> {
-    match start_tunnel(tunnel, state_path) {
+    match result {
         Ok(started) => Ok(Some(start_success_message(started))),
         Err(TunnelRuntimeError::AlreadyRunning { id, pid }) => {
             Ok(Some(start_already_running_message(&id, pid)))
@@ -1114,19 +1313,17 @@ fn stop_tunnel_for_app(id: &str, state_path: &Path) -> Result<Option<String>, Ap
     }
 }
 
-/// 複数トンネルに対する操作を順次実行する
-fn run_tunnel_operations<F>(
+/// 複数トンネルに対する操作を順次実行して結果確定時に通知する
+fn run_tunnel_operations_with_progress<F, G>(
     targets: &[OperationTargetInput],
     mut operation: F,
+    mut on_result: G,
 ) -> Result<OperationReport, AppError>
 where
     F: FnMut(&OperationTargetInput) -> Result<Option<String>, AppError>,
+    G: FnMut(&OperationTargetInput),
 {
-    if targets.is_empty() {
-        return Err(AppError::InvalidInput(
-            "操作対象のトンネルが選択されていません".to_owned(),
-        ));
-    }
+    ensure_operation_targets_selected(targets)?;
 
     let mut succeeded = Vec::new();
     let mut failed = Vec::new();
@@ -1143,9 +1340,46 @@ where
                 message: error.to_string(),
             }),
         }
+
+        on_result(target);
     }
 
     Ok(OperationReport { succeeded, failed })
+}
+
+/// 操作対象が空でないことを検証する
+fn ensure_operation_targets_selected(targets: &[OperationTargetInput]) -> Result<(), AppError> {
+    if targets.is_empty() {
+        return Err(AppError::InvalidInput(
+            "操作対象のトンネルが選択されていません".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// 失敗した操作結果を生成する
+fn operation_failure_outcome(target: &OperationTargetInput, message: String) -> OperationOutcome {
+    OperationOutcome::Failed(OperationFailureView {
+        id: operation_target_label(target),
+        message,
+    })
+}
+
+/// 入力順を維持して一括操作レポートへ変換する
+fn operation_report_from_outcomes(outcomes: Vec<Option<OperationOutcome>>) -> OperationReport {
+    let mut succeeded = Vec::new();
+    let mut failed = Vec::new();
+
+    for outcome in outcomes.into_iter().flatten() {
+        match outcome {
+            OperationOutcome::Succeeded(success) => succeeded.push(success),
+            OperationOutcome::Failed(failure) => failed.push(failure),
+            OperationOutcome::Skipped => {}
+        }
+    }
+
+    OperationReport { succeeded, failed }
 }
 
 /// 操作対象の表示名を生成する
@@ -1357,7 +1591,7 @@ mod tests {
 
     /// 起動済みトンネルがアプリ操作では成功扱いになることを検証する
     #[test]
-    fn start_tunnel_for_app_reports_already_running_tunnel_as_success() {
+    fn start_tunnel_result_for_app_reports_already_running_tunnel_as_success() {
         let temp_dir = TempDir::new().expect("create state directory");
         let state_path = temp_dir.path().join("state.toml");
         let tunnel = resolved_tunnel("db", temp_dir.path().join("fwd-deck.toml"));
@@ -1370,8 +1604,8 @@ mod tests {
         ));
         write_state_file(&state_path, &state_file).expect("write state file");
 
-        let message =
-            start_tunnel_for_app(&tunnel, &state_path).expect("report already running tunnel");
+        let result = fwd_deck_core::start_tunnel(&tunnel, &state_path);
+        let message = start_tunnel_result_for_app(result).expect("report already running tunnel");
 
         assert_eq!(
             message,
@@ -1399,9 +1633,12 @@ mod tests {
             runtime_scope: None,
         }];
 
-        let report =
-            run_tunnel_operations(&targets, |_target| Ok::<Option<String>, AppError>(None))
-                .expect("run operation");
+        let report = run_tunnel_operations_with_progress(
+            &targets,
+            |_target| Ok::<Option<String>, AppError>(None),
+            |_target| {},
+        )
+        .expect("run operation");
 
         assert!(report.succeeded.is_empty());
         assert!(report.failed.is_empty());

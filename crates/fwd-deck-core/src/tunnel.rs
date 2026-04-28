@@ -126,6 +126,8 @@ pub enum TunnelRuntimeError {
     Spawn { id: String, source: io::Error },
     #[error("Failed to inspect ssh startup for tunnel: {id}: {source}")]
     StartupCheck { id: String, source: io::Error },
+    #[error("Tunnel start worker panicked: {id}")]
+    StartWorkerPanic { id: String },
     #[error("ssh exited before the tunnel was ready: {id}: {status}")]
     EarlyExit {
         id: String,
@@ -155,33 +157,97 @@ pub fn start_tunnel(
         });
     }
 
-    ensure_local_endpoint_available(resolved)?;
+    let started = start_tunnel_without_state_write(resolved)?;
+    state_file.upsert(started.state.clone());
+    write_state_file(state_path, &state_file)?;
 
-    let mut child = spawn_ssh_tunnel(resolved)?;
-    thread::sleep(start_grace_period(resolved.timeouts));
+    Ok(started)
+}
 
-    if let Some(status) = child
-        .try_wait()
-        .map_err(|source| TunnelRuntimeError::StartupCheck {
-            id: resolved.tunnel.id.clone(),
-            source,
-        })?
-    {
-        return Err(TunnelRuntimeError::EarlyExit {
-            id: resolved.tunnel.id.clone(),
-            status,
+/// 複数トンネルを状態ファイル単位で開始する
+pub fn start_tunnels(
+    resolved_tunnels: &[ResolvedTunnelConfig],
+    state_path: &Path,
+    parallelism: usize,
+) -> Result<Vec<Result<StartedTunnel, TunnelRuntimeError>>, TunnelRuntimeError> {
+    start_tunnels_with_progress(
+        resolved_tunnels,
+        state_path,
+        parallelism,
+        |_index, _result| {},
+    )
+}
+
+/// 複数トンネルを状態ファイル単位で開始し、各結果確定時に通知する
+pub fn start_tunnels_with_progress<F>(
+    resolved_tunnels: &[ResolvedTunnelConfig],
+    state_path: &Path,
+    parallelism: usize,
+    mut on_result: F,
+) -> Result<Vec<Result<StartedTunnel, TunnelRuntimeError>>, TunnelRuntimeError>
+where
+    F: FnMut(usize, &Result<StartedTunnel, TunnelRuntimeError>),
+{
+    let mut state_file = read_state_file(state_path)?;
+    let mut results = (0..resolved_tunnels.len())
+        .map(|_| None)
+        .collect::<Vec<_>>();
+    let mut pending_jobs = Vec::new();
+
+    for (index, resolved) in resolved_tunnels.iter().enumerate() {
+        if let Some(existing) = state_file.get(&resolved.tunnel.id)
+            && process_is_running(existing.pid)
+        {
+            let result = Err(TunnelRuntimeError::AlreadyRunning {
+                id: existing.id.clone(),
+                pid: existing.pid,
+            });
+            on_result(index, &result);
+            results[index] = Some(result);
+            continue;
+        }
+
+        pending_jobs.push(StartTunnelJob {
+            index,
+            resolved: resolved.clone(),
         });
     }
 
-    let started_at_unix_seconds = current_unix_seconds();
-    let tunnel_state =
-        TunnelState::from_resolved_tunnel(resolved, child.id(), started_at_unix_seconds);
-    state_file.upsert(tunnel_state.clone());
-    write_state_file(state_path, &state_file)?;
+    let parallelism = parallelism.max(1);
+    for chunk in pending_jobs.chunks(parallelism) {
+        let handles = chunk
+            .iter()
+            .map(|job| {
+                let resolved = job.resolved.clone();
+                thread::spawn(move || start_tunnel_without_state_write(&resolved))
+            })
+            .collect::<Vec<_>>();
 
-    Ok(StartedTunnel {
-        state: tunnel_state,
-    })
+        for (job, handle) in chunk.iter().zip(handles) {
+            let result = handle.join().unwrap_or_else(|_| {
+                Err(TunnelRuntimeError::StartWorkerPanic {
+                    id: job.resolved.tunnel.id.clone(),
+                })
+            });
+            on_result(job.index, &result);
+            results[job.index] = Some(result);
+        }
+    }
+
+    let mut has_state_changes = false;
+    for started in results.iter().filter_map(Option::as_ref).flatten() {
+        state_file.upsert(started.state.clone());
+        has_state_changes = true;
+    }
+
+    if has_state_changes {
+        write_state_file(state_path, &state_file)?;
+    }
+
+    Ok(results
+        .into_iter()
+        .map(|result| result.expect("start tunnel result should be recorded"))
+        .collect())
 }
 
 /// トンネル状態の一覧を取得する
@@ -278,6 +344,44 @@ fn build_ssh_args(resolved: &ResolvedTunnelConfig) -> Vec<String> {
 /// 起動後の早期終了確認までの待機時間を取得する
 fn start_grace_period(timeouts: ResolvedTimeoutConfig) -> Duration {
     Duration::from_millis(timeouts.start_grace_milliseconds)
+}
+
+/// 状態ファイル更新を呼び出し元へ委ねて SSH プロセスを開始する
+fn start_tunnel_without_state_write(
+    resolved: &ResolvedTunnelConfig,
+) -> Result<StartedTunnel, TunnelRuntimeError> {
+    ensure_local_endpoint_available(resolved)?;
+
+    let mut child = spawn_ssh_tunnel(resolved)?;
+    thread::sleep(start_grace_period(resolved.timeouts));
+
+    if let Some(status) = child
+        .try_wait()
+        .map_err(|source| TunnelRuntimeError::StartupCheck {
+            id: resolved.tunnel.id.clone(),
+            source,
+        })?
+    {
+        return Err(TunnelRuntimeError::EarlyExit {
+            id: resolved.tunnel.id.clone(),
+            status,
+        });
+    }
+
+    let started_at_unix_seconds = current_unix_seconds();
+    let tunnel_state =
+        TunnelState::from_resolved_tunnel(resolved, child.id(), started_at_unix_seconds);
+
+    Ok(StartedTunnel {
+        state: tunnel_state,
+    })
+}
+
+/// 並列開始対象の元位置と設定を保持する
+#[derive(Debug, Clone)]
+struct StartTunnelJob {
+    index: usize,
+    resolved: ResolvedTunnelConfig,
 }
 
 /// SSH 子プロセスを起動する
@@ -464,9 +568,10 @@ fn expand_home_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, process};
 
-    use crate::{ConfigSource, ConfigSourceKind, TimeoutConfig, TunnelConfig};
+    use crate::{ConfigSource, ConfigSourceKind, TimeoutConfig, TunnelConfig, TunnelStateFile};
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -515,6 +620,52 @@ mod tests {
         let duration = start_grace_period(timeouts);
 
         assert_eq!(duration, Duration::from_millis(50));
+    }
+
+    /// 一括開始が起動済みトンネルを起動処理なしで報告することを検証する
+    #[test]
+    fn start_tunnels_reports_already_running_tunnels() {
+        let temp_dir = TempDir::new().expect("create state directory");
+        let state_path = temp_dir.path().join("state.toml");
+        let resolved = resolved_tunnel();
+        let mut state = TunnelStateFile::new();
+        state.upsert(TunnelState::from_resolved_tunnel(
+            &resolved,
+            process::id(),
+            1_700_000_000,
+        ));
+        write_state_file(&state_path, &state).expect("write state file");
+
+        let results = start_tunnels(&[resolved], &state_path, 4).expect("start tunnels");
+
+        assert_eq!(results.len(), 1);
+        assert!(matches!(
+            &results[0],
+            Err(TunnelRuntimeError::AlreadyRunning { id, .. }) if id == "db"
+        ));
+    }
+
+    /// 一括開始が結果確定時に進捗通知を呼ぶことを検証する
+    #[test]
+    fn start_tunnels_reports_progress_for_already_running_tunnels() {
+        let temp_dir = TempDir::new().expect("create state directory");
+        let state_path = temp_dir.path().join("state.toml");
+        let resolved = resolved_tunnel();
+        let mut state = TunnelStateFile::new();
+        state.upsert(TunnelState::from_resolved_tunnel(
+            &resolved,
+            process::id(),
+            1_700_000_000,
+        ));
+        write_state_file(&state_path, &state).expect("write state file");
+        let mut reported_indexes = Vec::new();
+
+        start_tunnels_with_progress(&[resolved], &state_path, 4, |index, _result| {
+            reported_indexes.push(index);
+        })
+        .expect("start tunnels");
+
+        assert_eq!(reported_indexes, vec![0]);
     }
 
     /// lsof の field 出力から LISTEN プロセス情報を抽出できることを検証する

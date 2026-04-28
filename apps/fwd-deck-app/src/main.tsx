@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -193,6 +194,21 @@ interface OperationToastMessage {
 
 type OperationToastInput = Omit<OperationToastMessage, "id">;
 
+type TunnelOperationCommand = "start_tunnels" | "stop_tunnels";
+
+interface OperationProgress {
+  operationId: string;
+  command: TunnelOperationCommand;
+  completedCount: number;
+  totalCount: number;
+}
+
+interface OperationProgressEventPayload {
+  operationId: string;
+  completedCount: number;
+  totalCount: number;
+}
+
 interface RefreshDashboardOptions {
   silent?: boolean;
   persistPaths?: boolean;
@@ -251,6 +267,7 @@ const initialFilters: TunnelFilters = {
 const searchDebounceMilliseconds = 200;
 const autoRefreshIntervalMilliseconds = 2_000;
 const operationToastDismissMilliseconds = 4_000;
+const operationProgressEventName = "operation-progress";
 const missingTauriRuntimeMessage =
   "Tauri 実行環境が見つかりません。アプリの操作確認は npm run tauri dev またはビルド済みアプリから実行してください";
 
@@ -282,9 +299,13 @@ function App(): ReactElement {
   const [deleteTarget, setDeleteTarget] = useState<TunnelView | null>(null);
   const [message, setMessage] = useState<AppMessage | null>(null);
   const [operationToast, setOperationToast] = useState<OperationToastMessage | null>(null);
+  const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
   const [isBusy, setIsBusy] = useState<boolean>(false);
   const [hasCompletedInitialLoad, setHasCompletedInitialLoad] = useState<boolean>(false);
   const autoRefreshInFlightRef = useRef<boolean>(false);
+  const operationInFlightRef = useRef<boolean>(false);
+  const activeOperationIdRef = useRef<string | null>(null);
+  const operationSequenceRef = useRef<number>(0);
   const operationToastIdRef = useRef<number>(0);
 
   const stats = useMemo<DashboardStats>(() => calculateStats(dashboard), [dashboard]);
@@ -354,6 +375,49 @@ function App(): ReactElement {
 
     return () => window.clearTimeout(timeoutId);
   }, [operationToast]);
+
+  useEffect(() => {
+    if (!isTauriRuntimeAvailable()) {
+      return;
+    }
+
+    let isDisposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void listen<OperationProgressEventPayload>(operationProgressEventName, (event) => {
+      const payload = event.payload;
+
+      if (payload.operationId !== activeOperationIdRef.current) {
+        return;
+      }
+
+      setOperationProgress((current) => {
+        if (current === null || current.operationId !== payload.operationId) {
+          return current;
+        }
+
+        return {
+          ...current,
+          completedCount: clampCompletedCount(payload.completedCount, payload.totalCount),
+          totalCount: payload.totalCount,
+        };
+      });
+    })
+      .then((nextUnlisten) => {
+        if (isDisposed) {
+          nextUnlisten();
+          return;
+        }
+
+        unlisten = nextUnlisten;
+      })
+      .catch(() => {});
+
+    return () => {
+      isDisposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   /**
    * 現在のパス設定に基づいてダッシュボードを再取得する
@@ -429,7 +493,7 @@ function App(): ReactElement {
     }
 
     function runAutoRefresh(): void {
-      if (autoRefreshInFlightRef.current) {
+      if (autoRefreshInFlightRef.current || operationInFlightRef.current) {
         return;
       }
 
@@ -514,15 +578,28 @@ function App(): ReactElement {
    * トンネル操作を実行して結果を反映する
    */
   async function runOperation(
-    command: "start_tunnels" | "stop_tunnels",
+    command: TunnelOperationCommand,
     targets: OperationTarget[],
   ): Promise<void> {
+    operationSequenceRef.current += 1;
+    const operationId = `operation-${operationSequenceRef.current}`;
+
+    operationInFlightRef.current = true;
+    activeOperationIdRef.current = operationId;
+    setOperationProgress({
+      operationId,
+      command,
+      completedCount: 0,
+      totalCount: targets.length,
+    });
     setIsBusy(true);
+    await waitForNextPaint();
 
     try {
       const report = await invokeCommand<OperationReport>(command, {
         paths: normalizeWorkspaceSelection(paths),
         targets,
+        operationId,
       });
 
       await refreshDashboard(paths, { silent: true });
@@ -536,6 +613,9 @@ function App(): ReactElement {
     } catch (error) {
       showOperationToast({ kind: "error", summary: stringifyError(error) });
     } finally {
+      operationInFlightRef.current = false;
+      activeOperationIdRef.current = null;
+      setOperationProgress(null);
       setIsBusy(false);
     }
   }
@@ -796,6 +876,7 @@ function App(): ReactElement {
             selectedCount={selectedIdList.length}
             selectedVisibleCount={selectedVisibleCount}
             availableTags={availableTags}
+            operationProgress={operationProgress}
             isBusy={isBusy}
             queryInput={queryInput}
             filters={filters}
@@ -1110,6 +1191,7 @@ interface DashboardViewProps {
   selectedCount: number;
   selectedVisibleCount: number;
   availableTags: string[];
+  operationProgress: OperationProgress | null;
   queryInput: string;
   filters: TunnelFilters;
   isBusy: boolean;
@@ -1142,6 +1224,7 @@ function DashboardView({
   selectedCount,
   selectedVisibleCount,
   availableTags,
+  operationProgress,
   queryInput,
   filters,
   isBusy,
@@ -1195,6 +1278,7 @@ function DashboardView({
         selectedVisibleCount={selectedVisibleCount}
         trackedPanelHeight={trackedPanelHeight}
         panelRef={selectionBarRef}
+        operationProgress={operationProgress}
         isBusy={isBusy}
         onSelectVisible={onSelectVisible}
         onDeselectVisible={onDeselectVisible}
@@ -1812,6 +1896,7 @@ interface SelectionActionBarProps {
   selectedVisibleCount: number;
   trackedPanelHeight: number;
   panelRef: RefObject<HTMLDivElement | null>;
+  operationProgress: OperationProgress | null;
   isBusy: boolean;
   onSelectVisible: () => void;
   onDeselectVisible: () => void;
@@ -1830,6 +1915,7 @@ function SelectionActionBar({
   selectedVisibleCount,
   trackedPanelHeight,
   panelRef,
+  operationProgress,
   isBusy,
   onSelectVisible,
   onDeselectVisible,
@@ -1876,6 +1962,8 @@ function SelectionActionBar({
         </div>
 
         <div className="flex flex-col gap-2 xl:flex-row xl:items-center xl:justify-end">
+          <SelectionOperationProgress progress={operationProgress} />
+
           <div className="grid grid-cols-2 gap-2 xl:grid-cols-[repeat(2,max-content)]">
             <button
               type="button"
@@ -1982,6 +2070,38 @@ function MessagePanel({ message }: MessagePanelProps): ReactElement | null {
 
   const kind = message.kind === "error" ? "error" : message.kind === "success" ? "success" : "info";
   return <AlertMessage kind={kind}>{message.text}</AlertMessage>;
+}
+
+interface SelectionOperationProgressProps {
+  progress: OperationProgress | null;
+}
+
+/**
+ * Selection バー内に一括操作の進行中状態を表示する
+ */
+function SelectionOperationProgress({
+  progress,
+}: SelectionOperationProgressProps): ReactElement | null {
+  if (progress === null) {
+    return null;
+  }
+
+  const label = operationProgressLabel(progress);
+
+  return (
+    <div className="min-w-0 rounded-md border border-info/30 bg-info/10 px-3 py-2 xl:w-64">
+      <div className="flex min-w-0 items-center gap-2">
+        <Loader2 className="shrink-0 animate-spin text-info" size={16} />
+        <span className="truncate text-xs font-semibold text-base-content">{label}</span>
+      </div>
+      <progress
+        className="progress progress-info mt-2 h-1.5 w-full"
+        value={progress.completedCount}
+        max={progress.totalCount}
+        aria-label={label}
+      />
+    </div>
+  );
 }
 
 interface ToastViewportProps {
@@ -3257,6 +3377,34 @@ function operationMessage(report: OperationReport): OperationToastInput | null {
     summary: `${successCount} 件成功、${failureCount} 件失敗しました`,
     detail: failed,
   };
+}
+
+/**
+ * 実行中操作の表示ラベルを生成する
+ */
+function operationProgressLabel(progress: OperationProgress): string {
+  const operation = progress.command === "start_tunnels" ? "開始" : "停止";
+  const completedCount = clampCompletedCount(progress.completedCount, progress.totalCount);
+
+  return `${completedCount} / ${progress.totalCount} 件を${operation}中`;
+}
+
+/**
+ * 完了件数を総件数の範囲内へ正規化する
+ */
+function clampCompletedCount(completedCount: number, totalCount: number): number {
+  return Math.max(0, Math.min(completedCount, totalCount));
+}
+
+/**
+ * 操作開始表示が画面へ反映される描画機会まで待機する
+ */
+function waitForNextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => resolve());
+    });
+  });
 }
 
 /**

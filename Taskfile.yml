@@ -44,42 +44,42 @@ tasks:
       - lint
 
   list:
-    desc: fwd-deck.toml で list を実行する
+    desc: 既定設定で list を実行する
     preconditions:
-      - sh: test -f fwd-deck.toml
-        msg: fwd-deck.toml is required. Create it from fwd-deck.example.toml.
+      - sh: test -f fwd-deck.toml || test -f "$HOME/.config/fwd-deck/config.toml"
+        msg: fwd-deck.toml or ~/.config/fwd-deck/config.toml is required.
     cmds:
       - cargo run -p fwd-deck-cli --bin fwd-deck -- list
 
   start:
-    desc: fwd-deck.toml で start を実行する
+    desc: 既定設定で start を実行する
     preconditions:
-      - sh: test -f fwd-deck.toml
-        msg: fwd-deck.toml is required. Create it from fwd-deck.example.toml.
+      - sh: test -f fwd-deck.toml || test -f "$HOME/.config/fwd-deck/config.toml"
+        msg: fwd-deck.toml or ~/.config/fwd-deck/config.toml is required.
     cmds:
       - cargo run -p fwd-deck-cli --bin fwd-deck -- start
 
   start:dry-run:
-    desc: fwd-deck.toml で start の実行予定を確認する
+    desc: 既定設定で start の実行予定を確認する
     preconditions:
-      - sh: test -f fwd-deck.toml
-        msg: fwd-deck.toml is required. Create it from fwd-deck.example.toml.
+      - sh: test -f fwd-deck.toml || test -f "$HOME/.config/fwd-deck/config.toml"
+        msg: fwd-deck.toml or ~/.config/fwd-deck/config.toml is required.
     cmds:
       - cargo run -p fwd-deck-cli --bin fwd-deck -- start --all --dry-run
 
   recover:
     desc: stale なトンネルを再起動する
     preconditions:
-      - sh: test -f fwd-deck.toml
-        msg: fwd-deck.toml is required. Create it from fwd-deck.example.toml.
+      - sh: test -f fwd-deck.toml || test -f "$HOME/.config/fwd-deck/config.toml"
+        msg: fwd-deck.toml or ~/.config/fwd-deck/config.toml is required.
     cmds:
       - cargo run -p fwd-deck-cli --bin fwd-deck -- recover
 
   watch:
     desc: 追跡中トンネルを監視して stale 時に再起動する
     preconditions:
-      - sh: test -f fwd-deck.toml
-        msg: fwd-deck.toml is required. Create it from fwd-deck.example.toml.
+      - sh: test -f fwd-deck.toml || test -f "$HOME/.config/fwd-deck/config.toml"
+        msg: fwd-deck.toml or ~/.config/fwd-deck/config.toml is required.
     cmds:
       - cargo run -p fwd-deck-cli --bin fwd-deck -- watch
 
@@ -109,9 +109,9 @@ tasks:
       - cargo run -p fwd-deck-cli --bin fwd-deck -- config remove
 
   validate:
-    desc: fwd-deck.toml で validate を実行する
+    desc: 既定設定で validate を実行する
     preconditions:
-      - sh: test -f fwd-deck.toml
-        msg: fwd-deck.toml is required. Create it from fwd-deck.example.toml.
+      - sh: test -f fwd-deck.toml || test -f "$HOME/.config/fwd-deck/config.toml"
+        msg: fwd-deck.toml or ~/.config/fwd-deck/config.toml is required.
     cmds:
       - cargo run -p fwd-deck-cli --bin fwd-deck -- validate

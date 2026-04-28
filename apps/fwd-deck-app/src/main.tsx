@@ -884,7 +884,7 @@ function AppHeader({
           </div>
         </div>
         <div className="flex flex-col gap-3 xl:items-end">
-          <div className="join w-full self-start xl:w-auto xl:self-end">
+          <div className="view-switcher join w-full self-start xl:w-auto xl:self-end">
             <button
               type="button"
               className={`btn btn-sm join-item flex-1 xl:flex-none ${

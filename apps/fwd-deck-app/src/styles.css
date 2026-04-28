@@ -84,6 +84,14 @@ input {
   --badge-bg: transparent;
 }
 
+.view-switcher .btn-outline:is(:hover, :focus-visible, :active) {
+  --btn-bg: color-mix(in oklab, var(--color-base-content) 8%, var(--color-base-100));
+  --btn-border: var(--color-base-content);
+  --btn-fg: var(--color-base-content);
+  --btn-noise: none;
+  --btn-shadow: "";
+}
+
 .tunnel-card {
   border-left-width: 4px;
 }

@@ -78,12 +78,20 @@ input {
   --badge-bg: transparent;
 }
 
-.view-switcher .btn-outline:is(:hover, :focus-visible, :active) {
+.segmented-control .btn-outline:is(:hover, :focus-visible, :active) {
   --btn-bg: color-mix(in oklab, var(--color-base-content) 8%, var(--color-base-100));
   --btn-border: var(--color-base-content);
   --btn-fg: var(--color-base-content);
   --btn-noise: none;
   --btn-shadow: "";
+}
+
+.segmented-control .join-item[aria-pressed="true"] {
+  z-index: 1;
+}
+
+.segmented-control .join-item:is(:hover, :focus-visible, :active) {
+  z-index: 2;
 }
 
 .tunnel-card {

@@ -896,7 +896,7 @@ function AppHeader({
           </div>
         </div>
         <div className="flex flex-col gap-3 xl:items-end">
-          <div className="view-switcher join w-full self-start xl:w-auto xl:self-end">
+          <div className="view-switcher segmented-control join w-full self-start xl:w-auto xl:self-end">
             <button
               type="button"
               className={`btn btn-sm join-item flex-1 xl:flex-none ${
@@ -1661,7 +1661,7 @@ function TunnelOperationsPanel({
             ) : null}
           </div>
 
-          <div className="join">
+          <div className="segmented-control join">
             {statusFilterOptions.map((option) => (
               <button
                 key={option.value}
@@ -1677,7 +1677,7 @@ function TunnelOperationsPanel({
             ))}
           </div>
 
-          <div className="join">
+          <div className="segmented-control join">
             {scopeFilterOptions.map((option) => (
               <button
                 key={option.value}

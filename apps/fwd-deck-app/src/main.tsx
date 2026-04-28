@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   Activity,
   AlertTriangle,
@@ -9,6 +10,7 @@ import {
   CirclePlus,
   CircleStop,
   Clock3,
+  FolderOpen,
   Gauge,
   KeyRound,
   ListFilter,
@@ -30,6 +32,8 @@ type ConfigScope = "local" | "global";
 
 type RuntimeState = "running" | "stale";
 
+type RuntimeScope = "global" | "workspace";
+
 type TunnelStatus = RuntimeState | "idle";
 
 type StatusFilter = "all" | TunnelStatus;
@@ -38,15 +42,29 @@ type ScopeFilter = "all" | ConfigScope;
 
 type AppView = "dashboard" | "add" | "settings";
 
-interface PathSelection {
+interface WorkspaceSelection {
+  workspacePath: string;
+  workspaceHistory: string[];
   localConfigPath: string;
   globalConfigPath: string;
   useGlobal: boolean;
-  statePath: string;
+  globalStatePath: string;
+  workspaceStatePath: string;
+}
+
+interface WorkspaceSelectionInput {
+  workspacePath: string;
+  globalConfigPath: string;
+  useGlobal: boolean;
+}
+
+interface OperationTarget {
+  id: string;
+  runtimeScope?: RuntimeScope;
 }
 
 interface DashboardState {
-  paths: PathSelection;
+  paths: WorkspaceSelection;
   hasConfig: boolean;
   validation: ValidationView;
   tunnels: TunnelView[];
@@ -81,6 +99,8 @@ interface TunnelView {
 
 interface TrackedTunnelView {
   id: string;
+  runtimeScope: RuntimeScope;
+  runtimeKey: string;
   local: string;
   remote: string;
   ssh: string;
@@ -88,9 +108,11 @@ interface TrackedTunnelView {
 }
 
 interface RuntimeStatusView {
+  runtimeScope: RuntimeScope;
+  runtimeKey: string;
   pid: number;
   state: RuntimeState;
-  source: string;
+  source: ConfigScope;
   sourcePath: string;
   startedAtUnixSeconds: number;
 }
@@ -158,11 +180,14 @@ interface TunnelFilters {
   tags: string[];
 }
 
-const initialPaths: PathSelection = {
+const initialPaths: WorkspaceSelection = {
+  workspacePath: "",
+  workspaceHistory: [],
   localConfigPath: "",
   globalConfigPath: "",
   useGlobal: true,
-  statePath: "",
+  globalStatePath: "",
+  workspaceStatePath: "",
 };
 
 const initialForm: TunnelFormState = {
@@ -207,7 +232,7 @@ const scopeFilterOptions: ReadonlyArray<{ value: ScopeFilter; label: string }> =
  */
 function App(): ReactElement {
   const [dashboard, setDashboard] = useState<DashboardState | null>(null);
-  const [paths, setPaths] = useState<PathSelection>(initialPaths);
+  const [paths, setPaths] = useState<WorkspaceSelection>(initialPaths);
   const [form, setForm] = useState<TunnelFormState>(initialForm);
   const [filters, setFilters] = useState<TunnelFilters>(initialFilters);
   const [queryInput, setQueryInput] = useState<string>(initialFilters.query);
@@ -246,7 +271,7 @@ function App(): ReactElement {
 
       try {
         const loaded = await invoke<DashboardState>("load_dashboard", {
-          paths: normalizePathSelection(initialPaths),
+          paths: null,
         });
 
         setDashboard(loaded);
@@ -280,12 +305,12 @@ function App(): ReactElement {
   /**
    * 現在のパス設定に基づいてダッシュボードを再取得する
    */
-  async function refreshDashboard(nextPaths: PathSelection = paths): Promise<void> {
+  async function refreshDashboard(nextPaths: WorkspaceSelection = paths): Promise<void> {
     setIsBusy(true);
 
     try {
       const loaded = await invoke<DashboardState>("load_dashboard", {
-        paths: normalizePathSelection(nextPaths),
+        paths: normalizeWorkspaceSelection(nextPaths),
       });
 
       setDashboard(loaded);
@@ -308,7 +333,10 @@ function App(): ReactElement {
       return;
     }
 
-    await runOperation("start_tunnels", ids);
+    await runOperation(
+      "start_tunnels",
+      ids.map((id) => ({ id })),
+    );
   }
 
   /**
@@ -320,7 +348,17 @@ function App(): ReactElement {
       return;
     }
 
-    await runOperation("stop_tunnels", ids);
+    await runOperation(
+      "stop_tunnels",
+      ids.map((id) => ({ id })),
+    );
+  }
+
+  /**
+   * 追跡中 runtime のトンネルを停止する
+   */
+  async function stopTracked(target: OperationTarget): Promise<void> {
+    await runOperation("stop_tunnels", [target]);
   }
 
   /**
@@ -328,14 +366,14 @@ function App(): ReactElement {
    */
   async function runOperation(
     command: "start_tunnels" | "stop_tunnels",
-    ids: string[],
+    targets: OperationTarget[],
   ): Promise<void> {
     setIsBusy(true);
 
     try {
       const report = await invoke<OperationReport>(command, {
-        paths: normalizePathSelection(paths),
-        ids,
+        paths: normalizeWorkspaceSelection(paths),
+        targets,
       });
 
       setMessage(operationMessage(report));
@@ -353,6 +391,14 @@ function App(): ReactElement {
   async function submitTunnel(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
 
+    if (form.scope === "local" && paths.workspacePath.trim().length === 0) {
+      setMessage({
+        kind: "error",
+        text: "local 設定に追加するにはワークスペースを選択してください",
+      });
+      return;
+    }
+
     let tunnel: TunnelInput;
     try {
       tunnel = formToTunnelInput(form);
@@ -365,7 +411,7 @@ function App(): ReactElement {
 
     try {
       const loaded = await invoke<DashboardState>("add_tunnel_entry", {
-        paths: normalizePathSelection(paths),
+        paths: normalizeWorkspaceSelection(paths),
         scope: form.scope,
         tunnel,
       });
@@ -391,7 +437,7 @@ function App(): ReactElement {
 
     try {
       const loaded = await invoke<DashboardState>("remove_tunnel_entry", {
-        paths: normalizePathSelection(paths),
+        paths: normalizeWorkspaceSelection(paths),
         scope: tunnel.source,
         id: tunnel.id,
       });
@@ -410,8 +456,31 @@ function App(): ReactElement {
   /**
    * パス入力の変更を反映する
    */
-  function updatePath(field: keyof PathSelection, value: string | boolean): void {
+  function updatePath(field: keyof WorkspaceSelection, value: string | boolean): void {
     setPaths((current) => ({ ...current, [field]: value }));
+  }
+
+  /**
+   * フォルダ選択ダイアログの結果をワークスペースへ反映する
+   */
+  async function browseWorkspace(): Promise<void> {
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected !== "string") {
+        return;
+      }
+
+      setPaths((current) => ({ ...current, workspacePath: selected }));
+    } catch (error) {
+      setMessage({ kind: "error", text: stringifyError(error) });
+    }
+  }
+
+  /**
+   * 履歴から選択したワークスペースを反映する
+   */
+  function selectWorkspaceFromHistory(workspacePath: string): void {
+    setPaths((current) => ({ ...current, workspacePath }));
   }
 
   /**
@@ -508,11 +577,13 @@ function App(): ReactElement {
             onStopSelected={() => void stopSelected(selectedIdList)}
             onStartTunnel={(id) => void startSelected([id])}
             onStopTunnel={(id) => void stopSelected([id])}
+            onStopTracked={(target) => void stopTracked(target)}
             onRemoveTunnel={setDeleteTarget}
           />
         ) : activeView === "add" ? (
           <AddTunnelView
             form={form}
+            canUseLocal={paths.workspacePath.trim().length > 0}
             isBusy={isBusy}
             onChange={updateForm}
             onSubmit={(event) => void submitTunnel(event)}
@@ -523,6 +594,8 @@ function App(): ReactElement {
             isBusy={isBusy}
             onChange={updatePath}
             onReload={() => void refreshDashboard(paths)}
+            onBrowseWorkspace={() => void browseWorkspace()}
+            onSelectWorkspace={selectWorkspaceFromHistory}
           />
         )}
       </div>
@@ -714,6 +787,7 @@ interface DashboardViewProps {
   onStopSelected: () => void;
   onStartTunnel: (id: string) => void;
   onStopTunnel: (id: string) => void;
+  onStopTracked: (target: OperationTarget) => void;
   onRemoveTunnel: (tunnel: TunnelView) => void;
 }
 
@@ -743,6 +817,7 @@ function DashboardView({
   onStopSelected,
   onStartTunnel,
   onStopTunnel,
+  onStopTracked,
   onRemoveTunnel,
 }: DashboardViewProps): ReactElement {
   const [isTrackedPanelCollapsed, setIsTrackedPanelCollapsed] = useState<boolean>(true);
@@ -789,7 +864,7 @@ function DashboardView({
         isCollapsed={isTrackedPanelCollapsed}
         isBusy={isBusy}
         onToggleCollapsed={() => setIsTrackedPanelCollapsed((current) => !current)}
-        onStop={onStopTunnel}
+        onStop={onStopTracked}
       />
     </section>
   );
@@ -797,6 +872,7 @@ function DashboardView({
 
 interface AddTunnelViewProps {
   form: TunnelFormState;
+  canUseLocal: boolean;
   isBusy: boolean;
   onChange: (field: keyof TunnelFormState, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -805,43 +881,80 @@ interface AddTunnelViewProps {
 /**
  * トンネル追加専用の入力画面を表示する
  */
-function AddTunnelView({ form, isBusy, onChange, onSubmit }: AddTunnelViewProps): ReactElement {
+function AddTunnelView({
+  form,
+  canUseLocal,
+  isBusy,
+  onChange,
+  onSubmit,
+}: AddTunnelViewProps): ReactElement {
   return (
     <section className="mx-auto flex w-full max-w-6xl flex-col gap-4">
-      <TunnelForm form={form} isBusy={isBusy} onChange={onChange} onSubmit={onSubmit} />
+      <TunnelForm
+        form={form}
+        canUseLocal={canUseLocal}
+        isBusy={isBusy}
+        onChange={onChange}
+        onSubmit={onSubmit}
+      />
     </section>
   );
 }
 
 interface SettingsViewProps {
-  paths: PathSelection;
+  paths: WorkspaceSelection;
   isBusy: boolean;
-  onChange: (field: keyof PathSelection, value: string | boolean) => void;
+  onChange: (field: keyof WorkspaceSelection, value: string | boolean) => void;
   onReload: () => void;
+  onBrowseWorkspace: () => void;
+  onSelectWorkspace: (workspacePath: string) => void;
 }
 
 /**
  * 設定ファイルと状態ファイルの参照先を編集する
  */
-function SettingsView({ paths, isBusy, onChange, onReload }: SettingsViewProps): ReactElement {
+function SettingsView({
+  paths,
+  isBusy,
+  onChange,
+  onReload,
+  onBrowseWorkspace,
+  onSelectWorkspace,
+}: SettingsViewProps): ReactElement {
   return (
     <section className="mx-auto w-full max-w-4xl">
-      <PathPanel paths={paths} isBusy={isBusy} onChange={onChange} onReload={onReload} />
+      <PathPanel
+        paths={paths}
+        isBusy={isBusy}
+        onChange={onChange}
+        onReload={onReload}
+        onBrowseWorkspace={onBrowseWorkspace}
+        onSelectWorkspace={onSelectWorkspace}
+      />
     </section>
   );
 }
 
 interface PathPanelProps {
-  paths: PathSelection;
+  paths: WorkspaceSelection;
   isBusy: boolean;
-  onChange: (field: keyof PathSelection, value: string | boolean) => void;
+  onChange: (field: keyof WorkspaceSelection, value: string | boolean) => void;
   onReload: () => void;
+  onBrowseWorkspace: () => void;
+  onSelectWorkspace: (workspacePath: string) => void;
 }
 
 /**
  * 設定ファイルと状態ファイルの参照先を表示する
  */
-function PathPanel({ paths, isBusy, onChange, onReload }: PathPanelProps): ReactElement {
+function PathPanel({
+  paths,
+  isBusy,
+  onChange,
+  onReload,
+  onBrowseWorkspace,
+  onSelectWorkspace,
+}: PathPanelProps): ReactElement {
   return (
     <section className="rounded-lg border border-base-300 bg-base-100 shadow-sm">
       <div className="flex flex-col gap-4 p-5">
@@ -861,22 +974,52 @@ function PathPanel({ paths, isBusy, onChange, onReload }: PathPanelProps): React
           </button>
         </div>
         <div className="grid grid-cols-1 gap-3">
-          <TextField
-            label="Local config"
-            value={paths.localConfigPath}
-            onChange={(value) => onChange("localConfigPath", value)}
-          />
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
+            <TextField
+              label="Workspace"
+              value={paths.workspacePath}
+              onChange={(value) => onChange("workspacePath", value)}
+            />
+            <button
+              type="button"
+              className="btn btn-outline btn-sm mb-0"
+              onClick={onBrowseWorkspace}
+              disabled={isBusy}
+            >
+              <FolderOpen size={15} />
+              Browse
+            </button>
+          </div>
+          {paths.workspaceHistory.length > 0 ? (
+            <div className="rounded-md border border-base-300 bg-base-200/40 px-3 py-2">
+              <div className="mb-2 text-xs font-bold uppercase tracking-wide text-base-content/50">
+                Recent workspaces
+              </div>
+              <div className="flex flex-col gap-1">
+                {paths.workspaceHistory.map((workspacePath) => (
+                  <button
+                    key={workspacePath}
+                    type="button"
+                    className="btn btn-ghost btn-xs min-h-8 justify-start font-mono text-xs"
+                    onClick={() => onSelectWorkspace(workspacePath)}
+                    disabled={isBusy}
+                    title={workspacePath}
+                  >
+                    <span className="truncate">{workspacePath}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          <PathValue label="Local config" value={paths.localConfigPath} />
           <TextField
             label="Global config"
             value={paths.globalConfigPath}
             onChange={(value) => onChange("globalConfigPath", value)}
             disabled={!paths.useGlobal}
           />
-          <TextField
-            label="State file"
-            value={paths.statePath}
-            onChange={(value) => onChange("statePath", value)}
-          />
+          <PathValue label="Global state" value={paths.globalStatePath} />
+          <PathValue label="Workspace state" value={paths.workspaceStatePath} />
           <div className="rounded-md border border-base-300 bg-base-200/40 px-3 py-2">
             <label className="flex cursor-pointer items-center justify-between gap-3">
               <span className="text-sm font-semibold">Use global config</span>
@@ -891,6 +1034,25 @@ function PathPanel({ paths, isBusy, onChange, onReload }: PathPanelProps): React
         </div>
       </div>
     </section>
+  );
+}
+
+interface PathValueProps {
+  label: string;
+  value: string;
+}
+
+/**
+ * 読み取り専用パスを表示する
+ */
+function PathValue({ label, value }: PathValueProps): ReactElement {
+  return (
+    <div className="rounded-md border border-base-300 bg-base-200/40 px-3 py-2">
+      <div className="text-xs font-semibold text-base-content/60">{label}</div>
+      <div className="mt-1 min-h-5 truncate font-mono text-xs text-base-content/85" title={value}>
+        {value || "Not selected"}
+      </div>
+    </div>
   );
 }
 
@@ -949,20 +1111,20 @@ interface AlertMessageProps {
 function AlertMessage({ kind, children }: AlertMessageProps): ReactElement {
   const iconClassName =
     kind === "success"
-      ? "text-success"
+      ? "text-[#047857]"
       : kind === "warning"
-        ? "text-warning"
+        ? "text-[#b45309]"
         : kind === "error"
-          ? "text-error"
-          : "text-info";
+          ? "text-[#b91c1c]"
+          : "text-[#1d4ed8]";
   const toneClassName =
     kind === "success"
-      ? "border-success/30 bg-success/10"
+      ? "border-[#86efac] bg-[#ecfdf3]"
       : kind === "warning"
-        ? "border-warning/40 bg-warning/15"
+        ? "border-[#f59e0b] bg-[#fff7dc]"
         : kind === "error"
-          ? "border-error/35 bg-error/10"
-          : "border-info/35 bg-info/10";
+          ? "border-[#fca5a5] bg-[#fef2f2]"
+          : "border-[#93c5fd] bg-[#eff6ff]";
   const icon =
     kind === "success" ? (
       <CheckCircle2 className={iconClassName} size={18} />
@@ -1504,7 +1666,7 @@ interface TrackedPanelProps {
   isCollapsed: boolean;
   isBusy: boolean;
   onToggleCollapsed: () => void;
-  onStop: (id: string) => void;
+  onStop: (target: OperationTarget) => void;
 }
 
 /**
@@ -1558,8 +1720,13 @@ function TrackedPanel({
               </thead>
               <tbody>
                 {dashboard.trackedTunnels.map((tracked) => (
-                  <tr key={tracked.id}>
-                    <td className="font-bold">{tracked.id}</td>
+                  <tr key={tracked.runtimeKey}>
+                    <td className="font-bold">
+                      <div>{tracked.id}</div>
+                      <div className="text-[0.65rem] font-normal text-base-content/50">
+                        {tracked.runtimeScope}
+                      </div>
+                    </td>
                     <td className="max-w-md truncate font-mono text-xs">
                       {tracked.local} {" -> "} {tracked.remote}
                     </td>
@@ -1570,7 +1737,9 @@ function TrackedPanel({
                       <button
                         type="button"
                         className="btn btn-outline btn-xs"
-                        onClick={() => onStop(tracked.id)}
+                        onClick={() =>
+                          onStop({ id: tracked.id, runtimeScope: tracked.runtimeScope })
+                        }
                         disabled={isBusy}
                       >
                         <CircleStop size={13} />
@@ -1590,6 +1759,7 @@ function TrackedPanel({
 
 interface TunnelFormProps {
   form: TunnelFormState;
+  canUseLocal: boolean;
   isBusy: boolean;
   onChange: (field: keyof TunnelFormState, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -1598,7 +1768,15 @@ interface TunnelFormProps {
 /**
  * 設定追加フォームを表示する
  */
-function TunnelForm({ form, isBusy, onChange, onSubmit }: TunnelFormProps): ReactElement {
+function TunnelForm({
+  form,
+  canUseLocal,
+  isBusy,
+  onChange,
+  onSubmit,
+}: TunnelFormProps): ReactElement {
+  const localUnavailable = !canUseLocal;
+
   return (
     <form
       className="overflow-hidden rounded-lg border border-base-300 bg-base-100 shadow-sm"
@@ -1617,6 +1795,7 @@ function TunnelForm({ form, isBusy, onChange, onSubmit }: TunnelFormProps): Reac
               form.scope === "local" ? "btn-primary" : "btn-ghost"
             }`}
             onClick={() => onChange("scope", "local")}
+            disabled={localUnavailable}
           >
             Local
           </button>
@@ -1633,6 +1812,13 @@ function TunnelForm({ form, isBusy, onChange, onSubmit }: TunnelFormProps): Reac
       </div>
 
       <div className="grid grid-cols-1 gap-5 p-5 xl:grid-cols-3">
+        {localUnavailable && form.scope === "local" ? (
+          <div className="xl:col-span-3">
+            <AlertMessage kind="warning">
+              local 設定に追加するには Settings でワークスペースを選択してください。
+            </AlertMessage>
+          </div>
+        ) : null}
         <section className="flex flex-col gap-3">
           <h3 className="text-xs font-bold uppercase tracking-wide text-base-content/50">
             Identity
@@ -1724,7 +1910,11 @@ function TunnelForm({ form, isBusy, onChange, onSubmit }: TunnelFormProps): Reac
       </div>
 
       <div className="flex justify-end border-t border-base-300 px-5 py-4">
-        <button className="btn btn-primary btn-sm" type="submit" disabled={isBusy}>
+        <button
+          className="btn btn-primary btn-sm"
+          type="submit"
+          disabled={isBusy || (localUnavailable && form.scope === "local")}
+        >
           <CirclePlus size={16} />
           Add tunnel
         </button>
@@ -1977,14 +2167,13 @@ function parsePort(value: string, label: string, required: boolean): number | nu
 }
 
 /**
- * パス入力を command 入力へ正規化する
+ * ワークスペース入力を command 入力へ正規化する
  */
-function normalizePathSelection(paths: PathSelection): PathSelection {
+function normalizeWorkspaceSelection(paths: WorkspaceSelection): WorkspaceSelectionInput {
   return {
-    localConfigPath: paths.localConfigPath.trim(),
+    workspacePath: paths.workspacePath.trim(),
     globalConfigPath: paths.globalConfigPath.trim(),
     useGlobal: paths.useGlobal,
-    statePath: paths.statePath.trim(),
   };
 }
 

@@ -89,6 +89,10 @@ fwd-deck --global-config ~/.config/fwd-deck/work.toml list
 fwd-deck --no-global list
 ```
 
+macOS アプリでは、CLI の実行ディレクトリではなく、Settings で選択したワークスペースディレクトリを local 設定の基準にします。
+アプリの local 設定は `<workspace>/fwd-deck.toml` として扱い、最近使ったワークスペースはアプリ設定として保存します。
+ワークスペースに `fwd-deck.toml` が存在しない場合でも読み込みは継続し、local への追加時に設定ファイルを作成します。
+
 ### Example
 
 ```toml

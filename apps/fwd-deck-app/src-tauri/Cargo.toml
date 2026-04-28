@@ -12,4 +12,9 @@ tauri-build.workspace = true
 fwd-deck-core = { path = "../../../crates/fwd-deck-core" }
 serde.workspace = true
 tauri.workspace = true
+tauri-plugin-dialog.workspace = true
 thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

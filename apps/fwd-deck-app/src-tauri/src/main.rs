@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    env,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -13,11 +13,19 @@ use fwd_deck_core::{
     stop_tunnel, tag_is_valid, tunnel_statuses, validate_config,
 };
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 use thiserror::Error;
+
+const APP_PREFERENCES_FILE_NAME: &str = "preferences.toml";
+const APP_PREFERENCES_VERSION: u32 = 1;
+const WORKSPACE_HISTORY_LIMIT: usize = 10;
+const WORKSPACE_STATES_DIR: &str = "workspace-states";
+const STATE_FILE_NAME: &str = "state.toml";
 
 /// Tauri アプリを起動する
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             load_dashboard,
             start_tunnels,
@@ -29,24 +37,35 @@ fn main() {
         .expect("error while running fwd-deck application");
 }
 
-/// フロントエンドから指定する設定ファイルと状態ファイルのパスを表現する
-#[derive(Debug, Clone, Deserialize)]
+/// フロントエンドから指定するワークスペース選択を表現する
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PathSelection {
-    local_config_path: Option<String>,
+struct WorkspaceSelection {
+    workspace_path: Option<String>,
     global_config_path: Option<String>,
-    use_global: bool,
-    state_path: Option<String>,
+    use_global: Option<bool>,
 }
 
-impl Default for PathSelection {
-    /// 既定のパス選択を初期化する
+/// アプリ固有の設定を表現する
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+struct AppPreferences {
+    version: u32,
+    active_workspace_path: Option<PathBuf>,
+    workspace_history: Vec<PathBuf>,
+    use_global: bool,
+    global_config_path: Option<PathBuf>,
+}
+
+impl Default for AppPreferences {
+    /// 既定のアプリ設定を初期化する
     fn default() -> Self {
         Self {
-            local_config_path: None,
-            global_config_path: None,
+            version: APP_PREFERENCES_VERSION,
+            active_workspace_path: None,
+            workspace_history: Vec::new(),
             use_global: true,
-            state_path: None,
+            global_config_path: None,
         }
     }
 }
@@ -54,18 +73,25 @@ impl Default for PathSelection {
 /// 解決済みの実行時パスを表現する
 #[derive(Debug, Clone)]
 struct RuntimePaths {
+    preferences: AppPreferences,
     config_paths: ConfigPaths,
-    state_path: PathBuf,
+    local_config_path: Option<PathBuf>,
+    global_config_display_path: Option<PathBuf>,
+    global_state_path: PathBuf,
+    workspace_state_path: Option<PathBuf>,
 }
 
 /// フロントエンドへ返す解決済みパスを表現する
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PathView {
+    workspace_path: String,
+    workspace_history: Vec<String>,
     local_config_path: String,
-    global_config_path: Option<String>,
+    global_config_path: String,
     use_global: bool,
-    state_path: String,
+    global_state_path: String,
+    workspace_state_path: String,
 }
 
 /// ダッシュボード表示に必要な状態を表現する
@@ -119,6 +145,8 @@ struct TunnelView {
 #[serde(rename_all = "camelCase")]
 struct TrackedTunnelView {
     id: String,
+    runtime_scope: RuntimeScope,
+    runtime_key: String,
     local: String,
     remote: String,
     ssh: String,
@@ -129,6 +157,8 @@ struct TrackedTunnelView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeStatusView {
+    runtime_scope: RuntimeScope,
+    runtime_key: String,
     pid: u32,
     state: String,
     source: String,
@@ -188,6 +218,39 @@ impl From<ConfigScopeInput> for ConfigSourceKind {
     }
 }
 
+/// runtime 状態ファイルのスコープを表現する
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+enum RuntimeScope {
+    Global,
+    Workspace,
+}
+
+impl std::fmt::Display for RuntimeScope {
+    /// runtime scope の表示用文字列を生成する
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Global => formatter.write_str("global"),
+            Self::Workspace => formatter.write_str("workspace"),
+        }
+    }
+}
+
+/// トンネル操作対象を表現する
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OperationTargetInput {
+    id: String,
+    runtime_scope: Option<RuntimeScope>,
+}
+
+/// runtime scope を付与したトンネル状態を表現する
+#[derive(Debug, Clone)]
+struct ScopedRuntimeStatus {
+    runtime_scope: RuntimeScope,
+    status: TunnelRuntimeStatus,
+}
+
 /// 設定追加フォームから受け取るトンネル入力を表現する
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -228,12 +291,41 @@ impl TunnelInput {
 /// Tauri command の失敗理由を表現する
 #[derive(Debug, Error)]
 enum AppError {
-    #[error("現在のディレクトリを取得できませんでした: {0}")]
-    CurrentDir(std::io::Error),
+    #[error("アプリ設定ディレクトリを解決できませんでした: {0}")]
+    AppConfigDir(tauri::Error),
     #[error("HOME が未設定のため、グローバル設定ファイルの既定パスを解決できません")]
     MissingGlobalConfigPath,
     #[error("HOME が未設定のため、状態ファイルの既定パスを解決できません")]
     MissingStatePath,
+    #[error("local 設定を操作するにはワークスペースを選択してください")]
+    MissingWorkspace,
+    #[error("ワークスペースディレクトリが存在しません: {path}")]
+    WorkspaceNotFound { path: PathBuf },
+    #[error("アプリ設定を読み込めませんでした: {path}: {source}")]
+    PreferencesRead {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("アプリ設定を解析できませんでした: {path}: {source}")]
+    PreferencesParse {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
+    #[error("アプリ設定をシリアライズできませんでした: {path}: {source}")]
+    PreferencesSerialize {
+        path: PathBuf,
+        source: toml::ser::Error,
+    },
+    #[error("アプリ設定ディレクトリを作成できませんでした: {path}: {source}")]
+    PreferencesCreateDir {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("アプリ設定を書き込めませんでした: {path}: {source}")]
+    PreferencesWrite {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("入力が不正です: {0}")]
     InvalidInput(String),
     #[error("設定にエラーがあります: {0}")]
@@ -248,43 +340,53 @@ enum AppError {
 
 /// ダッシュボード表示に必要な情報を取得する
 #[tauri::command]
-fn load_dashboard(paths: Option<PathSelection>) -> Result<DashboardState, String> {
-    command_result(load_dashboard_inner(paths))
+fn load_dashboard(
+    app: tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+) -> Result<DashboardState, String> {
+    command_result(load_dashboard_inner(&app, paths))
 }
 
 /// 指定トンネルを開始する
 #[tauri::command]
 fn start_tunnels(
-    paths: Option<PathSelection>,
-    ids: Vec<String>,
+    app: tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    targets: Vec<OperationTargetInput>,
 ) -> Result<OperationReport, String> {
-    command_result(start_tunnels_inner(paths, ids))
+    command_result(start_tunnels_inner(&app, paths, targets))
 }
 
 /// 指定トンネルを停止する
 #[tauri::command]
-fn stop_tunnels(paths: Option<PathSelection>, ids: Vec<String>) -> Result<OperationReport, String> {
-    command_result(stop_tunnels_inner(paths, ids))
+fn stop_tunnels(
+    app: tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    targets: Vec<OperationTargetInput>,
+) -> Result<OperationReport, String> {
+    command_result(stop_tunnels_inner(&app, paths, targets))
 }
 
 /// 設定ファイルへトンネルを追加する
 #[tauri::command]
 fn add_tunnel_entry(
-    paths: Option<PathSelection>,
+    app: tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
     scope: ConfigScopeInput,
     tunnel: TunnelInput,
 ) -> Result<DashboardState, String> {
-    command_result(add_tunnel_entry_inner(paths, scope, tunnel))
+    command_result(add_tunnel_entry_inner(&app, paths, scope, tunnel))
 }
 
 /// 設定ファイルからトンネルを削除する
 #[tauri::command]
 fn remove_tunnel_entry(
-    paths: Option<PathSelection>,
+    app: tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
     scope: ConfigScopeInput,
     id: String,
 ) -> Result<DashboardState, String> {
-    command_result(remove_tunnel_entry_inner(paths, scope, &id))
+    command_result(remove_tunnel_entry_inner(&app, paths, scope, &id))
 }
 
 /// command の内部エラーをフロントエンド用文字列へ変換する
@@ -293,10 +395,13 @@ fn command_result<T>(result: Result<T, AppError>) -> Result<T, String> {
 }
 
 /// ダッシュボード状態を組み立てる
-fn load_dashboard_inner(paths: Option<PathSelection>) -> Result<DashboardState, AppError> {
-    let runtime_paths = resolve_runtime_paths(paths)?;
+fn load_dashboard_inner(
+    app: &tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+) -> Result<DashboardState, AppError> {
+    let runtime_paths = resolve_runtime_paths(app, paths)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
-    let statuses = tunnel_statuses(&runtime_paths.state_path)?;
+    let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
     let validation = validate_config(&config);
 
     Ok(build_dashboard_state(
@@ -309,17 +414,21 @@ fn load_dashboard_inner(paths: Option<PathSelection>) -> Result<DashboardState, 
 
 /// トンネル開始処理を実行する
 fn start_tunnels_inner(
-    paths: Option<PathSelection>,
-    ids: Vec<String>,
+    app: &tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    targets: Vec<OperationTargetInput>,
 ) -> Result<OperationReport, AppError> {
-    let runtime_paths = resolve_runtime_paths(paths)?;
+    let runtime_paths = resolve_runtime_paths(app, paths)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
 
     ensure_valid_config(&config)?;
-    run_tunnel_operations(&ids, |id| {
-        let tunnel = find_tunnel_by_id(&config, id)
-            .ok_or_else(|| AppError::InvalidInput(format!("未定義のトンネル ID です: {id}")))?;
-        start_tunnel(tunnel, &runtime_paths.state_path)
+    run_tunnel_operations(&targets, |target| {
+        let tunnel = find_tunnel_by_id(&config, &target.id).ok_or_else(|| {
+            AppError::InvalidInput(format!("未定義のトンネル ID です: {}", target.id))
+        })?;
+        let state_path = state_path_for_source(&runtime_paths, tunnel.source.kind)?;
+
+        start_tunnel(tunnel, state_path)
             .map(start_success_message)
             .map_err(AppError::Runtime)
     })
@@ -327,13 +436,25 @@ fn start_tunnels_inner(
 
 /// トンネル停止処理を実行する
 fn stop_tunnels_inner(
-    paths: Option<PathSelection>,
-    ids: Vec<String>,
+    app: &tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    targets: Vec<OperationTargetInput>,
 ) -> Result<OperationReport, AppError> {
-    let runtime_paths = resolve_runtime_paths(paths)?;
+    let runtime_paths = resolve_runtime_paths(app, paths)?;
+    let config = load_effective_config(&runtime_paths.config_paths)?;
 
-    run_tunnel_operations(&ids, |id| {
-        stop_tunnel(id, &runtime_paths.state_path)
+    run_tunnel_operations(&targets, |target| {
+        let state_path = match target.runtime_scope {
+            Some(scope) => state_path_for_runtime_scope(&runtime_paths, scope)?,
+            None => {
+                let tunnel = find_tunnel_by_id(&config, &target.id).ok_or_else(|| {
+                    AppError::InvalidInput(format!("未定義のトンネル ID です: {}", target.id))
+                })?;
+                state_path_for_source(&runtime_paths, tunnel.source.kind)?
+            }
+        };
+
+        stop_tunnel(&target.id, state_path)
             .map(stop_success_message)
             .map_err(AppError::Runtime)
     })
@@ -341,60 +462,249 @@ fn stop_tunnels_inner(
 
 /// トンネル追加処理を実行する
 fn add_tunnel_entry_inner(
-    paths: Option<PathSelection>,
+    app: &tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
     scope: ConfigScopeInput,
     tunnel: TunnelInput,
 ) -> Result<DashboardState, AppError> {
-    let runtime_paths = resolve_runtime_paths(paths.clone())?;
+    let runtime_paths = resolve_runtime_paths(app, paths.clone())?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
     let tunnel = tunnel.into_tunnel_config();
 
     validate_new_tunnel(&config, &tunnel)?;
 
     let kind = ConfigSourceKind::from(scope);
-    let path = config_path_for_scope(&runtime_paths.config_paths, kind)?;
+    let path = config_path_for_scope(&runtime_paths, kind)?;
     add_tunnel_to_config_file(&path, kind, tunnel)?;
-    load_dashboard_inner(paths)
+    load_dashboard_inner(app, paths)
 }
 
 /// トンネル削除処理を実行する
 fn remove_tunnel_entry_inner(
-    paths: Option<PathSelection>,
+    app: &tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
     scope: ConfigScopeInput,
     id: &str,
 ) -> Result<DashboardState, AppError> {
-    let runtime_paths = resolve_runtime_paths(paths.clone())?;
+    let runtime_paths = resolve_runtime_paths(app, paths.clone())?;
     let kind = ConfigSourceKind::from(scope);
-    let path = config_path_for_scope(&runtime_paths.config_paths, kind)?;
+    let path = config_path_for_scope(&runtime_paths, kind)?;
 
     remove_tunnel_from_config_file(&path, kind, id)?;
-    load_dashboard_inner(paths)
+    load_dashboard_inner(app, paths)
 }
 
-/// CLI と同じ既定値に基づいて実行時パスを解決する
-fn resolve_runtime_paths(paths: Option<PathSelection>) -> Result<RuntimePaths, AppError> {
-    let current_dir = env::current_dir().map_err(AppError::CurrentDir)?;
-    let selection = paths.unwrap_or_default();
-    let local = non_empty_path(selection.local_config_path.clone())
-        .unwrap_or_else(|| default_local_config_path(&current_dir));
-    let global = resolve_global_config_path(&selection)?;
-    let state_path = non_empty_path(selection.state_path)
-        .or_else(default_state_file_path)
-        .ok_or(AppError::MissingStatePath)?;
+/// アプリ設定と入力から実行時パスを解決する
+fn resolve_runtime_paths(
+    app: &tauri::AppHandle,
+    selection: Option<WorkspaceSelection>,
+) -> Result<RuntimePaths, AppError> {
+    let app_config_dir = app_config_dir(app)?;
+    let preferences_path = preferences_path_from_app_config_dir(&app_config_dir);
+    let mut preferences = read_preferences_file(&preferences_path)?;
+
+    normalize_loaded_preferences(&mut preferences);
+
+    if let Some(selection) = selection {
+        apply_workspace_selection(&mut preferences, selection)?;
+    }
+
+    let global = resolve_global_config_path(&preferences)?;
+    let global_config_display_path = preferences
+        .global_config_path
+        .clone()
+        .or_else(default_global_config_path);
+    let local_config_path = preferences
+        .active_workspace_path
+        .as_deref()
+        .map(default_local_config_path);
+    let config_local_path = local_config_path
+        .clone()
+        .unwrap_or_else(|| no_workspace_local_config_path(&app_config_dir));
+    let global_state_path = default_state_file_path().ok_or(AppError::MissingStatePath)?;
+    let workspace_state_path = preferences
+        .active_workspace_path
+        .as_deref()
+        .map(|workspace| workspace_state_file_path(&app_config_dir, workspace));
+
+    write_preferences_file(&preferences_path, &preferences)?;
 
     Ok(RuntimePaths {
-        config_paths: ConfigPaths::new(global, local),
-        state_path,
+        preferences,
+        config_paths: ConfigPaths::new(global, config_local_path),
+        local_config_path,
+        global_config_display_path,
+        global_state_path,
+        workspace_state_path,
     })
 }
 
+/// Tauri の app config directory を取得する
+fn app_config_dir(app: &tauri::AppHandle) -> Result<PathBuf, AppError> {
+    app.path().app_config_dir().map_err(AppError::AppConfigDir)
+}
+
+/// アプリ設定ファイルのパスを生成する
+fn preferences_path_from_app_config_dir(app_config_dir: &Path) -> PathBuf {
+    app_config_dir.join(APP_PREFERENCES_FILE_NAME)
+}
+
+/// アプリ設定ファイルを読み込む
+fn read_preferences_file(path: &Path) -> Result<AppPreferences, AppError> {
+    if !path.exists() {
+        return Ok(AppPreferences::default());
+    }
+
+    let content = fs::read_to_string(path).map_err(|source| AppError::PreferencesRead {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    toml::from_str::<AppPreferences>(&content).map_err(|source| AppError::PreferencesParse {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// アプリ設定ファイルを書き込む
+fn write_preferences_file(path: &Path, preferences: &AppPreferences) -> Result<(), AppError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| AppError::PreferencesCreateDir {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let content =
+        toml::to_string_pretty(preferences).map_err(|source| AppError::PreferencesSerialize {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    fs::write(path, content).map_err(|source| AppError::PreferencesWrite {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// 保存済み設定の実行不能な値を取り除く
+fn normalize_loaded_preferences(preferences: &mut AppPreferences) {
+    preferences.version = APP_PREFERENCES_VERSION;
+    preferences.active_workspace_path = preferences
+        .active_workspace_path
+        .as_deref()
+        .and_then(canonical_workspace_path_if_available);
+    preferences.workspace_history = preferences
+        .workspace_history
+        .iter()
+        .filter_map(|path| canonical_workspace_path_if_available(path))
+        .fold(Vec::<PathBuf>::new(), |mut history, path| {
+            if !history.contains(&path) {
+                history.push(path);
+            }
+            history
+        });
+    preferences
+        .workspace_history
+        .truncate(WORKSPACE_HISTORY_LIMIT);
+}
+
+/// ワークスペース選択をアプリ設定へ反映する
+fn apply_workspace_selection(
+    preferences: &mut AppPreferences,
+    selection: WorkspaceSelection,
+) -> Result<(), AppError> {
+    if let Some(workspace_path) = selection.workspace_path {
+        let workspace_path = workspace_path.trim();
+        preferences.active_workspace_path = if workspace_path.is_empty() {
+            None
+        } else {
+            Some(canonical_workspace_path(Path::new(workspace_path))?)
+        };
+
+        if let Some(workspace_path) = preferences.active_workspace_path.clone() {
+            remember_workspace_path(preferences, workspace_path);
+        }
+    }
+
+    if let Some(use_global) = selection.use_global {
+        preferences.use_global = use_global;
+    }
+
+    if let Some(global_config_path) = selection.global_config_path {
+        preferences.global_config_path = non_empty_path(Some(global_config_path));
+    }
+
+    Ok(())
+}
+
+/// ワークスペース履歴を更新する
+fn remember_workspace_path(preferences: &mut AppPreferences, workspace_path: PathBuf) {
+    preferences
+        .workspace_history
+        .retain(|existing| existing != &workspace_path);
+    preferences.workspace_history.insert(0, workspace_path);
+    preferences
+        .workspace_history
+        .truncate(WORKSPACE_HISTORY_LIMIT);
+}
+
+/// 存在するワークスペースの正規パスを取得する
+fn canonical_workspace_path(path: &Path) -> Result<PathBuf, AppError> {
+    let canonical = fs::canonicalize(path).map_err(|_| AppError::WorkspaceNotFound {
+        path: path.to_path_buf(),
+    })?;
+
+    if !canonical.is_dir() {
+        return Err(AppError::WorkspaceNotFound {
+            path: path.to_path_buf(),
+        });
+    }
+
+    Ok(canonical)
+}
+
+/// 利用可能なワークスペースだけを正規化する
+fn canonical_workspace_path_if_available(path: &Path) -> Option<PathBuf> {
+    fs::canonicalize(path)
+        .ok()
+        .filter(|canonical| canonical.is_dir())
+}
+
+/// ワークスペース未選択時に読み込まれない local 設定パスを生成する
+fn no_workspace_local_config_path(app_config_dir: &Path) -> PathBuf {
+    app_config_dir.join("no-workspace").join("fwd-deck.toml")
+}
+
+/// ワークスペース用の状態ファイルパスを生成する
+fn workspace_state_file_path(app_config_dir: &Path, workspace_path: &Path) -> PathBuf {
+    app_config_dir
+        .join(WORKSPACE_STATES_DIR)
+        .join(workspace_key(workspace_path))
+        .join(STATE_FILE_NAME)
+}
+
+/// ワークスペースパスから安定した lower-hex key を生成する
+fn workspace_key(workspace_path: &Path) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+
+    for byte in workspace_path.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+
+    format!("{hash:016x}")
+}
+
 /// グローバル設定ファイルのパスを解決する
-fn resolve_global_config_path(selection: &PathSelection) -> Result<Option<PathBuf>, AppError> {
-    if !selection.use_global {
+fn resolve_global_config_path(preferences: &AppPreferences) -> Result<Option<PathBuf>, AppError> {
+    if !preferences.use_global {
         return Ok(None);
     }
 
-    non_empty_path(selection.global_config_path.clone())
+    preferences
+        .global_config_path
+        .clone()
         .or_else(default_global_config_path)
         .map(Some)
         .ok_or(AppError::MissingGlobalConfigPath)
@@ -408,41 +718,115 @@ fn non_empty_path(path: Option<String>) -> Option<PathBuf> {
 }
 
 /// 対象スコープの設定ファイルパスを取得する
-fn config_path_for_scope(paths: &ConfigPaths, kind: ConfigSourceKind) -> Result<PathBuf, AppError> {
+fn config_path_for_scope(
+    paths: &RuntimePaths,
+    kind: ConfigSourceKind,
+) -> Result<PathBuf, AppError> {
     match kind {
         ConfigSourceKind::Global => paths
+            .config_paths
             .global
             .clone()
             .ok_or(AppError::MissingGlobalConfigPath),
-        ConfigSourceKind::Local => Ok(paths.local.clone()),
+        ConfigSourceKind::Local => paths
+            .local_config_path
+            .clone()
+            .ok_or(AppError::MissingWorkspace),
     }
+}
+
+/// 設定ファイル種別に対応する状態ファイルパスを取得する
+fn state_path_for_source(paths: &RuntimePaths, kind: ConfigSourceKind) -> Result<&Path, AppError> {
+    state_path_for_runtime_scope(paths, runtime_scope_for_source(kind))
+}
+
+/// runtime scope に対応する状態ファイルパスを取得する
+fn state_path_for_runtime_scope(
+    paths: &RuntimePaths,
+    scope: RuntimeScope,
+) -> Result<&Path, AppError> {
+    match scope {
+        RuntimeScope::Global => Ok(&paths.global_state_path),
+        RuntimeScope::Workspace => paths
+            .workspace_state_path
+            .as_deref()
+            .ok_or(AppError::MissingWorkspace),
+    }
+}
+
+/// 設定ファイル種別に対応する runtime scope を取得する
+fn runtime_scope_for_source(kind: ConfigSourceKind) -> RuntimeScope {
+    match kind {
+        ConfigSourceKind::Global => RuntimeScope::Global,
+        ConfigSourceKind::Local => RuntimeScope::Workspace,
+    }
+}
+
+/// runtime 状態ファイルから追跡中トンネルを読み込む
+fn load_scoped_runtime_statuses(
+    paths: &RuntimePaths,
+) -> Result<Vec<ScopedRuntimeStatus>, AppError> {
+    let mut statuses = tunnel_statuses(&paths.global_state_path)?
+        .into_iter()
+        .filter(|status| status.state.source_kind == ConfigSourceKind::Global)
+        .map(|status| ScopedRuntimeStatus {
+            runtime_scope: RuntimeScope::Global,
+            status,
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(workspace_state_path) = &paths.workspace_state_path {
+        statuses.extend(
+            tunnel_statuses(workspace_state_path)?
+                .into_iter()
+                .filter(|status| status.state.source_kind == ConfigSourceKind::Local)
+                .map(|status| ScopedRuntimeStatus {
+                    runtime_scope: RuntimeScope::Workspace,
+                    status,
+                }),
+        );
+    }
+
+    Ok(statuses)
 }
 
 /// ダッシュボード状態へ変換する
 fn build_dashboard_state(
     runtime_paths: RuntimePaths,
     config: EffectiveConfig,
-    statuses: Vec<TunnelRuntimeStatus>,
+    statuses: Vec<ScopedRuntimeStatus>,
     validation: ValidationReport,
 ) -> DashboardState {
-    let status_by_id = statuses
+    let status_by_key = statuses
         .iter()
-        .map(|status| (status.state.id.as_str(), status))
+        .map(|status| {
+            (
+                runtime_status_key(status.runtime_scope, &status.status.state.id),
+                status,
+            )
+        })
         .collect::<HashMap<_, _>>();
     let mut tunnels = config
         .tunnels
         .iter()
         .map(|resolved| {
-            tunnel_view(
-                resolved,
-                status_by_id.get(resolved.tunnel.id.as_str()).copied(),
-            )
+            let runtime_key = runtime_status_key(
+                runtime_scope_for_source(resolved.source.kind),
+                &resolved.tunnel.id,
+            );
+            tunnel_view(resolved, status_by_key.get(&runtime_key).copied())
         })
         .collect::<Vec<_>>();
     let mut tracked_tunnels = statuses.iter().map(tracked_tunnel_view).collect::<Vec<_>>();
 
     tunnels.sort_by(|left, right| left.id.cmp(&right.id));
-    tracked_tunnels.sort_by(|left, right| left.id.cmp(&right.id));
+    tracked_tunnels.sort_by(|left, right| {
+        left.id.cmp(&right.id).then(
+            left.runtime_scope
+                .to_string()
+                .cmp(&right.runtime_scope.to_string()),
+        )
+    });
 
     DashboardState {
         paths: path_view(&runtime_paths),
@@ -456,10 +840,35 @@ fn build_dashboard_state(
 /// 解決済みパスを表示用へ変換する
 fn path_view(paths: &RuntimePaths) -> PathView {
     PathView {
-        local_config_path: display_path(&paths.config_paths.local),
-        global_config_path: paths.config_paths.global.as_deref().map(display_path),
-        use_global: paths.config_paths.global.is_some(),
-        state_path: display_path(&paths.state_path),
+        workspace_path: paths
+            .preferences
+            .active_workspace_path
+            .as_deref()
+            .map(display_path)
+            .unwrap_or_default(),
+        workspace_history: paths
+            .preferences
+            .workspace_history
+            .iter()
+            .map(|path| display_path(path))
+            .collect(),
+        local_config_path: paths
+            .local_config_path
+            .as_deref()
+            .map(display_path)
+            .unwrap_or_default(),
+        global_config_path: paths
+            .global_config_display_path
+            .as_deref()
+            .map(display_path)
+            .unwrap_or_default(),
+        use_global: paths.preferences.use_global,
+        global_state_path: display_path(&paths.global_state_path),
+        workspace_state_path: paths
+            .workspace_state_path
+            .as_deref()
+            .map(display_path)
+            .unwrap_or_default(),
     }
 }
 
@@ -493,7 +902,7 @@ fn validation_view(report: ValidationReport) -> ValidationView {
 /// 設定済みトンネルを表示用へ変換する
 fn tunnel_view(
     resolved: &ResolvedTunnelConfig,
-    status: Option<&TunnelRuntimeStatus>,
+    status: Option<&ScopedRuntimeStatus>,
 ) -> TunnelView {
     let tunnel = &resolved.tunnel;
 
@@ -512,28 +921,39 @@ fn tunnel_view(
 }
 
 /// 追跡中トンネルを表示用へ変換する
-fn tracked_tunnel_view(status: &TunnelRuntimeStatus) -> TrackedTunnelView {
+fn tracked_tunnel_view(status: &ScopedRuntimeStatus) -> TrackedTunnelView {
+    let runtime_key = runtime_status_key(status.runtime_scope, &status.status.state.id);
+
     TrackedTunnelView {
-        id: status.state.id.clone(),
-        local: format_state_local_endpoint(status),
-        remote: format_state_remote_endpoint(status),
-        ssh: format_state_ssh_endpoint(status),
+        id: status.status.state.id.clone(),
+        runtime_scope: status.runtime_scope,
+        runtime_key,
+        local: format_state_local_endpoint(&status.status),
+        remote: format_state_remote_endpoint(&status.status),
+        ssh: format_state_ssh_endpoint(&status.status),
         status: runtime_status_view(status),
     }
 }
 
 /// runtime 状態を表示用へ変換する
-fn runtime_status_view(status: &TunnelRuntimeStatus) -> RuntimeStatusView {
+fn runtime_status_view(status: &ScopedRuntimeStatus) -> RuntimeStatusView {
     RuntimeStatusView {
-        pid: status.state.pid,
-        state: match status.process_state {
+        runtime_scope: status.runtime_scope,
+        runtime_key: runtime_status_key(status.runtime_scope, &status.status.state.id),
+        pid: status.status.state.pid,
+        state: match status.status.process_state {
             ProcessState::Running => "running".to_owned(),
             ProcessState::Stale => "stale".to_owned(),
         },
-        source: status.state.source_kind.to_string(),
-        source_path: display_path(&status.state.source_path),
-        started_at_unix_seconds: status.state.started_at_unix_seconds,
+        source: status.status.state.source_kind.to_string(),
+        source_path: display_path(&status.status.state.source_path),
+        started_at_unix_seconds: status.status.state.started_at_unix_seconds,
     }
+}
+
+/// runtime 状態の一意なキーを生成する
+fn runtime_status_key(scope: RuntimeScope, id: &str) -> String {
+    format!("{scope}:{id}")
 }
 
 /// タイムアウト設定を表示用へ変換する
@@ -626,11 +1046,14 @@ fn ensure_required(name: &str, value: &str) -> Result<(), AppError> {
 }
 
 /// 複数トンネルに対する操作を順次実行する
-fn run_tunnel_operations<F>(ids: &[String], mut operation: F) -> Result<OperationReport, AppError>
+fn run_tunnel_operations<F>(
+    targets: &[OperationTargetInput],
+    mut operation: F,
+) -> Result<OperationReport, AppError>
 where
-    F: FnMut(&str) -> Result<String, AppError>,
+    F: FnMut(&OperationTargetInput) -> Result<String, AppError>,
 {
-    if ids.is_empty() {
+    if targets.is_empty() {
         return Err(AppError::InvalidInput(
             "操作対象のトンネルが選択されていません".to_owned(),
         ));
@@ -639,20 +1062,28 @@ where
     let mut succeeded = Vec::new();
     let mut failed = Vec::new();
 
-    for id in ids {
-        match operation(id) {
+    for target in targets {
+        match operation(target) {
             Ok(message) => succeeded.push(OperationSuccessView {
-                id: id.clone(),
+                id: operation_target_label(target),
                 message,
             }),
             Err(error) => failed.push(OperationFailureView {
-                id: id.clone(),
+                id: operation_target_label(target),
                 message: error.to_string(),
             }),
         }
     }
 
     Ok(OperationReport { succeeded, failed })
+}
+
+/// 操作対象の表示名を生成する
+fn operation_target_label(target: &OperationTargetInput) -> String {
+    match target.runtime_scope {
+        Some(scope) => format!("{} ({scope})", target.id),
+        None => target.id.clone(),
+    }
 }
 
 /// 開始成功時のメッセージを生成する
@@ -742,4 +1173,148 @@ fn trimmed_optional(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// preferences 未作成時の既定値を検証する
+    #[test]
+    fn missing_preferences_returns_defaults() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("preferences.toml");
+
+        let preferences = read_preferences_file(&path).expect("read missing preferences");
+
+        assert_eq!(preferences, AppPreferences::default());
+    }
+
+    /// ワークスペース選択時に履歴が先頭へ移動し重複しないことを検証する
+    #[test]
+    fn workspace_selection_updates_history_without_duplicates() {
+        let first = TempDir::new().expect("create first workspace");
+        let second = TempDir::new().expect("create second workspace");
+        let mut preferences = AppPreferences::default();
+
+        apply_workspace_selection(
+            &mut preferences,
+            WorkspaceSelection {
+                workspace_path: Some(first.path().display().to_string()),
+                global_config_path: None,
+                use_global: None,
+            },
+        )
+        .expect("select first workspace");
+        apply_workspace_selection(
+            &mut preferences,
+            WorkspaceSelection {
+                workspace_path: Some(second.path().display().to_string()),
+                global_config_path: None,
+                use_global: None,
+            },
+        )
+        .expect("select second workspace");
+        apply_workspace_selection(
+            &mut preferences,
+            WorkspaceSelection {
+                workspace_path: Some(first.path().display().to_string()),
+                global_config_path: None,
+                use_global: None,
+            },
+        )
+        .expect("select first workspace again");
+
+        assert_eq!(
+            preferences.active_workspace_path.as_deref(),
+            Some(
+                fs::canonicalize(first.path())
+                    .expect("canonical first")
+                    .as_path()
+            )
+        );
+        assert_eq!(preferences.workspace_history.len(), 2);
+        assert_eq!(
+            preferences.workspace_history[0],
+            fs::canonicalize(first.path()).expect("canonical first")
+        );
+    }
+
+    /// ワークスペース履歴が上限件数に制限されることを検証する
+    #[test]
+    fn workspace_history_is_limited_to_ten_entries() {
+        let workspaces = (0..12)
+            .map(|_| TempDir::new().expect("create workspace"))
+            .collect::<Vec<_>>();
+        let mut preferences = AppPreferences::default();
+
+        for workspace in &workspaces {
+            apply_workspace_selection(
+                &mut preferences,
+                WorkspaceSelection {
+                    workspace_path: Some(workspace.path().display().to_string()),
+                    global_config_path: None,
+                    use_global: None,
+                },
+            )
+            .expect("select workspace");
+        }
+
+        assert_eq!(preferences.workspace_history.len(), WORKSPACE_HISTORY_LIMIT);
+    }
+
+    /// local 設定未作成のワークスペースでも local パスが解決されることを検証する
+    #[test]
+    fn workspace_local_config_path_does_not_require_existing_file() {
+        let workspace = TempDir::new().expect("create workspace");
+
+        let local_config_path = default_local_config_path(workspace.path());
+
+        assert_eq!(local_config_path, workspace.path().join("fwd-deck.toml"));
+        assert!(!local_config_path.exists());
+    }
+
+    /// 設定ファイル種別に応じて runtime scope が分かれることを検証する
+    #[test]
+    fn runtime_scope_matches_config_source_kind() {
+        assert_eq!(
+            runtime_scope_for_source(ConfigSourceKind::Global),
+            RuntimeScope::Global
+        );
+        assert_eq!(
+            runtime_scope_for_source(ConfigSourceKind::Local),
+            RuntimeScope::Workspace
+        );
+    }
+
+    /// runtime key が scope と ID で一意化されることを検証する
+    #[test]
+    fn runtime_status_key_includes_scope_and_id() {
+        assert_eq!(runtime_status_key(RuntimeScope::Global, "db"), "global:db");
+        assert_eq!(
+            runtime_status_key(RuntimeScope::Workspace, "db"),
+            "workspace:db"
+        );
+    }
+
+    /// ワークスペース state path が app config directory 配下に生成されることを検証する
+    #[test]
+    fn workspace_state_path_uses_stable_lower_hex_key() {
+        let app_config = TempDir::new().expect("create app config");
+        let workspace = TempDir::new().expect("create workspace");
+
+        let state_path = workspace_state_file_path(app_config.path(), workspace.path());
+        let key = state_path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .expect("state path should contain workspace key");
+
+        assert_eq!(key.len(), 16);
+        assert!(key.chars().all(|character| character.is_ascii_hexdigit()));
+        assert!(key.chars().all(|character| !character.is_ascii_uppercase()));
+        assert!(state_path.ends_with(STATE_FILE_NAME));
+    }
 }

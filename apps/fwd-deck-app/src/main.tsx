@@ -27,7 +27,7 @@ import {
   X,
 } from "lucide-react";
 import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, FormEvent, ReactElement, ReactNode, RefObject } from "react";
+import type { ChangeEvent, FormEvent, MouseEvent, ReactElement, ReactNode, RefObject } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -50,7 +50,8 @@ type AppCommand =
   | "start_tunnels"
   | "stop_tunnels"
   | "add_tunnel_entry"
-  | "remove_tunnel_entry";
+  | "remove_tunnel_entry"
+  | "remove_workspace_history_entry";
 
 interface WorkspaceSelection {
   workspacePath: string;
@@ -689,6 +690,30 @@ function App(): ReactElement {
   }
 
   /**
+   * ワークスペース履歴の指定行を永続設定から削除する
+   */
+  async function removeWorkspaceHistoryEntry(workspacePath: string): Promise<void> {
+    setIsBusy(true);
+
+    try {
+      const nextPaths = await invokeCommand<WorkspaceSelection>("remove_workspace_history_entry", {
+        workspacePath,
+      });
+      const nextHistory = nextPaths.workspaceHistory;
+
+      setPaths((current) => ({ ...current, workspaceHistory: nextHistory }));
+      setSettingsDraft((current) =>
+        current === null ? current : { ...current, workspaceHistory: nextHistory },
+      );
+      showOperationToast({ kind: "success", summary: "Recent workspaces から削除しました" });
+    } catch (error) {
+      showOperationToast({ kind: "error", summary: stringifyError(error) });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  /**
    * 設定モーダルを現在の適用済み設定で開く
    */
   function openSettings(): void {
@@ -918,6 +943,7 @@ function App(): ReactElement {
         onBrowseWorkspace={() => void browseWorkspace()}
         onBrowseGlobalConfig={() => void browseGlobalConfig()}
         onSelectWorkspace={selectWorkspaceFromHistory}
+        onRemoveWorkspace={(workspacePath) => void removeWorkspaceHistoryEntry(workspacePath)}
       />
       <ConfirmRemoveModal
         tunnel={deleteTarget}
@@ -1118,7 +1144,7 @@ interface IconButtonProps {
   className: string;
   disabled?: boolean;
   children: ReactNode;
-  onClick: () => void;
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
 }
 
 /**
@@ -1360,6 +1386,7 @@ interface SettingsModalProps {
   onBrowseWorkspace: () => void;
   onBrowseGlobalConfig: () => void;
   onSelectWorkspace: (workspacePath: string) => void;
+  onRemoveWorkspace: (workspacePath: string) => void;
 }
 
 /**
@@ -1375,6 +1402,7 @@ function SettingsModal({
   onBrowseWorkspace,
   onBrowseGlobalConfig,
   onSelectWorkspace,
+  onRemoveWorkspace,
 }: SettingsModalProps): ReactElement | null {
   if (!isOpen) {
     return null;
@@ -1415,6 +1443,7 @@ function SettingsModal({
             onBrowseWorkspace={onBrowseWorkspace}
             onBrowseGlobalConfig={onBrowseGlobalConfig}
             onSelectWorkspace={onSelectWorkspace}
+            onRemoveWorkspace={onRemoveWorkspace}
           />
         </div>
 
@@ -1452,6 +1481,7 @@ interface PathPanelProps {
   onBrowseWorkspace: () => void;
   onBrowseGlobalConfig: () => void;
   onSelectWorkspace: (workspacePath: string) => void;
+  onRemoveWorkspace: (workspacePath: string) => void;
 }
 
 /**
@@ -1464,6 +1494,7 @@ function PathPanel({
   onBrowseWorkspace,
   onBrowseGlobalConfig,
   onSelectWorkspace,
+  onRemoveWorkspace,
 }: PathPanelProps): ReactElement {
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -1495,16 +1526,31 @@ function PathPanel({
             </div>
             <div className="flex max-h-36 flex-col gap-1 overflow-y-auto">
               {paths.workspaceHistory.map((workspacePath) => (
-                <button
+                <div
                   key={workspacePath}
-                  type="button"
-                  className="btn btn-ghost btn-xs min-h-8 justify-start font-mono text-xs"
-                  onClick={() => onSelectWorkspace(workspacePath)}
-                  disabled={isBusy}
-                  title={workspacePath}
+                  className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1"
                 >
-                  <span className="truncate">{workspacePath}</span>
-                </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-xs min-h-8 min-w-0 justify-start font-mono text-xs"
+                    onClick={() => onSelectWorkspace(workspacePath)}
+                    disabled={isBusy}
+                    title={workspacePath}
+                  >
+                    <span className="truncate">{workspacePath}</span>
+                  </button>
+                  <IconButton
+                    label="履歴から削除"
+                    className="btn btn-square btn-ghost btn-xs text-error"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onRemoveWorkspace(workspacePath);
+                    }}
+                    disabled={isBusy}
+                  >
+                    <Trash2 size={14} />
+                  </IconButton>
+                </div>
               ))}
             </div>
           </div>

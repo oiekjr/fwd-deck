@@ -33,7 +33,8 @@ fn main() {
             start_tunnels,
             stop_tunnels,
             add_tunnel_entry,
-            remove_tunnel_entry
+            remove_tunnel_entry,
+            remove_workspace_history_entry
         ])
         .run(tauri::generate_context!())
         .expect("error while running fwd-deck application");
@@ -463,6 +464,15 @@ fn remove_tunnel_entry(
     command_result(remove_tunnel_entry_inner(&app, paths, scope, &id))
 }
 
+/// ワークスペース履歴から指定パスを削除する
+#[tauri::command]
+fn remove_workspace_history_entry(
+    app: tauri::AppHandle,
+    workspace_path: String,
+) -> Result<PathView, String> {
+    command_result(remove_workspace_history_entry_inner(&app, &workspace_path))
+}
+
 /// command の内部エラーをフロントエンド用文字列へ変換する
 fn command_result<T>(result: Result<T, AppError>) -> Result<T, String> {
     result.map_err(|error| error.to_string())
@@ -574,6 +584,24 @@ fn remove_tunnel_entry_inner(
     load_dashboard_inner(app, paths)
 }
 
+/// ワークスペース履歴の削除結果を表示用パスとして返す
+fn remove_workspace_history_entry_inner(
+    app: &tauri::AppHandle,
+    workspace_path: &str,
+) -> Result<PathView, AppError> {
+    let app_config_dir = app_config_dir(app)?;
+    let preferences_path = preferences_path_from_app_config_dir(&app_config_dir);
+    let mut preferences = read_preferences_file(&preferences_path)?;
+
+    normalize_loaded_preferences(&mut preferences);
+    remove_workspace_history_entry_from_preferences(&mut preferences, workspace_path)?;
+
+    let runtime_paths = runtime_paths_from_preferences(&app_config_dir, preferences)?;
+    write_preferences_file(&preferences_path, &runtime_paths.preferences)?;
+
+    Ok(path_view(&runtime_paths))
+}
+
 /// アプリ設定と入力から実行時パスを解決する
 fn resolve_runtime_paths(
     app: &tauri::AppHandle,
@@ -589,6 +617,17 @@ fn resolve_runtime_paths(
         apply_workspace_selection(&mut preferences, selection)?;
     }
 
+    let runtime_paths = runtime_paths_from_preferences(&app_config_dir, preferences)?;
+    write_preferences_file(&preferences_path, &runtime_paths.preferences)?;
+
+    Ok(runtime_paths)
+}
+
+/// アプリ設定から実行時パスを組み立てる
+fn runtime_paths_from_preferences(
+    app_config_dir: &Path,
+    preferences: AppPreferences,
+) -> Result<RuntimePaths, AppError> {
     let global = resolve_global_config_path(&preferences)?;
     let global_config_display_path = preferences
         .global_config_path
@@ -600,14 +639,12 @@ fn resolve_runtime_paths(
         .map(default_local_config_path);
     let config_local_path = local_config_path
         .clone()
-        .unwrap_or_else(|| no_workspace_local_config_path(&app_config_dir));
+        .unwrap_or_else(|| no_workspace_local_config_path(app_config_dir));
     let global_state_path = default_state_file_path().ok_or(AppError::MissingStatePath)?;
     let workspace_state_path = preferences
         .active_workspace_path
         .as_deref()
-        .map(|workspace| workspace_state_file_path(&app_config_dir, workspace));
-
-    write_preferences_file(&preferences_path, &preferences)?;
+        .map(|workspace| workspace_state_file_path(app_config_dir, workspace));
 
     Ok(RuntimePaths {
         preferences,
@@ -696,13 +733,16 @@ fn apply_workspace_selection(
 ) -> Result<(), AppError> {
     if let Some(workspace_path) = selection.workspace_path {
         let workspace_path = workspace_path.trim();
+        let previous_workspace_path = preferences.active_workspace_path.clone();
         preferences.active_workspace_path = if workspace_path.is_empty() {
             None
         } else {
             Some(canonical_workspace_path(Path::new(workspace_path))?)
         };
 
-        if let Some(workspace_path) = preferences.active_workspace_path.clone() {
+        if preferences.active_workspace_path != previous_workspace_path
+            && let Some(workspace_path) = preferences.active_workspace_path.clone()
+        {
             remember_workspace_path(preferences, workspace_path);
         }
     }
@@ -713,6 +753,27 @@ fn apply_workspace_selection(
 
     if let Some(global_config_path) = selection.global_config_path {
         preferences.global_config_path = non_empty_path(Some(global_config_path));
+    }
+
+    Ok(())
+}
+
+/// 指定したワークスペースを履歴から削除する
+fn remove_workspace_history_entry_from_preferences(
+    preferences: &mut AppPreferences,
+    workspace_path: &str,
+) -> Result<(), AppError> {
+    let workspace_path = workspace_path.trim();
+    if workspace_path.is_empty() {
+        return Err(AppError::InvalidInput(
+            "削除対象のワークスペースパスが空です".to_owned(),
+        ));
+    }
+
+    if let Some(workspace_path) = canonical_workspace_path_if_available(Path::new(workspace_path)) {
+        preferences
+            .workspace_history
+            .retain(|existing| existing != &workspace_path);
     }
 
     Ok(())
@@ -1576,6 +1637,100 @@ mod tests {
         }
 
         assert_eq!(preferences.workspace_history.len(), WORKSPACE_HISTORY_LIMIT);
+    }
+
+    /// active workspace と同じ履歴行を削除しても active 設定が残ることを検証する
+    #[test]
+    fn workspace_history_removal_keeps_active_workspace() {
+        let active = TempDir::new().expect("create active workspace");
+        let other = TempDir::new().expect("create other workspace");
+        let active_path = fs::canonicalize(active.path()).expect("canonical active workspace");
+        let other_path = fs::canonicalize(other.path()).expect("canonical other workspace");
+        let mut preferences = AppPreferences {
+            active_workspace_path: Some(active_path.clone()),
+            workspace_history: vec![active_path.clone(), other_path.clone()],
+            ..AppPreferences::default()
+        };
+        let workspace_path = active.path().display().to_string();
+
+        remove_workspace_history_entry_from_preferences(&mut preferences, &workspace_path)
+            .expect("remove active workspace from history");
+
+        assert_eq!(
+            preferences.active_workspace_path.as_deref(),
+            Some(active_path.as_path())
+        );
+        assert_eq!(preferences.workspace_history, vec![other_path]);
+    }
+
+    /// 未変更の active workspace 適用で削除済み履歴が復元されないことを検証する
+    #[test]
+    fn unchanged_workspace_selection_does_not_restore_removed_history_entry() {
+        let workspace = TempDir::new().expect("create workspace");
+        let workspace_path = workspace.path().display().to_string();
+        let canonical_path = fs::canonicalize(workspace.path()).expect("canonical workspace");
+        let mut preferences = AppPreferences::default();
+
+        apply_workspace_selection(
+            &mut preferences,
+            WorkspaceSelection {
+                workspace_path: Some(workspace_path.clone()),
+                global_config_path: None,
+                use_global: None,
+            },
+        )
+        .expect("select workspace");
+        remove_workspace_history_entry_from_preferences(&mut preferences, &workspace_path)
+            .expect("remove workspace from history");
+        apply_workspace_selection(
+            &mut preferences,
+            WorkspaceSelection {
+                workspace_path: Some(workspace_path),
+                global_config_path: None,
+                use_global: None,
+            },
+        )
+        .expect("apply unchanged workspace");
+
+        assert_eq!(
+            preferences.active_workspace_path.as_deref(),
+            Some(canonical_path.as_path())
+        );
+        assert!(preferences.workspace_history.is_empty());
+    }
+
+    /// 別 workspace の選択で履歴が従来どおり更新されることを検証する
+    #[test]
+    fn changed_workspace_selection_remembers_workspace_after_history_removal() {
+        let first = TempDir::new().expect("create first workspace");
+        let second = TempDir::new().expect("create second workspace");
+        let first_path = first.path().display().to_string();
+        let second_path = second.path().display().to_string();
+        let canonical_second = fs::canonicalize(second.path()).expect("canonical second workspace");
+        let mut preferences = AppPreferences::default();
+
+        apply_workspace_selection(
+            &mut preferences,
+            WorkspaceSelection {
+                workspace_path: Some(first_path.clone()),
+                global_config_path: None,
+                use_global: None,
+            },
+        )
+        .expect("select first workspace");
+        remove_workspace_history_entry_from_preferences(&mut preferences, &first_path)
+            .expect("remove first workspace from history");
+        apply_workspace_selection(
+            &mut preferences,
+            WorkspaceSelection {
+                workspace_path: Some(second_path),
+                global_config_path: None,
+                use_global: None,
+            },
+        )
+        .expect("select second workspace");
+
+        assert_eq!(preferences.workspace_history, vec![canonical_second]);
     }
 
     /// local 設定未作成のワークスペースでも local パスが解決されることを検証する

@@ -1601,7 +1601,7 @@ function ValidationPanel({ dashboard }: ValidationPanelProps): ReactElement | nu
   }
 
   if (dashboard.validation.errors.length === 0 && dashboard.validation.warnings.length === 0) {
-    return <AlertMessage kind="success">設定は有効です。</AlertMessage>;
+    return null;
   }
 
   return (

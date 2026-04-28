@@ -3348,16 +3348,46 @@ function ConfirmRemoveModal({
  */
 function filterTunnels(tunnels: TunnelView[], filters: TunnelFilters): TunnelView[] {
   const query = filters.query.trim().toLowerCase();
+  const requiredTags = new Set(filters.tags);
 
   return tunnels.filter((tunnel) => {
     const status = tunnelStatus(tunnel);
-    const matchesStatus = filters.status === "all" || filters.status === status;
-    const matchesScope = filters.scope === "all" || filters.scope === tunnel.source;
-    const matchesTags = filters.tags.every((tag) => tunnel.tags.includes(tag));
-    const matchesQuery = query.length === 0 || tunnelContainsQuery(tunnel, query);
 
-    return matchesStatus && matchesScope && matchesTags && matchesQuery;
+    if (filters.status !== "all" && filters.status !== status) {
+      return false;
+    }
+
+    if (filters.scope !== "all" && filters.scope !== tunnel.source) {
+      return false;
+    }
+
+    if (!tunnelMatchesRequiredTags(tunnel, requiredTags)) {
+      return false;
+    }
+
+    return query.length === 0 || tunnelContainsQuery(tunnel, query);
   });
+}
+
+/**
+ * トンネルが選択済みタグをすべて持つか判定する
+ */
+function tunnelMatchesRequiredTags(tunnel: TunnelView, requiredTags: Set<string>): boolean {
+  if (requiredTags.size === 0) {
+    return true;
+  }
+
+  if (tunnel.tags.length < requiredTags.size) {
+    return false;
+  }
+
+  for (const tag of requiredTags) {
+    if (!tunnel.tags.includes(tag)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /**
@@ -3414,18 +3444,23 @@ function tunnelStatus(tunnel: TunnelView): TunnelStatus {
  * トンネルが検索語を含むか判定する
  */
 function tunnelContainsQuery(tunnel: TunnelView, query: string): boolean {
-  const fields = [
-    tunnel.id,
-    tunnel.description ?? "",
-    tunnel.local,
-    tunnel.remote,
-    tunnel.ssh,
-    tunnel.source,
-    tunnel.sourcePath,
-    ...tunnel.tags,
-  ];
+  return (
+    stringContainsQuery(tunnel.id, query) ||
+    stringContainsQuery(tunnel.description ?? "", query) ||
+    stringContainsQuery(tunnel.local, query) ||
+    stringContainsQuery(tunnel.remote, query) ||
+    stringContainsQuery(tunnel.ssh, query) ||
+    stringContainsQuery(tunnel.source, query) ||
+    stringContainsQuery(tunnel.sourcePath, query) ||
+    tunnel.tags.some((tag) => stringContainsQuery(tag, query))
+  );
+}
 
-  return fields.some((field) => field.toLowerCase().includes(query));
+/**
+ * 文字列が正規化済み検索語を含むか判定する
+ */
+function stringContainsQuery(value: string, query: string): boolean {
+  return value.toLowerCase().includes(query);
 }
 
 /**
@@ -3464,11 +3499,21 @@ function calculateStats(dashboard: DashboardState | null): DashboardStats {
     return { configured: 0, running: 0, stale: 0 };
   }
 
+  let running = 0;
+  let stale = 0;
+
+  for (const tracked of dashboard.trackedTunnels) {
+    if (tracked.status.state === "running") {
+      running += 1;
+    } else if (tracked.status.state === "stale") {
+      stale += 1;
+    }
+  }
+
   return {
     configured: dashboard.tunnels.length,
-    running: dashboard.trackedTunnels.filter((tracked) => tracked.status.state === "running")
-      .length,
-    stale: dashboard.trackedTunnels.filter((tracked) => tracked.status.state === "stale").length,
+    running,
+    stale,
   };
 }
 
@@ -3655,7 +3700,19 @@ function isSettingsKeyboardShortcut(event: KeyboardEvent): boolean {
  */
 function keepExistingSelections(current: Set<string>, tunnels: TunnelView[]): Set<string> {
   const ids = new Set(tunnels.map((tunnel) => tunnel.id));
-  return new Set(Array.from(current).filter((id) => ids.has(id)));
+  const next = new Set<string>();
+  let hasRemovedSelection = false;
+
+  current.forEach((id) => {
+    if (ids.has(id)) {
+      next.add(id);
+      return;
+    }
+
+    hasRemovedSelection = true;
+  });
+
+  return hasRemovedSelection ? next : current;
 }
 
 /**

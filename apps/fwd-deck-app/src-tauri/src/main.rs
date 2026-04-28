@@ -981,6 +981,7 @@ fn resolve_runtime_paths(
     let app_config_dir = app_config_dir(app)?;
     let preferences_path = preferences_path_from_app_config_dir(&app_config_dir);
     let mut preferences = read_preferences_file(&preferences_path)?;
+    let original_preferences = preferences.clone();
 
     normalize_loaded_preferences(&mut preferences);
 
@@ -989,7 +990,11 @@ fn resolve_runtime_paths(
     }
 
     let runtime_paths = runtime_paths_from_preferences(&app_config_dir, preferences)?;
-    write_preferences_file(&preferences_path, &runtime_paths.preferences)?;
+    write_preferences_file_if_changed(
+        &preferences_path,
+        &original_preferences,
+        &runtime_paths.preferences,
+    )?;
 
     Ok(runtime_paths)
 }
@@ -1073,6 +1078,19 @@ fn write_preferences_file(path: &Path, preferences: &AppPreferences) -> Result<(
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// 変更がある場合だけアプリ設定ファイルを書き込む
+fn write_preferences_file_if_changed(
+    path: &Path,
+    original: &AppPreferences,
+    next: &AppPreferences,
+) -> Result<(), AppError> {
+    if original == next {
+        return Ok(());
+    }
+
+    write_preferences_file(path, next)
 }
 
 /// 保存済み設定の実行不能な値を取り除く
@@ -1938,6 +1956,37 @@ mod tests {
         let preferences = read_preferences_file(&path).expect("read missing preferences");
 
         assert_eq!(preferences, AppPreferences::default());
+    }
+
+    /// 未変更の preferences 書き込みがファイル作成を省略することを検証する
+    #[test]
+    fn unchanged_preferences_write_is_skipped() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("preferences.toml");
+        let preferences = AppPreferences::default();
+
+        write_preferences_file_if_changed(&path, &preferences, &preferences)
+            .expect("skip unchanged preferences write");
+
+        assert!(!path.exists());
+    }
+
+    /// 変更済みの preferences が従来どおり保存されることを検証する
+    #[test]
+    fn changed_preferences_write_is_persisted() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("preferences.toml");
+        let original = AppPreferences::default();
+        let next = AppPreferences {
+            use_global: false,
+            ..AppPreferences::default()
+        };
+
+        write_preferences_file_if_changed(&path, &original, &next)
+            .expect("write changed preferences");
+        let persisted = read_preferences_file(&path).expect("read persisted preferences");
+
+        assert_eq!(persisted, next);
     }
 
     /// ワークスペース選択時に履歴が先頭へ移動し重複しないことを検証する

@@ -509,6 +509,18 @@ impl LocalPortProcessBuilder {
 }
 
 /// プロセスが存在するかを判定する
+#[cfg(unix)]
+fn process_is_running(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+
+    // SAFETY: signal 0 はプロセス存在確認のみを行い、メモリ安全性へ影響しない
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// プロセスが存在するかを判定する
+#[cfg(not(unix))]
 fn process_is_running(pid: u32) -> bool {
     Command::new("kill")
         .arg("-0")
@@ -521,6 +533,31 @@ fn process_is_running(pid: u32) -> bool {
 }
 
 /// プロセスへ終了シグナルを送信する
+#[cfg(unix)]
+fn stop_process(state: &TunnelState) -> Result<(), TunnelRuntimeError> {
+    let pid = libc::pid_t::try_from(state.pid).map_err(|_| TunnelRuntimeError::Stop {
+        id: state.id.clone(),
+        pid: state.pid,
+        source: io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "pid does not fit platform pid_t",
+        ),
+    })?;
+
+    // SAFETY: pid_t へ変換済みの PID に終了シグナルを送信するだけで、メモリ安全性へ影響しない
+    if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+        return Ok(());
+    }
+
+    Err(TunnelRuntimeError::Stop {
+        id: state.id.clone(),
+        pid: state.pid,
+        source: io::Error::last_os_error(),
+    })
+}
+
+/// プロセスへ終了シグナルを送信する
+#[cfg(not(unix))]
 fn stop_process(state: &TunnelState) -> Result<(), TunnelRuntimeError> {
     Command::new("kill")
         .arg("-TERM")

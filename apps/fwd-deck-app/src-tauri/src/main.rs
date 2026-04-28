@@ -432,10 +432,7 @@ fn start_tunnels_inner(
             })?;
         let state_path = state_path_for_source(&runtime_paths, tunnel.source.kind)?;
 
-        start_tunnel(tunnel, state_path)
-            .map(start_success_message)
-            .map(Some)
-            .map_err(AppError::Runtime)
+        start_tunnel_for_app(tunnel, state_path)
     })
 }
 
@@ -1094,11 +1091,25 @@ fn ensure_required(name: &str, value: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// アプリの開始操作としてトンネルを開始する
+fn start_tunnel_for_app(
+    tunnel: &ResolvedTunnelConfig,
+    state_path: &Path,
+) -> Result<Option<String>, AppError> {
+    match start_tunnel(tunnel, state_path) {
+        Ok(started) => Ok(Some(start_success_message(started))),
+        Err(TunnelRuntimeError::AlreadyRunning { id, pid }) => {
+            Ok(Some(start_already_running_message(&id, pid)))
+        }
+        Err(error) => Err(AppError::Runtime(error)),
+    }
+}
+
 /// アプリの停止操作としてトンネルを停止する
 fn stop_tunnel_for_app(id: &str, state_path: &Path) -> Result<Option<String>, AppError> {
     match stop_tunnel(id, state_path) {
         Ok(stopped) => Ok(Some(stop_success_message(stopped))),
-        Err(TunnelRuntimeError::NotTracked { .. }) => Ok(None),
+        Err(TunnelRuntimeError::NotTracked { id }) => Ok(Some(stop_already_stopped_message(&id))),
         Err(error) => Err(AppError::Runtime(error)),
     }
 }
@@ -1153,6 +1164,11 @@ fn start_success_message(started: StartedTunnel) -> String {
     )
 }
 
+/// 開始済みの場合の成功メッセージを生成する
+fn start_already_running_message(id: &str, pid: u32) -> String {
+    format!("{id} はすでに開始済みです (pid: {pid})")
+}
+
 /// 停止成功時のメッセージを生成する
 fn stop_success_message(stopped: StoppedTunnel) -> String {
     match stopped.previous_state {
@@ -1165,6 +1181,11 @@ fn stop_success_message(stopped: StoppedTunnel) -> String {
             stopped.state.id, stopped.state.pid
         ),
     }
+}
+
+/// 停止済みの場合の成功メッセージを生成する
+fn stop_already_stopped_message(id: &str) -> String {
+    format!("{id} はすでに停止済みです")
 }
 
 /// 統合済みトンネル設定を ID から参照する索引を生成する
@@ -1234,7 +1255,7 @@ fn trimmed_optional(value: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use fwd_deck_core::TunnelState;
+    use fwd_deck_core::{ConfigSource, TunnelState, TunnelStateFile, state::write_state_file};
     use tempfile::TempDir;
 
     use super::*;
@@ -1334,15 +1355,40 @@ mod tests {
         assert!(!local_config_path.exists());
     }
 
-    /// 未追跡の停止対象が通知対象の操作結果から除外されることを検証する
+    /// 起動済みトンネルがアプリ操作では成功扱いになることを検証する
     #[test]
-    fn stop_tunnel_for_app_skips_untracked_tunnel() {
+    fn start_tunnel_for_app_reports_already_running_tunnel_as_success() {
+        let temp_dir = TempDir::new().expect("create state directory");
+        let state_path = temp_dir.path().join("state.toml");
+        let tunnel = resolved_tunnel("db", temp_dir.path().join("fwd-deck.toml"));
+        let pid = std::process::id();
+        let mut state_file = TunnelStateFile::new();
+        state_file.upsert(TunnelState::from_resolved_tunnel(
+            &tunnel,
+            pid,
+            1_700_000_000,
+        ));
+        write_state_file(&state_path, &state_file).expect("write state file");
+
+        let message =
+            start_tunnel_for_app(&tunnel, &state_path).expect("report already running tunnel");
+
+        assert_eq!(
+            message,
+            Some(format!("db はすでに開始済みです (pid: {pid})"))
+        );
+    }
+
+    /// 未追跡の停止対象がアプリ操作では成功扱いになることを検証する
+    #[test]
+    fn stop_tunnel_for_app_reports_untracked_tunnel_as_success() {
         let temp_dir = TempDir::new().expect("create state directory");
         let state_path = temp_dir.path().join("state.toml");
 
-        let message = stop_tunnel_for_app("missing", &state_path).expect("skip untracked tunnel");
+        let message =
+            stop_tunnel_for_app("missing", &state_path).expect("report already stopped tunnel");
 
-        assert!(message.is_none());
+        assert_eq!(message, Some("missing はすでに停止済みです".to_owned()));
     }
 
     /// スキップされた操作対象が成功件数と失敗件数に含まれないことを検証する
@@ -1475,5 +1521,26 @@ mod tests {
             },
             process_state: ProcessState::Running,
         }
+    }
+
+    /// テスト用の resolved tunnel を生成する
+    fn resolved_tunnel(id: &str, source_path: PathBuf) -> ResolvedTunnelConfig {
+        ResolvedTunnelConfig::new(
+            ConfigSource::new(ConfigSourceKind::Local, source_path),
+            TunnelConfig {
+                id: id.to_owned(),
+                description: None,
+                tags: Vec::new(),
+                local_host: None,
+                local_port: 15432,
+                remote_host: "127.0.0.1".to_owned(),
+                remote_port: 5432,
+                ssh_user: "user".to_owned(),
+                ssh_host: "bastion.example.com".to_owned(),
+                ssh_port: None,
+                identity_file: None,
+                timeouts: TimeoutConfig::default(),
+            },
+        )
     }
 }

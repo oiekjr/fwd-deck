@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet, hash_map::Entry},
     env,
     fmt::{self, Display},
     fs,
@@ -518,11 +518,8 @@ pub fn tag_is_valid(tag: &str) -> bool {
 /// トンネルが指定されたタグをすべて持つかを判定する
 pub fn tunnel_matches_tags(tunnel: &TunnelConfig, required_tags: &[String]) -> bool {
     let required_tags = normalize_tags(required_tags);
-    let tunnel_tags = normalize_tags(&tunnel.tags);
 
-    required_tags
-        .iter()
-        .all(|required| tunnel_tags.iter().any(|tag| tag == required))
+    tunnel_matches_normalized_tags(tunnel, &required_tags)
 }
 
 /// 指定タグをすべて持つ統合済みトンネル設定を取得する
@@ -530,10 +527,30 @@ pub fn filter_tunnels_by_tags<'a>(
     tunnels: &'a [ResolvedTunnelConfig],
     required_tags: &[String],
 ) -> Vec<&'a ResolvedTunnelConfig> {
+    let required_tags = normalize_tags(required_tags);
+
     tunnels
         .iter()
-        .filter(|resolved| tunnel_matches_tags(&resolved.tunnel, required_tags))
+        .filter(|resolved| tunnel_matches_normalized_tags(&resolved.tunnel, &required_tags))
         .collect()
+}
+
+/// 正規化済みタグ条件でトンネルを照合する
+fn tunnel_matches_normalized_tags(tunnel: &TunnelConfig, required_tags: &[String]) -> bool {
+    if required_tags.is_empty() {
+        return true;
+    }
+
+    let tunnel_tags = normalized_tag_set(&tunnel.tags);
+
+    required_tags
+        .iter()
+        .all(|required| tunnel_tags.contains(required))
+}
+
+/// 正規化済みタグ集合を生成する
+fn normalized_tag_set(tags: &[String]) -> HashSet<String> {
+    tags.iter().map(|tag| normalize_tag(tag)).collect()
 }
 
 /// 設定内容の意味的な不備を検証する

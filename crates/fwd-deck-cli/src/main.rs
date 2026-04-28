@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     env,
     fmt::{self, Display},
     io::{self, IsTerminal},
@@ -254,7 +255,7 @@ fn run() -> Result<ExitCode, CliError> {
             stop_command(&state_path, ids.clone(), *all, *dry_run)
         }
         Command::Config { command } => {
-            let paths = resolve_edit_config_paths(&cli)?;
+            let paths = resolve_config_paths(&cli)?;
             config_command(&paths, command.clone())
         }
         Command::Completion { shell } => completion_command(*shell),
@@ -273,24 +274,6 @@ fn load_config(cli: &Cli) -> Result<EffectiveConfig, CliError> {
 
 /// CLI 引数から設定ファイルの読込先を解決する
 fn resolve_config_paths(cli: &Cli) -> Result<ConfigPaths, CliError> {
-    let current_dir = env::current_dir().map_err(CliError::CurrentDir)?;
-    let local = cli
-        .config
-        .clone()
-        .unwrap_or_else(|| default_local_config_path(&current_dir));
-    let global = if cli.no_global {
-        None
-    } else {
-        cli.global_config
-            .clone()
-            .or_else(default_global_config_path)
-    };
-
-    Ok(ConfigPaths::new(global, local))
-}
-
-/// 設定編集用の設定ファイル位置を解決する
-fn resolve_edit_config_paths(cli: &Cli) -> Result<ConfigPaths, CliError> {
     let current_dir = env::current_dir().map_err(CliError::CurrentDir)?;
     let local = cli
         .config
@@ -728,10 +711,11 @@ fn recover_command(
         return Ok(ExitCode::SUCCESS);
     }
 
+    let statuses_by_id = status_index_by_id(&statuses);
     let mut failed = false;
 
     for id in recovery_ids {
-        let Some(status) = statuses.iter().find(|status| status.state.id == id) else {
+        let Some(status) = statuses_by_id.get(id.as_str()).copied() else {
             failed = true;
             eprintln!(
                 "{}",
@@ -1308,16 +1292,11 @@ fn find_tunnels_by_ids<'a>(
     config: &'a EffectiveConfig,
     ids: &[String],
 ) -> Result<Vec<&'a ResolvedTunnelConfig>, ()> {
-    let mut tunnels = Vec::new();
+    let tunnels_by_id = tunnel_index_by_id(config);
 
-    for id in ids {
-        let Some(tunnel) = config.tunnels.iter().find(|tunnel| tunnel.tunnel.id == *id) else {
-            return Err(());
-        };
-        tunnels.push(tunnel);
-    }
-
-    Ok(tunnels)
+    ids.iter()
+        .map(|id| tunnels_by_id.get(id.as_str()).copied().ok_or(()))
+        .collect()
 }
 
 /// 指定 ID のトンネル設定を取得する
@@ -1326,6 +1305,23 @@ fn find_tunnel_by_id<'a>(
     id: &str,
 ) -> Option<&'a ResolvedTunnelConfig> {
     config.tunnels.iter().find(|tunnel| tunnel.tunnel.id == id)
+}
+
+/// 統合済みトンネル設定を ID から参照する索引を生成する
+fn tunnel_index_by_id(config: &EffectiveConfig) -> HashMap<&str, &ResolvedTunnelConfig> {
+    config
+        .tunnels
+        .iter()
+        .map(|resolved| (resolved.tunnel.id.as_str(), resolved))
+        .collect()
+}
+
+/// トンネル状態を ID から参照する索引を生成する
+fn status_index_by_id(statuses: &[TunnelRuntimeStatus]) -> HashMap<&str, &TunnelRuntimeStatus> {
+    statuses
+        .iter()
+        .map(|status| (status.state.id.as_str(), status))
+        .collect()
 }
 
 /// stale なトンネル ID を取得する
@@ -1339,10 +1335,16 @@ fn stale_tunnel_ids(statuses: &[TunnelRuntimeStatus]) -> Vec<String> {
 
 /// watch 対象の stale なトンネル ID を取得する
 fn watched_stale_tunnel_ids(statuses: &[TunnelRuntimeStatus], ids: &[String]) -> Vec<String> {
+    let requested_ids = id_set(ids);
+
     statuses
         .iter()
         .filter(|status| status.process_state == ProcessState::Stale)
-        .filter(|status| ids.is_empty() || ids.contains(&status.state.id))
+        .filter(|status| {
+            requested_ids
+                .as_ref()
+                .is_none_or(|ids| ids.contains(status.state.id.as_str()))
+        })
         .map(|status| status.state.id.clone())
         .collect()
 }
@@ -1382,10 +1384,10 @@ fn print_unknown_ids(config: &EffectiveConfig, ids: &[String]) {
         .tunnels
         .iter()
         .map(|tunnel| tunnel.tunnel.id.as_str())
-        .collect::<Vec<_>>();
+        .collect::<HashSet<_>>();
 
     for id in ids {
-        if !known_ids.contains(&id.as_str()) {
+        if !known_ids.contains(id.as_str()) {
             eprintln!(
                 "{}",
                 red(&format!("Unknown tunnel id: {id}"), OutputStream::Stderr)
@@ -1439,12 +1441,9 @@ fn print_start_dry_run(tunnels: &[&ResolvedTunnelConfig], state_path: &Path) {
 /// start dry-run のトンネル単位の結果を表示する
 fn print_start_dry_run_tunnel(resolved: &ResolvedTunnelConfig) {
     let tunnel = &resolved.tunnel;
-    let local = format!("{}:{}", tunnel.effective_local_host(), tunnel.local_port);
-    let remote = format!("{}:{}", tunnel.remote_host, tunnel.remote_port);
-    let ssh = match tunnel.ssh_port {
-        Some(port) => format!("{}@{}:{}", tunnel.ssh_user, tunnel.ssh_host, port),
-        None => format!("{}@{}", tunnel.ssh_user, tunnel.ssh_host),
-    };
+    let local = format_local_endpoint(tunnel);
+    let remote = format_remote_endpoint(tunnel);
+    let ssh = format_ssh_endpoint(tunnel);
     let command = format_ssh_command(&build_ssh_command_args(resolved));
 
     println!("Would start tunnel: {}", tunnel.id);
@@ -1463,10 +1462,11 @@ fn print_stop_dry_run(
     println!("Dry run: no process will be stopped and state file will not be modified.");
     println!("State file: {}", state_path.display());
 
+    let statuses_by_id = status_index_by_id(statuses);
     let mut failed = false;
 
     for id in ids {
-        let Some(status) = statuses.iter().find(|status| status.state.id == *id) else {
+        let Some(status) = statuses_by_id.get(id.as_str()).copied() else {
             failed = true;
             eprintln!(
                 "{}",
@@ -1482,6 +1482,15 @@ fn print_stop_dry_run(
     }
 
     exit_code_from_failure(failed)
+}
+
+/// ID 一覧の一致判定用集合を生成する
+fn id_set(ids: &[String]) -> Option<HashSet<&str>> {
+    if ids.is_empty() {
+        None
+    } else {
+        Some(ids.iter().map(String::as_str).collect())
+    }
 }
 
 /// stop dry-run のトンネル単位の結果を表示する

@@ -520,7 +520,13 @@ function App(): ReactElement {
       });
 
       await refreshDashboard(paths, { silent: true });
-      showOperationToast(operationMessage(report));
+      const message = operationMessage(report);
+      if (message === null) {
+        dismissOperationToast();
+        return;
+      }
+
+      showOperationToast(message);
     } catch (error) {
       showOperationToast({ kind: "error", summary: stringifyError(error) });
     } finally {
@@ -2929,9 +2935,13 @@ function toggleTag(current: string[], tag: string): string[] {
 /**
  * 操作結果を通知文へ変換する
  */
-function operationMessage(report: OperationReport): OperationToastInput {
+function operationMessage(report: OperationReport): OperationToastInput | null {
   const successCount = report.succeeded.length;
   const failureCount = report.failed.length;
+
+  if (successCount === 0 && failureCount === 0) {
+    return null;
+  }
 
   if (failureCount === 0) {
     return {

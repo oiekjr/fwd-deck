@@ -434,6 +434,7 @@ fn start_tunnels_inner(
 
         start_tunnel(tunnel, state_path)
             .map(start_success_message)
+            .map(Some)
             .map_err(AppError::Runtime)
     })
 }
@@ -462,9 +463,7 @@ fn stop_tunnels_inner(
             }
         };
 
-        stop_tunnel(&target.id, state_path)
-            .map(stop_success_message)
-            .map_err(AppError::Runtime)
+        stop_tunnel_for_app(&target.id, state_path)
     })
 }
 
@@ -1095,13 +1094,22 @@ fn ensure_required(name: &str, value: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// アプリの停止操作としてトンネルを停止する
+fn stop_tunnel_for_app(id: &str, state_path: &Path) -> Result<Option<String>, AppError> {
+    match stop_tunnel(id, state_path) {
+        Ok(stopped) => Ok(Some(stop_success_message(stopped))),
+        Err(TunnelRuntimeError::NotTracked { .. }) => Ok(None),
+        Err(error) => Err(AppError::Runtime(error)),
+    }
+}
+
 /// 複数トンネルに対する操作を順次実行する
 fn run_tunnel_operations<F>(
     targets: &[OperationTargetInput],
     mut operation: F,
 ) -> Result<OperationReport, AppError>
 where
-    F: FnMut(&OperationTargetInput) -> Result<String, AppError>,
+    F: FnMut(&OperationTargetInput) -> Result<Option<String>, AppError>,
 {
     if targets.is_empty() {
         return Err(AppError::InvalidInput(
@@ -1114,10 +1122,11 @@ where
 
     for target in targets {
         match operation(target) {
-            Ok(message) => succeeded.push(OperationSuccessView {
+            Ok(Some(message)) => succeeded.push(OperationSuccessView {
                 id: operation_target_label(target),
                 message,
             }),
+            Ok(None) => {}
             Err(error) => failed.push(OperationFailureView {
                 id: operation_target_label(target),
                 message: error.to_string(),
@@ -1323,6 +1332,33 @@ mod tests {
 
         assert_eq!(local_config_path, workspace.path().join("fwd-deck.toml"));
         assert!(!local_config_path.exists());
+    }
+
+    /// 未追跡の停止対象が通知対象の操作結果から除外されることを検証する
+    #[test]
+    fn stop_tunnel_for_app_skips_untracked_tunnel() {
+        let temp_dir = TempDir::new().expect("create state directory");
+        let state_path = temp_dir.path().join("state.toml");
+
+        let message = stop_tunnel_for_app("missing", &state_path).expect("skip untracked tunnel");
+
+        assert!(message.is_none());
+    }
+
+    /// スキップされた操作対象が成功件数と失敗件数に含まれないことを検証する
+    #[test]
+    fn run_tunnel_operations_omits_skipped_targets() {
+        let targets = vec![OperationTargetInput {
+            id: "missing".to_owned(),
+            runtime_scope: None,
+        }];
+
+        let report =
+            run_tunnel_operations(&targets, |_target| Ok::<Option<String>, AppError>(None))
+                .expect("run operation");
+
+        assert!(report.succeeded.is_empty());
+        assert!(report.failed.is_empty());
     }
 
     /// 設定ファイル種別に応じて runtime scope が分かれることを検証する

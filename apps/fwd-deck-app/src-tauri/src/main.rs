@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 use fwd_deck_core::{
@@ -14,6 +15,9 @@ use fwd_deck_core::{
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
 use thiserror::Error;
 
 const APP_PREFERENCES_FILE_NAME: &str = "preferences.toml";
@@ -23,10 +27,17 @@ const WORKSPACE_STATES_DIR: &str = "workspace-states";
 const STATE_FILE_NAME: &str = "state.toml";
 const START_TUNNELS_PARALLELISM: usize = 4;
 const OPERATION_PROGRESS_EVENT: &str = "operation-progress";
+const QUIT_DIALOG_TITLE: &str = "fwd-deck を終了";
+const QUIT_DIALOG_STOP_LABEL: &str = "停止して終了";
+const QUIT_DIALOG_KEEP_LABEL: &str = "停止せず終了";
+const QUIT_DIALOG_CANCEL_LABEL: &str = "キャンセル";
+const QUIT_ERROR_TITLE: &str = "ポートフォワーディングを停止できませんでした";
+const QUIT_STALE_CLEANUP_ERROR_TITLE: &str = "stale 状態を削除できませんでした";
 
 /// Tauri アプリを起動する
 fn main() {
-    tauri::Builder::default()
+    let quit_state = QuitConfirmationStateHandle::default();
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             load_dashboard,
@@ -36,8 +47,368 @@ fn main() {
             remove_tunnel_entry,
             remove_workspace_history_entry
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running fwd-deck application");
+
+    app.run(move |app, event| {
+        handle_quit_confirmation_event(app, event, quit_state.clone());
+    });
+}
+
+/// 終了確認の状態を共有する
+#[derive(Debug, Clone, Default)]
+struct QuitConfirmationStateHandle(Arc<Mutex<QuitConfirmationState>>);
+
+impl QuitConfirmationStateHandle {
+    /// 終了確認の状態を取得する
+    fn get(&self) -> QuitConfirmationState {
+        *self
+            .0
+            .lock()
+            .expect("quit confirmation state should not be poisoned")
+    }
+
+    /// 終了確認の状態を更新する
+    fn set(&self, state: QuitConfirmationState) {
+        *self
+            .0
+            .lock()
+            .expect("quit confirmation state should not be poisoned") = state;
+    }
+}
+
+/// 終了確認の進行状態を表現する
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum QuitConfirmationState {
+    #[default]
+    Idle,
+    Prompting,
+    Proceeding,
+}
+
+/// ユーザーが要求した終了種別を表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QuitRequest {
+    AppExit,
+    WindowClose { label: String },
+}
+
+/// 終了確認ダイアログの選択結果を表現する
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuitDialogAction {
+    StopAndQuit,
+    QuitOnly,
+    Cancel,
+}
+
+/// 終了時に停止または削除するトンネルを表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QuitTunnelTarget {
+    id: String,
+    runtime_scope: RuntimeScope,
+    state_path: PathBuf,
+    process_state: ProcessState,
+}
+
+impl QuitTunnelTarget {
+    /// 終了処理の表示用 ID を生成する
+    fn display_id(&self) -> String {
+        runtime_status_key(self.runtime_scope, &self.id)
+    }
+}
+
+/// 終了時停止処理の失敗を表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QuitStopFailure {
+    id: String,
+    message: String,
+}
+
+/// 終了時に扱うトンネルを状態別に保持する
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct QuitTunnelTargets {
+    running: Vec<QuitTunnelTarget>,
+    stale: Vec<QuitTunnelTarget>,
+}
+
+/// 終了イベントに応じて停止確認を制御する
+fn handle_quit_confirmation_event(
+    app: &tauri::AppHandle,
+    event: tauri::RunEvent,
+    quit_state: QuitConfirmationStateHandle,
+) {
+    match event {
+        tauri::RunEvent::ExitRequested { api, .. } => {
+            handle_exit_requested(app, api, quit_state);
+        }
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { api, .. },
+            ..
+        } => {
+            handle_close_requested(app, api, quit_state, label);
+        }
+        _ => {}
+    }
+}
+
+/// アプリ終了要求に対する停止確認を開始する
+fn handle_exit_requested(
+    app: &tauri::AppHandle,
+    api: tauri::ExitRequestApi,
+    quit_state: QuitConfirmationStateHandle,
+) {
+    if should_prevent_quit(app, quit_state, QuitRequest::AppExit) {
+        api.prevent_exit();
+    }
+}
+
+/// ウィンドウ終了要求に対する停止確認を開始する
+fn handle_close_requested(
+    app: &tauri::AppHandle,
+    api: tauri::CloseRequestApi,
+    quit_state: QuitConfirmationStateHandle,
+    label: String,
+) {
+    if should_prevent_quit(app, quit_state, QuitRequest::WindowClose { label }) {
+        api.prevent_close();
+    }
+}
+
+/// 終了を一時停止して確認を出す必要があるか判定する
+fn should_prevent_quit(
+    app: &tauri::AppHandle,
+    quit_state: QuitConfirmationStateHandle,
+    request: QuitRequest,
+) -> bool {
+    match quit_state.get() {
+        QuitConfirmationState::Proceeding => return false,
+        QuitConfirmationState::Prompting => return true,
+        QuitConfirmationState::Idle => quit_state.set(QuitConfirmationState::Prompting),
+    }
+
+    match collect_quit_tunnel_targets(app) {
+        Ok(targets) => handle_collected_quit_targets(app, quit_state, request, targets),
+        Err(error) => {
+            show_quit_error_dialog(
+                app.clone(),
+                quit_state,
+                QUIT_ERROR_TITLE,
+                format!("終了前の状態確認に失敗しました。\n\n{error}"),
+            );
+            true
+        }
+    }
+}
+
+/// 収集した終了対象に応じて自動掃除または確認を行う
+fn handle_collected_quit_targets(
+    app: &tauri::AppHandle,
+    quit_state: QuitConfirmationStateHandle,
+    request: QuitRequest,
+    targets: QuitTunnelTargets,
+) -> bool {
+    if let Err(failure) = stop_quit_tunnel_targets(&targets.stale) {
+        show_quit_error_dialog(
+            app.clone(),
+            quit_state,
+            QUIT_STALE_CLEANUP_ERROR_TITLE,
+            quit_stale_cleanup_failure_message(&failure),
+        );
+        return true;
+    }
+
+    if targets.running.is_empty() {
+        quit_state.set(QuitConfirmationState::Idle);
+        return false;
+    }
+
+    show_quit_confirmation_dialog(app.clone(), quit_state, request, targets.running);
+    true
+}
+
+/// 終了時に停止または削除する対象を収集する
+fn collect_quit_tunnel_targets(app: &tauri::AppHandle) -> Result<QuitTunnelTargets, AppError> {
+    let runtime_paths = resolve_runtime_paths(app, None)?;
+    collect_visible_quit_tunnel_targets(&runtime_paths)
+}
+
+/// 表示中スコープの tracked tunnel を終了処理対象へ変換する
+fn collect_visible_quit_tunnel_targets(
+    paths: &RuntimePaths,
+) -> Result<QuitTunnelTargets, AppError> {
+    let statuses = load_scoped_runtime_statuses(paths)?;
+    quit_tunnel_targets_from_statuses(paths, &statuses)
+}
+
+/// runtime 状態を終了処理対象へ変換する
+fn quit_tunnel_targets_from_statuses(
+    paths: &RuntimePaths,
+    statuses: &[ScopedRuntimeStatus],
+) -> Result<QuitTunnelTargets, AppError> {
+    let mut targets = QuitTunnelTargets::default();
+
+    for status in statuses {
+        let state_path = state_path_for_runtime_scope(paths, status.runtime_scope)?;
+        let target = QuitTunnelTarget {
+            id: status.status.state.id.clone(),
+            runtime_scope: status.runtime_scope,
+            state_path: state_path.to_path_buf(),
+            process_state: status.status.process_state,
+        };
+
+        match status.status.process_state {
+            ProcessState::Running => targets.running.push(target),
+            ProcessState::Stale => targets.stale.push(target),
+        }
+    }
+
+    Ok(targets)
+}
+
+/// 終了確認ダイアログを表示する
+fn show_quit_confirmation_dialog(
+    app: tauri::AppHandle,
+    quit_state: QuitConfirmationStateHandle,
+    request: QuitRequest,
+    targets: Vec<QuitTunnelTarget>,
+) {
+    let app_for_callback = app.clone();
+
+    app.dialog()
+        .message(quit_confirmation_message())
+        .title(QUIT_DIALOG_TITLE)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::YesNoCancelCustom(
+            QUIT_DIALOG_STOP_LABEL.to_owned(),
+            QUIT_DIALOG_KEEP_LABEL.to_owned(),
+            QUIT_DIALOG_CANCEL_LABEL.to_owned(),
+        ))
+        .show_with_result(move |result| {
+            handle_quit_dialog_result(
+                app_for_callback,
+                quit_state,
+                request,
+                targets,
+                quit_dialog_action(&result),
+            );
+        });
+}
+
+/// 終了確認ダイアログの本文を生成する
+fn quit_confirmation_message() -> &'static str {
+    "起動中のポートフォワーディングがあります。\n停止して終了しますか？"
+}
+
+/// 終了確認ダイアログの結果を内部処理へ変換する
+fn quit_dialog_action(result: &MessageDialogResult) -> QuitDialogAction {
+    match result {
+        MessageDialogResult::Yes => QuitDialogAction::StopAndQuit,
+        MessageDialogResult::No => QuitDialogAction::QuitOnly,
+        MessageDialogResult::Custom(label) if label == QUIT_DIALOG_STOP_LABEL => {
+            QuitDialogAction::StopAndQuit
+        }
+        MessageDialogResult::Custom(label) if label == QUIT_DIALOG_KEEP_LABEL => {
+            QuitDialogAction::QuitOnly
+        }
+        _ => QuitDialogAction::Cancel,
+    }
+}
+
+/// 終了確認ダイアログの選択結果を実行する
+fn handle_quit_dialog_result(
+    app: tauri::AppHandle,
+    quit_state: QuitConfirmationStateHandle,
+    request: QuitRequest,
+    targets: Vec<QuitTunnelTarget>,
+    action: QuitDialogAction,
+) {
+    match action {
+        QuitDialogAction::StopAndQuit => match stop_quit_tunnel_targets(&targets) {
+            Ok(()) => perform_confirmed_quit(app, quit_state, request),
+            Err(failure) => show_quit_error_dialog(
+                app,
+                quit_state,
+                QUIT_ERROR_TITLE,
+                quit_stop_failure_message(&failure),
+            ),
+        },
+        QuitDialogAction::QuitOnly => perform_confirmed_quit(app, quit_state, request),
+        QuitDialogAction::Cancel => quit_state.set(QuitConfirmationState::Idle),
+    }
+}
+
+/// 終了前に対象トンネルを停止または stale 削除する
+fn stop_quit_tunnel_targets(targets: &[QuitTunnelTarget]) -> Result<(), QuitStopFailure> {
+    for target in targets {
+        if let Err(error) = stop_tunnel_for_app(&target.id, &target.state_path) {
+            return Err(QuitStopFailure {
+                id: target.display_id(),
+                message: error.to_string(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// 停止失敗時の表示メッセージを生成する
+fn quit_stop_failure_message(failure: &QuitStopFailure) -> String {
+    format!(
+        "{} の停止に失敗したため、終了を中止しました。\n\n{}",
+        failure.id, failure.message
+    )
+}
+
+/// stale 掃除失敗時の表示メッセージを生成する
+fn quit_stale_cleanup_failure_message(failure: &QuitStopFailure) -> String {
+    format!(
+        "{} の stale 状態を削除できなかったため、終了を中止しました。\n\n{}",
+        failure.id, failure.message
+    )
+}
+
+/// 確認済みの終了要求を再実行する
+fn perform_confirmed_quit(
+    app: tauri::AppHandle,
+    quit_state: QuitConfirmationStateHandle,
+    request: QuitRequest,
+) {
+    quit_state.set(QuitConfirmationState::Proceeding);
+
+    match request {
+        QuitRequest::AppExit => app.exit(0),
+        QuitRequest::WindowClose { label } => match app.get_webview_window(&label) {
+            Some(window) => {
+                if let Err(error) = window.close() {
+                    show_quit_error_dialog(
+                        app,
+                        quit_state,
+                        QUIT_ERROR_TITLE,
+                        format!("ウィンドウを閉じられませんでした。\n\n{error}"),
+                    );
+                }
+            }
+            None => app.exit(0),
+        },
+    }
+}
+
+/// 終了処理のエラーダイアログを表示する
+fn show_quit_error_dialog(
+    app: tauri::AppHandle,
+    quit_state: QuitConfirmationStateHandle,
+    title: &str,
+    message: String,
+) {
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::Ok)
+        .show(move |_| {
+            quit_state.set(QuitConfirmationState::Idle);
+        });
 }
 
 /// フロントエンドから指定するワークスペース選択を表現する
@@ -1550,7 +1921,10 @@ fn trimmed_optional(value: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use fwd_deck_core::{ConfigSource, TunnelState, TunnelStateFile, state::write_state_file};
+    use fwd_deck_core::{
+        ConfigSource, TunnelState, TunnelStateFile,
+        state::{read_state_file, write_state_file},
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -1799,6 +2173,181 @@ mod tests {
         assert!(report.failed.is_empty());
     }
 
+    /// 終了時対象収集が global state の起動中トンネルを含めることを検証する
+    #[test]
+    fn collect_visible_quit_targets_includes_running_global_state() {
+        let temp_dir = TempDir::new().expect("create state directory");
+        let global_state_path = temp_dir.path().join("global-state.toml");
+        let global_config_path = temp_dir.path().join("global-fwd-deck.toml");
+        write_state_file(
+            &global_state_path,
+            &state_file(vec![tunnel_state(
+                "db",
+                ConfigSourceKind::Global,
+                global_config_path,
+                std::process::id(),
+            )]),
+        )
+        .expect("write global state");
+        let paths = runtime_paths_for_state_paths(None, global_state_path.clone(), None);
+
+        let targets = collect_visible_quit_tunnel_targets(&paths).expect("collect quit targets");
+
+        assert_eq!(targets.running.len(), 1);
+        assert!(targets.stale.is_empty());
+        assert_eq!(targets.running[0].id, "db");
+        assert_eq!(targets.running[0].runtime_scope, RuntimeScope::Global);
+        assert_eq!(targets.running[0].state_path, global_state_path);
+        assert_eq!(targets.running[0].process_state, ProcessState::Running);
+    }
+
+    /// 終了時対象収集が stale state を確認対象から分離することを検証する
+    #[test]
+    fn collect_visible_quit_targets_separates_stale_state() {
+        let temp_dir = TempDir::new().expect("create state directory");
+        let global_state_path = temp_dir.path().join("global-state.toml");
+        let global_config_path = temp_dir.path().join("global-fwd-deck.toml");
+        write_state_file(
+            &global_state_path,
+            &state_file(vec![tunnel_state(
+                "db",
+                ConfigSourceKind::Global,
+                global_config_path,
+                u32::MAX,
+            )]),
+        )
+        .expect("write global state");
+        let paths = runtime_paths_for_state_paths(None, global_state_path, None);
+
+        let targets = collect_visible_quit_tunnel_targets(&paths).expect("collect quit targets");
+
+        assert!(targets.running.is_empty());
+        assert_eq!(targets.stale.len(), 1);
+        assert_eq!(targets.stale[0].process_state, ProcessState::Stale);
+    }
+
+    /// 終了時対象収集が別ワークスペース由来の state を除外することを検証する
+    #[test]
+    fn collect_visible_quit_targets_excludes_other_workspace_state() {
+        let active_workspace = TempDir::new().expect("create active workspace");
+        let other_workspace = TempDir::new().expect("create other workspace");
+        let temp_dir = TempDir::new().expect("create state directory");
+        let active_config_path = active_workspace.path().join("fwd-deck.toml");
+        let other_config_path = other_workspace.path().join("fwd-deck.toml");
+        let global_state_path = temp_dir.path().join("global-state.toml");
+        fs::write(&active_config_path, "").expect("write active config");
+        fs::write(&other_config_path, "").expect("write other config");
+        write_state_file(
+            &global_state_path,
+            &state_file(vec![tunnel_state(
+                "db",
+                ConfigSourceKind::Local,
+                other_config_path,
+                std::process::id(),
+            )]),
+        )
+        .expect("write global state");
+        let paths =
+            runtime_paths_for_state_paths(Some(active_config_path), global_state_path, None);
+
+        let targets = collect_visible_quit_tunnel_targets(&paths).expect("collect quit targets");
+
+        assert!(targets.running.is_empty());
+        assert!(targets.stale.is_empty());
+    }
+
+    /// 終了時対象収集が workspace state のパスを保持することを検証する
+    #[test]
+    fn collect_visible_quit_targets_uses_workspace_state_path() {
+        let workspace = TempDir::new().expect("create workspace");
+        let temp_dir = TempDir::new().expect("create state directory");
+        let local_config_path = workspace.path().join("fwd-deck.toml");
+        let global_state_path = temp_dir.path().join("global-state.toml");
+        let workspace_state_path = temp_dir.path().join("workspace-state.toml");
+        fs::write(&local_config_path, "").expect("write local config");
+        write_state_file(
+            &workspace_state_path,
+            &state_file(vec![tunnel_state(
+                "db",
+                ConfigSourceKind::Local,
+                local_config_path.clone(),
+                std::process::id(),
+            )]),
+        )
+        .expect("write workspace state");
+        let paths = runtime_paths_for_state_paths(
+            Some(local_config_path),
+            global_state_path,
+            Some(workspace_state_path.clone()),
+        );
+
+        let targets = collect_visible_quit_tunnel_targets(&paths).expect("collect quit targets");
+
+        assert_eq!(targets.running.len(), 1);
+        assert_eq!(targets.running[0].runtime_scope, RuntimeScope::Workspace);
+        assert_eq!(targets.running[0].state_path, workspace_state_path);
+    }
+
+    /// stale state が確認なしの掃除対象として削除されることを検証する
+    #[test]
+    fn stop_quit_tunnel_targets_removes_stale_state() {
+        let temp_dir = TempDir::new().expect("create state directory");
+        let state_path = temp_dir.path().join("state.toml");
+        write_state_file(
+            &state_path,
+            &state_file(vec![tunnel_state(
+                "db",
+                ConfigSourceKind::Global,
+                temp_dir.path().join("fwd-deck.toml"),
+                u32::MAX,
+            )]),
+        )
+        .expect("write state");
+        let target = QuitTunnelTarget {
+            id: "db".to_owned(),
+            runtime_scope: RuntimeScope::Global,
+            state_path: state_path.clone(),
+            process_state: ProcessState::Stale,
+        };
+
+        stop_quit_tunnel_targets(&[target]).expect("remove stale state");
+        let state = read_state_file(&state_path).expect("read state");
+
+        assert!(state.tunnels.is_empty());
+    }
+
+    /// 終了確認メッセージがダイアログ内で折り返されにくい短い文言であることを検証する
+    #[test]
+    fn quit_confirmation_message_uses_compact_text() {
+        let message = quit_confirmation_message();
+
+        assert_eq!(
+            message,
+            "起動中のポートフォワーディングがあります。\n停止して終了しますか？"
+        );
+    }
+
+    /// 終了確認ダイアログのカスタムボタン結果を内部アクションへ変換できることを検証する
+    #[test]
+    fn quit_dialog_action_maps_custom_buttons() {
+        assert_eq!(
+            quit_dialog_action(&MessageDialogResult::Custom(
+                QUIT_DIALOG_STOP_LABEL.to_owned()
+            )),
+            QuitDialogAction::StopAndQuit
+        );
+        assert_eq!(
+            quit_dialog_action(&MessageDialogResult::Custom(
+                QUIT_DIALOG_KEEP_LABEL.to_owned()
+            )),
+            QuitDialogAction::QuitOnly
+        );
+        assert_eq!(
+            quit_dialog_action(&MessageDialogResult::Cancel),
+            QuitDialogAction::Cancel
+        );
+    }
+
     /// 設定ファイル種別に応じて runtime scope が分かれることを検証する
     #[test]
     fn runtime_scope_matches_config_source_kind() {
@@ -1894,23 +2443,59 @@ mod tests {
         }
     }
 
+    /// テスト用の runtime paths を state path 指定で生成する
+    fn runtime_paths_for_state_paths(
+        local_config_path: Option<PathBuf>,
+        global_state_path: PathBuf,
+        workspace_state_path: Option<PathBuf>,
+    ) -> RuntimePaths {
+        RuntimePaths {
+            preferences: AppPreferences::default(),
+            config_paths: ConfigPaths::new(
+                None,
+                local_config_path
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("fwd-deck.toml")),
+            ),
+            local_config_path,
+            global_config_display_path: None,
+            global_state_path,
+            workspace_state_path,
+        }
+    }
+
+    /// テスト用の状態ファイルを生成する
+    fn state_file(tunnels: Vec<TunnelState>) -> TunnelStateFile {
+        TunnelStateFile { tunnels }
+    }
+
+    /// テスト用の tunnel state を生成する
+    fn tunnel_state(
+        id: &str,
+        source_kind: ConfigSourceKind,
+        source_path: PathBuf,
+        pid: u32,
+    ) -> TunnelState {
+        TunnelState {
+            id: id.to_owned(),
+            pid,
+            local_host: "127.0.0.1".to_owned(),
+            local_port: 15432,
+            remote_host: "127.0.0.1".to_owned(),
+            remote_port: 5432,
+            ssh_user: "user".to_owned(),
+            ssh_host: "bastion.example.com".to_owned(),
+            ssh_port: None,
+            source_kind,
+            source_path,
+            started_at_unix_seconds: 1_700_000_000,
+        }
+    }
+
     /// テスト用の runtime status を生成する
     fn runtime_status(source_kind: ConfigSourceKind, source_path: PathBuf) -> TunnelRuntimeStatus {
         TunnelRuntimeStatus {
-            state: TunnelState {
-                id: "db".to_owned(),
-                pid: 1000,
-                local_host: "127.0.0.1".to_owned(),
-                local_port: 15432,
-                remote_host: "127.0.0.1".to_owned(),
-                remote_port: 5432,
-                ssh_user: "user".to_owned(),
-                ssh_host: "bastion.example.com".to_owned(),
-                ssh_port: None,
-                source_kind,
-                source_path,
-                started_at_unix_seconds: 1_700_000_000,
-            },
+            state: tunnel_state("db", source_kind, source_path, 1000),
             process_state: ProcessState::Running,
         }
     }

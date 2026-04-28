@@ -1976,7 +1976,7 @@ function SelectionActionBar({
             </button>
             <button
               type="button"
-              className="btn btn-outline btn-sm"
+              className="btn btn-error btn-sm"
               onClick={onStop}
               disabled={isBusy || selectedCount === 0}
             >

@@ -15,11 +15,13 @@ import {
   FolderOpen,
   Gauge,
   KeyRound,
+  LayoutGrid,
   ListFilter,
   Loader2,
   Minus,
   Play,
   RefreshCw,
+  Rows3,
   Search,
   Server,
   Settings2,
@@ -44,6 +46,8 @@ type StatusFilter = "all" | TunnelStatus;
 type ScopeFilter = "all" | ConfigScope;
 
 type AppView = "dashboard" | "add";
+
+type TunnelDisplayMode = "card" | "slim";
 
 type AppCommand =
   | "load_dashboard"
@@ -295,6 +299,7 @@ function App(): ReactElement {
   const [filters, setFilters] = useState<TunnelFilters>(initialFilters);
   const [queryInput, setQueryInput] = useState<string>(initialFilters.query);
   const [activeView, setActiveView] = useState<AppView>("dashboard");
+  const [tunnelDisplayMode, setTunnelDisplayMode] = useState<TunnelDisplayMode>("slim");
   const [settingsDraft, setSettingsDraft] = useState<WorkspaceSelection | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<TunnelView | null>(null);
@@ -905,10 +910,12 @@ function App(): ReactElement {
             isBusy={isBusy}
             queryInput={queryInput}
             filters={filters}
+            displayMode={tunnelDisplayMode}
             onQueryInputChange={updateQueryInput}
             onFilterChange={updateFilter}
             onToggleTag={toggleTagFilter}
             onResetFilters={resetFilters}
+            onDisplayModeChange={setTunnelDisplayMode}
             onClearSelection={() => setSelectedIds(new Set())}
             onSelectVisible={selectVisibleTunnels}
             onDeselectVisible={deselectVisibleTunnels}
@@ -1220,11 +1227,13 @@ interface DashboardViewProps {
   operationProgress: OperationProgress | null;
   queryInput: string;
   filters: TunnelFilters;
+  displayMode: TunnelDisplayMode;
   isBusy: boolean;
   onQueryInputChange: (value: string) => void;
   onFilterChange: <K extends keyof TunnelFilters>(field: K, value: TunnelFilters[K]) => void;
   onToggleTag: (tag: string) => void;
   onResetFilters: () => void;
+  onDisplayModeChange: (mode: TunnelDisplayMode) => void;
   onClearSelection: () => void;
   onSelectVisible: () => void;
   onDeselectVisible: () => void;
@@ -1253,11 +1262,13 @@ function DashboardView({
   operationProgress,
   queryInput,
   filters,
+  displayMode,
   isBusy,
   onQueryInputChange,
   onFilterChange,
   onToggleTag,
   onResetFilters,
+  onDisplayModeChange,
   onClearSelection,
   onSelectVisible,
   onDeselectVisible,
@@ -1291,11 +1302,13 @@ function DashboardView({
         availableTags={availableTags}
         queryInput={queryInput}
         filters={filters}
+        displayMode={displayMode}
         hasActiveFilters={hasActiveFilters}
         onQueryInputChange={onQueryInputChange}
         onFilterChange={onFilterChange}
         onToggleTag={onToggleTag}
         onResetFilters={onResetFilters}
+        onDisplayModeChange={onDisplayModeChange}
       />
       <SelectionActionBar
         isVisible={shouldShowSelectionActionBar}
@@ -1317,6 +1330,7 @@ function DashboardView({
         hasCompletedInitialLoad={hasCompletedInitialLoad}
         tunnels={filteredTunnels}
         filters={filters}
+        displayMode={displayMode}
         hasActiveFilters={hasActiveFilters}
         selectedIds={selectedIds}
         isBusy={isBusy}
@@ -1713,11 +1727,13 @@ interface TunnelOperationsPanelProps {
   availableTags: string[];
   queryInput: string;
   filters: TunnelFilters;
+  displayMode: TunnelDisplayMode;
   hasActiveFilters: boolean;
   onQueryInputChange: (value: string) => void;
   onFilterChange: <K extends keyof TunnelFilters>(field: K, value: TunnelFilters[K]) => void;
   onToggleTag: (tag: string) => void;
   onResetFilters: () => void;
+  onDisplayModeChange: (mode: TunnelDisplayMode) => void;
 }
 
 /**
@@ -1729,11 +1745,13 @@ function TunnelOperationsPanel({
   availableTags,
   queryInput,
   filters,
+  displayMode,
   hasActiveFilters,
   onQueryInputChange,
   onFilterChange,
   onToggleTag,
   onResetFilters,
+  onDisplayModeChange,
 }: TunnelOperationsPanelProps): ReactElement {
   const visibleTags = orderTagsBySelection(availableTags, filters.tags);
 
@@ -1753,14 +1771,20 @@ function TunnelOperationsPanel({
               Filter by status, scope, tag, and endpoint before selecting tunnels
             </p>
           </div>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm self-start lg:self-auto"
-            onClick={onResetFilters}
-            disabled={!hasActiveFilters}
-          >
-            Reset filters
-          </button>
+          <div className="flex flex-col gap-2 self-start sm:flex-row sm:items-center lg:self-auto">
+            <TunnelDisplayModeControl
+              displayMode={displayMode}
+              onDisplayModeChange={onDisplayModeChange}
+            />
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={onResetFilters}
+              disabled={!hasActiveFilters}
+            >
+              Reset filters
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(16rem,1fr)_auto_auto] lg:items-center">
@@ -1857,6 +1881,46 @@ function TunnelOperationsPanel({
         ) : null}
       </div>
     </section>
+  );
+}
+
+interface TunnelDisplayModeControlProps {
+  displayMode: TunnelDisplayMode;
+  onDisplayModeChange: (mode: TunnelDisplayMode) => void;
+}
+
+/**
+ * 一覧表示モードの切り替え操作を表示する
+ */
+function TunnelDisplayModeControl({
+  displayMode,
+  onDisplayModeChange,
+}: TunnelDisplayModeControlProps): ReactElement {
+  return (
+    <div className="segmented-control join w-full sm:w-auto" aria-label="トンネル一覧の表示形式">
+      <button
+        type="button"
+        className={`btn btn-sm join-item flex-1 sm:flex-none ${
+          displayMode === "slim" ? "btn-neutral" : "btn-outline"
+        }`}
+        onClick={() => onDisplayModeChange("slim")}
+        aria-pressed={displayMode === "slim"}
+      >
+        <Rows3 size={14} />
+        Slim
+      </button>
+      <button
+        type="button"
+        className={`btn btn-sm join-item flex-1 sm:flex-none ${
+          displayMode === "card" ? "btn-neutral" : "btn-outline"
+        }`}
+        onClick={() => onDisplayModeChange("card")}
+        aria-pressed={displayMode === "card"}
+      >
+        <LayoutGrid size={14} />
+        Cards
+      </button>
+    </div>
   );
 }
 
@@ -2211,6 +2275,7 @@ interface TunnelDeckProps {
   hasCompletedInitialLoad: boolean;
   tunnels: TunnelView[];
   filters: TunnelFilters;
+  displayMode: TunnelDisplayMode;
   hasActiveFilters: boolean;
   selectedIds: Set<string>;
   isBusy: boolean;
@@ -2230,6 +2295,7 @@ function TunnelDeck({
   hasCompletedInitialLoad,
   tunnels,
   filters,
+  displayMode,
   hasActiveFilters,
   selectedIds,
   isBusy,
@@ -2284,6 +2350,21 @@ function TunnelDeck({
     );
   }
 
+  if (displayMode === "slim") {
+    return (
+      <TunnelSlimList
+        tunnels={tunnels}
+        query={filters.query}
+        selectedIds={selectedIds}
+        isBusy={isBusy}
+        onToggle={onToggle}
+        onStart={onStart}
+        onStop={onStop}
+        onRemove={onRemove}
+      />
+    );
+  }
+
   return (
     <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
       {tunnels.map((tunnel) => (
@@ -2300,6 +2381,160 @@ function TunnelDeck({
         />
       ))}
     </section>
+  );
+}
+
+interface TunnelSlimListProps {
+  tunnels: TunnelView[];
+  query: string;
+  selectedIds: Set<string>;
+  isBusy: boolean;
+  onToggle: (id: string) => void;
+  onStart: (id: string) => void;
+  onStop: (id: string) => void;
+  onRemove: (tunnel: TunnelView) => void;
+}
+
+/**
+ * 設定済みトンネルを行単位のスリム一覧で表示する
+ */
+function TunnelSlimList({
+  tunnels,
+  query,
+  selectedIds,
+  isBusy,
+  onToggle,
+  onStart,
+  onStop,
+  onRemove,
+}: TunnelSlimListProps): ReactElement {
+  return (
+    <section className="overflow-hidden rounded-lg border border-base-300 bg-base-100 shadow-sm">
+      <div className="overflow-x-auto">
+        <table className="table table-sm tunnel-slim-table min-w-[68rem]">
+          <thead>
+            <tr>
+              <th className="w-12">Select</th>
+              <th>ID</th>
+              <th>Status</th>
+              <th>Local</th>
+              <th>Remote</th>
+              <th>SSH</th>
+              <th>Source</th>
+              <th className="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {tunnels.map((tunnel) => (
+              <TunnelSlimRow
+                key={tunnel.id}
+                tunnel={tunnel}
+                query={query}
+                checked={selectedIds.has(tunnel.id)}
+                isBusy={isBusy}
+                onToggle={onToggle}
+                onStart={onStart}
+                onStop={onStop}
+                onRemove={onRemove}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+interface TunnelSlimRowProps {
+  tunnel: TunnelView;
+  query: string;
+  checked: boolean;
+  isBusy: boolean;
+  onToggle: (id: string) => void;
+  onStart: (id: string) => void;
+  onStop: (id: string) => void;
+  onRemove: (tunnel: TunnelView) => void;
+}
+
+/**
+ * スリム一覧内のトンネル 1 件を表示する
+ */
+function TunnelSlimRow({
+  tunnel,
+  query,
+  checked,
+  isBusy,
+  onToggle,
+  onStart,
+  onStop,
+  onRemove,
+}: TunnelSlimRowProps): ReactElement {
+  const running = tunnel.status?.state === "running";
+  const status = tunnel.status?.state ?? "idle";
+  const highlightQuery = query.trim();
+
+  return (
+    <tr className={checked ? "tunnel-slim-row-selected" : undefined}>
+      <td>
+        <input
+          type="checkbox"
+          className="checkbox checkbox-primary checkbox-sm"
+          checked={checked}
+          onChange={() => onToggle(tunnel.id)}
+          aria-label={`${tunnel.id} を選択`}
+        />
+      </td>
+      <th scope="row" className="max-w-56">
+        <div className="truncate text-sm font-bold" title={tunnel.id}>
+          <HighlightedText text={tunnel.id} query={highlightQuery} />
+        </div>
+      </th>
+      <td>
+        <StatusBadge status={status} />
+      </td>
+      <td className="max-w-44 truncate font-mono text-xs" title={tunnel.local}>
+        <HighlightedText text={tunnel.local} query={highlightQuery} />
+      </td>
+      <td className="max-w-44 truncate font-mono text-xs" title={tunnel.remote}>
+        <HighlightedText text={tunnel.remote} query={highlightQuery} />
+      </td>
+      <td className="max-w-52 truncate font-mono text-xs" title={tunnel.ssh}>
+        <HighlightedText text={tunnel.ssh} query={highlightQuery} />
+      </td>
+      <td className="font-semibold text-base-content/70">
+        <HighlightedText text={tunnel.source} query={highlightQuery} />
+      </td>
+      <td>
+        <div className="flex min-w-max items-center justify-end gap-1">
+          <button
+            type="button"
+            className={`btn btn-xs ${running ? "btn-ghost" : "btn-primary"}`}
+            onClick={() => onStart(tunnel.id)}
+            disabled={isBusy || running}
+          >
+            <Play size={13} />
+            Start
+          </button>
+          <button
+            type="button"
+            className={`btn btn-xs ${running ? "btn-error" : "btn-outline"}`}
+            onClick={() => onStop(tunnel.id)}
+            disabled={isBusy || tunnel.status === null}
+          >
+            <CircleStop size={13} />
+            Stop
+          </button>
+          <IconButton
+            label="設定から削除"
+            className="btn btn-square btn-ghost btn-xs text-error"
+            onClick={() => onRemove(tunnel)}
+            disabled={isBusy}
+          >
+            <Trash2 size={14} />
+          </IconButton>
+        </div>
+      </td>
+    </tr>
   );
 }
 

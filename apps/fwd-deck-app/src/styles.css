@@ -120,6 +120,14 @@ input {
     0 2px 8px rgba(15, 23, 42, 0.06);
 }
 
+.tunnel-slim-table tbody tr:is(:hover, :focus-within) {
+  background: color-mix(in oklab, var(--color-base-content) 5%, var(--color-base-100));
+}
+
+.tunnel-slim-row-selected {
+  background: color-mix(in oklab, var(--color-primary) 8%, var(--color-base-100));
+}
+
 .status-badge-stale {
   border-color: color-mix(in oklab, var(--color-warning) 48%, var(--color-base-100));
   background: color-mix(in oklab, var(--color-warning) 18%, var(--color-base-100));

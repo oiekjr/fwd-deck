@@ -33,6 +33,18 @@ fn list_tag_filters_tunnels_by_tag() {
     output.assert_stdout_not_contains("prod-cache");
 }
 
+/// list が ID 昇順でトンネルを表示することを検証する
+#[test]
+fn list_sorts_tunnels_by_id() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(unsorted_config());
+
+    let output = workspace.run(["list"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_order(["dev-db", "prod-cache"]);
+}
+
 /// list --query が description の部分一致でトンネルを表示することを検証する
 #[test]
 fn list_query_matches_description() {
@@ -139,6 +151,27 @@ fn start_dry_run_prints_plan_without_writing_state() {
     output.assert_stdout_contains("Would start tunnel: dev-db");
     output.assert_stdout_contains("Would start tunnel: prod-cache");
     assert!(!workspace.state_path().exists());
+}
+
+/// start --all --dry-run が ID 昇順で開始予定を表示することを検証する
+#[test]
+fn start_all_dry_run_sorts_tunnels_by_id() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(unsorted_config());
+
+    let output = workspace.run([
+        "--state",
+        workspace.state_path_str(),
+        "start",
+        "--all",
+        "--dry-run",
+    ]);
+
+    assert!(output.status.success());
+    output.assert_stdout_order([
+        "Would start tunnel: dev-db",
+        "Would start tunnel: prod-cache",
+    ]);
 }
 
 /// start が ID と --tag の同時指定を失敗として扱うことを検証する
@@ -250,6 +283,23 @@ impl CommandOutput {
             self.stderr
         );
     }
+
+    /// stdout 内で期待文字列が指定順に現れることを検証する
+    fn assert_stdout_order<const N: usize>(&self, expected_values: [&str; N]) {
+        let mut offset = 0;
+
+        for expected in expected_values {
+            let remaining = &self.stdout[offset..];
+            let Some(index) = remaining.find(expected) else {
+                panic!(
+                    "stdout did not contain {expected:?} after offset {offset}\nstdout:\n{}\nstderr:\n{}",
+                    self.stdout, self.stderr
+                );
+            };
+
+            offset += index + expected.len();
+        }
+    }
 }
 
 /// 有効なテスト用設定を生成する
@@ -285,6 +335,29 @@ local_host = "127.0.0.1"
 local_port = 16379
 remote_host = "127.0.0.1"
 remote_port = 6379
+ssh_user = "ec2-user"
+ssh_host = "bastion.example.com"
+"#
+}
+
+/// ID 順とは逆に記述されたテスト用設定を生成する
+fn unsorted_config() -> &'static str {
+    r#"
+[[tunnels]]
+id = "prod-cache"
+local_host = "127.0.0.1"
+local_port = 16379
+remote_host = "127.0.0.1"
+remote_port = 6379
+ssh_user = "ec2-user"
+ssh_host = "bastion.example.com"
+
+[[tunnels]]
+id = "dev-db"
+local_host = "127.0.0.1"
+local_port = 15432
+remote_host = "127.0.0.1"
+remote_port = 5432
 ssh_user = "ec2-user"
 ssh_host = "bastion.example.com"
 "#

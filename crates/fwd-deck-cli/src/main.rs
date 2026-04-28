@@ -747,9 +747,8 @@ fn start_command(
     let tags = normalize_cli_tags(&tags)?;
 
     let ids = if all {
-        config
-            .tunnels
-            .iter()
+        sorted_tunnels_by_id(&config.tunnels)
+            .into_iter()
             .map(|tunnel| tunnel.tunnel.id.clone())
             .collect()
     } else if !tags.is_empty() {
@@ -962,7 +961,7 @@ fn status_command(state_path: &Path) -> Result<ExitCode, CliError> {
 
     let now = current_unix_seconds();
 
-    for status in &statuses {
+    for status in sorted_statuses_by_id(&statuses) {
         print_status_row(status, now);
     }
 
@@ -995,8 +994,8 @@ fn stop_command(
     }
 
     let ids = if all {
-        statuses
-            .iter()
+        sorted_statuses_by_id(&statuses)
+            .into_iter()
             .map(|status| status.state.id.clone())
             .collect()
     } else if ids.is_empty() {
@@ -1076,10 +1075,10 @@ fn select_tunnels_for_tags<'a>(
     tags: &[String],
 ) -> Vec<&'a ResolvedTunnelConfig> {
     if tags.is_empty() {
-        return config.tunnels.iter().collect();
+        return sorted_tunnels_by_id(&config.tunnels);
     }
 
-    filter_tunnels_by_tags(&config.tunnels, tags)
+    sorted_tunnels_by_id(filter_tunnels_by_tags(&config.tunnels, tags))
 }
 
 /// list の絞り込み条件に応じて統合済みトンネル設定を選択する
@@ -1094,6 +1093,16 @@ fn select_tunnels_for_list<'a>(
             query.is_none_or(|query| tunnel_matches_list_query(&resolved.tunnel, query))
         })
         .collect()
+}
+
+/// ID 昇順のトンネル一覧を生成する
+fn sorted_tunnels_by_id<'a>(
+    tunnels: impl IntoIterator<Item = &'a ResolvedTunnelConfig>,
+) -> Vec<&'a ResolvedTunnelConfig> {
+    let mut tunnels = tunnels.into_iter().collect::<Vec<_>>();
+    tunnels.sort_by(|left, right| left.tunnel.id.cmp(&right.tunnel.id));
+
+    tunnels
 }
 
 /// list query を比較用の表記へ正規化する
@@ -1384,9 +1393,8 @@ fn prompt_port_text(label: &str, default: Option<u16>) -> Result<String, CliErro
 
 /// 開始対象のトンネルを対話的に選択する
 fn prompt_tunnels_to_start(config: &EffectiveConfig) -> Result<Vec<String>, InquireError> {
-    let choices = config
-        .tunnels
-        .iter()
+    let choices = sorted_tunnels_by_id(&config.tunnels)
+        .into_iter()
         .map(StartChoice::from_resolved_tunnel)
         .collect::<Vec<_>>();
 
@@ -1401,13 +1409,18 @@ fn prompt_tunnels_to_start(config: &EffectiveConfig) -> Result<Vec<String>, Inqu
 
 /// 停止対象のトンネルを対話的に選択する
 fn prompt_tunnels_to_stop(statuses: &[TunnelRuntimeStatus]) -> Result<Vec<String>, InquireError> {
+    let sorted_statuses = sorted_statuses_by_id(statuses);
     let mut choices = vec![StopChoice::all()];
-    choices.extend(statuses.iter().map(StopChoice::from_status));
+    choices.extend(
+        sorted_statuses
+            .iter()
+            .map(|status| StopChoice::from_status(status)),
+    );
     let selected = MultiSelect::new("Select tunnels to stop:", choices).prompt()?;
 
     if selected.iter().any(StopChoice::is_all) {
-        return Ok(statuses
-            .iter()
+        return Ok(sorted_statuses
+            .into_iter()
             .map(|status| status.state.id.clone())
             .collect());
     }
@@ -1453,6 +1466,14 @@ fn status_index_by_id(statuses: &[TunnelRuntimeStatus]) -> HashMap<&str, &Tunnel
         .iter()
         .map(|status| (status.state.id.as_str(), status))
         .collect()
+}
+
+/// ID 昇順のトンネル状態一覧を生成する
+fn sorted_statuses_by_id(statuses: &[TunnelRuntimeStatus]) -> Vec<&TunnelRuntimeStatus> {
+    let mut statuses = statuses.iter().collect::<Vec<_>>();
+    statuses.sort_by(|left, right| left.state.id.cmp(&right.state.id));
+
+    statuses
 }
 
 /// stale なトンネル ID を取得する
@@ -2094,6 +2115,19 @@ mod tests {
         assert_eq!(ids, vec!["cache".to_owned()]);
     }
 
+    /// トンネル状態一覧が ID 昇順に整列されることを検証する
+    #[test]
+    fn sorted_statuses_by_id_sorts_statuses_by_id() {
+        let statuses = vec![
+            runtime_status("prod-db", ProcessState::Running),
+            runtime_status("dev-db", ProcessState::Running),
+        ];
+
+        let sorted = sorted_statuses_by_id(&statuses);
+
+        assert_eq!(status_ids(&sorted), vec!["dev-db", "prod-db"]);
+    }
+
     /// シェル表示用コマンドが安全な引数をそのまま表示することを検証する
     #[test]
     fn shell_quote_keeps_safe_arguments_unquoted() {
@@ -2206,6 +2240,17 @@ mod tests {
         assert_eq!(tunnels[0].tunnel.id, "dev-db");
     }
 
+    /// list 選択結果が ID 昇順に整列されることを検証する
+    #[test]
+    fn select_tunnels_for_list_sorts_tunnels_by_id() {
+        let config =
+            effective_config_with_tunnels(vec![tunnel("prod-db", 25432), tunnel("dev-db", 15432)]);
+
+        let tunnels = select_tunnels_for_list(&config, &[], None);
+
+        assert_eq!(tunnel_ids(&tunnels), vec!["dev-db", "prod-db"]);
+    }
+
     /// show 対象の ID が完全一致で取得されることを検証する
     #[test]
     fn find_tunnel_by_id_returns_exact_match() {
@@ -2242,6 +2287,22 @@ mod tests {
             vec![LoadedConfigFile::new(source, tunnels)],
             resolved_tunnels,
         )
+    }
+
+    /// テスト用のトンネル ID 一覧を取得する
+    fn tunnel_ids<'a>(tunnels: &[&'a ResolvedTunnelConfig]) -> Vec<&'a str> {
+        tunnels
+            .iter()
+            .map(|resolved| resolved.tunnel.id.as_str())
+            .collect()
+    }
+
+    /// テスト用の状態 ID 一覧を取得する
+    fn status_ids<'a>(statuses: &[&'a TunnelRuntimeStatus]) -> Vec<&'a str> {
+        statuses
+            .iter()
+            .map(|status| status.state.id.as_str())
+            .collect()
     }
 
     /// テスト用のトンネル実行状態を生成する

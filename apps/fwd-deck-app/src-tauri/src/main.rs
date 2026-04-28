@@ -219,7 +219,7 @@ impl From<ConfigScopeInput> for ConfigSourceKind {
 }
 
 /// runtime 状態ファイルのスコープを表現する
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "lowercase")]
 enum RuntimeScope {
     Global,
@@ -420,12 +420,16 @@ fn start_tunnels_inner(
 ) -> Result<OperationReport, AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
+    let tunnels_by_id = tunnel_index_by_id(&config);
 
     ensure_valid_config(&config)?;
     run_tunnel_operations(&targets, |target| {
-        let tunnel = find_tunnel_by_id(&config, &target.id).ok_or_else(|| {
-            AppError::InvalidInput(format!("未定義のトンネル ID です: {}", target.id))
-        })?;
+        let tunnel = tunnels_by_id
+            .get(target.id.as_str())
+            .copied()
+            .ok_or_else(|| {
+                AppError::InvalidInput(format!("未定義のトンネル ID です: {}", target.id))
+            })?;
         let state_path = state_path_for_source(&runtime_paths, tunnel.source.kind)?;
 
         start_tunnel(tunnel, state_path)
@@ -442,14 +446,18 @@ fn stop_tunnels_inner(
 ) -> Result<OperationReport, AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
+    let tunnels_by_id = tunnel_index_by_id(&config);
 
     run_tunnel_operations(&targets, |target| {
         let state_path = match target.runtime_scope {
             Some(scope) => state_path_for_runtime_scope(&runtime_paths, scope)?,
             None => {
-                let tunnel = find_tunnel_by_id(&config, &target.id).ok_or_else(|| {
-                    AppError::InvalidInput(format!("未定義のトンネル ID です: {}", target.id))
-                })?;
+                let tunnel = tunnels_by_id
+                    .get(target.id.as_str())
+                    .copied()
+                    .ok_or_else(|| {
+                        AppError::InvalidInput(format!("未定義のトンネル ID です: {}", target.id))
+                    })?;
                 state_path_for_source(&runtime_paths, tunnel.source.kind)?
             }
         };
@@ -831,15 +839,15 @@ fn build_dashboard_state(
 ) -> DashboardState {
     let status_by_key = statuses
         .iter()
-        .map(|status| (runtime_status_config_key(status), status))
+        .map(|status| (runtime_status_lookup_key(status), status))
         .collect::<HashMap<_, _>>();
     let mut tunnels = config
         .tunnels
         .iter()
         .map(|resolved| {
-            let runtime_key = runtime_status_key(
+            let runtime_key = (
                 runtime_scope_for_source(resolved.source.kind),
-                &resolved.tunnel.id,
+                resolved.tunnel.id.as_str(),
             );
             tunnel_view(resolved, status_by_key.get(&runtime_key).copied())
         })
@@ -848,11 +856,9 @@ fn build_dashboard_state(
 
     tunnels.sort_by(|left, right| left.id.cmp(&right.id));
     tracked_tunnels.sort_by(|left, right| {
-        left.id.cmp(&right.id).then(
-            left.runtime_scope
-                .to_string()
-                .cmp(&right.runtime_scope.to_string()),
-        )
+        left.id
+            .cmp(&right.id)
+            .then_with(|| left.runtime_scope.cmp(&right.runtime_scope))
     });
 
     DashboardState {
@@ -864,11 +870,11 @@ fn build_dashboard_state(
     }
 }
 
-/// runtime 状態を対応する設定ファイル種別のキーへ変換する
-fn runtime_status_config_key(status: &ScopedRuntimeStatus) -> String {
-    runtime_status_key(
+/// runtime 状態を HashMap 検索用の借用キーへ変換する
+fn runtime_status_lookup_key(status: &ScopedRuntimeStatus) -> (RuntimeScope, &str) {
+    (
         runtime_scope_for_source(status.status.state.source_kind),
-        &status.status.state.id,
+        status.status.state.id.as_str(),
     )
 }
 
@@ -1045,11 +1051,24 @@ fn validate_new_tunnel(config: &EffectiveConfig, tunnel: &TunnelConfig) -> Resul
         }
     }
 
-    if let Some(existing) = config
-        .tunnels
-        .iter()
-        .find(|resolved| resolved.tunnel.id == tunnel.id)
-    {
+    let mut existing_id = None;
+    let mut existing_local_port = None;
+
+    for resolved in &config.tunnels {
+        if existing_id.is_none() && resolved.tunnel.id == tunnel.id {
+            existing_id = Some(resolved);
+        }
+
+        if existing_local_port.is_none() && resolved.tunnel.local_port == tunnel.local_port {
+            existing_local_port = Some(resolved);
+        }
+
+        if existing_id.is_some() && existing_local_port.is_some() {
+            break;
+        }
+    }
+
+    if let Some(existing) = existing_id {
         return Err(AppError::InvalidInput(format!(
             "同じ ID のトンネルが既に存在します: {} ({})",
             existing.tunnel.id,
@@ -1057,11 +1076,7 @@ fn validate_new_tunnel(config: &EffectiveConfig, tunnel: &TunnelConfig) -> Resul
         )));
     }
 
-    if let Some(existing) = config
-        .tunnels
-        .iter()
-        .find(|resolved| resolved.tunnel.local_port == tunnel.local_port)
-    {
+    if let Some(existing) = existing_local_port {
         return Err(AppError::InvalidInput(format!(
             "local_port は既存トンネルと重複しています: {} ({})",
             tunnel.local_port, existing.tunnel.id
@@ -1143,15 +1158,13 @@ fn stop_success_message(stopped: StoppedTunnel) -> String {
     }
 }
 
-/// 指定 ID のトンネル設定を取得する
-fn find_tunnel_by_id<'a>(
-    config: &'a EffectiveConfig,
-    id: &str,
-) -> Option<&'a ResolvedTunnelConfig> {
+/// 統合済みトンネル設定を ID から参照する索引を生成する
+fn tunnel_index_by_id(config: &EffectiveConfig) -> HashMap<&str, &ResolvedTunnelConfig> {
     config
         .tunnels
         .iter()
-        .find(|resolved| resolved.tunnel.id == id)
+        .map(|resolved| (resolved.tunnel.id.as_str(), resolved))
+        .collect()
 }
 
 /// トンネル設定の local endpoint を生成する
@@ -1364,13 +1377,16 @@ mod tests {
 
     /// 状態の関連付けキーが設定ファイル種別に従うことを検証する
     #[test]
-    fn runtime_status_config_key_uses_config_source_kind() {
+    fn runtime_status_lookup_key_uses_config_source_kind() {
         let status = ScopedRuntimeStatus {
             runtime_scope: RuntimeScope::Global,
             status: runtime_status(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml")),
         };
 
-        assert_eq!(runtime_status_config_key(&status), "workspace:db");
+        assert_eq!(
+            runtime_status_lookup_key(&status),
+            (RuntimeScope::Workspace, "db")
+        );
     }
 
     /// ワークスペース state path が app config directory 配下に生成されることを検証する

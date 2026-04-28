@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, hash_map::Entry},
+    collections::{HashMap, hash_map::Entry},
     env,
     fmt::{self, Display},
     fs,
@@ -541,16 +541,17 @@ fn tunnel_matches_normalized_tags(tunnel: &TunnelConfig, required_tags: &[String
         return true;
     }
 
-    let tunnel_tags = normalized_tag_set(&tunnel.tags);
-
-    required_tags
-        .iter()
-        .all(|required| tunnel_tags.contains(required))
+    required_tags.iter().all(|required| {
+        tunnel
+            .tags
+            .iter()
+            .any(|tag| tag_matches_normalized(tag, required))
+    })
 }
 
-/// 正規化済みタグ集合を生成する
-fn normalized_tag_set(tags: &[String]) -> HashSet<String> {
-    tags.iter().map(|tag| normalize_tag(tag)).collect()
+/// 正規化済み条件とトンネル側タグを比較する
+fn tag_matches_normalized(tag: &str, normalized_required: &str) -> bool {
+    tag.trim().eq_ignore_ascii_case(normalized_required)
 }
 
 /// 設定内容の意味的な不備を検証する
@@ -1295,6 +1296,17 @@ ssh_host = "bastion.example.com"
 
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].tunnel.id, "dev-db");
+    }
+
+    /// 未正規化のトンネルタグでもタグ指定に一致することを検証する
+    #[test]
+    fn tunnel_matches_tags_compares_without_requiring_normalized_tunnel_tags() {
+        let mut tunnel = tunnel("dev-db", 15432);
+        tunnel.tags = vec![" Dev ".to_owned(), "PROJECT-A".to_owned()];
+
+        let matched = tunnel_matches_tags(&tunnel, &["dev".to_owned(), "project-a".to_owned()]);
+
+        assert!(matched);
     }
 
     /// 存在しない設定ファイルへトンネルを追加できることを検証する

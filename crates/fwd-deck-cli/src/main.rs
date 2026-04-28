@@ -489,7 +489,8 @@ fn show_command(config: &EffectiveConfig, id: &str) -> Result<ExitCode, CliError
 
 /// 統合済みトンネル設定の一覧を表示する
 fn print_list(tunnels: &[&ResolvedTunnelConfig], wide: bool) {
-    let widths = list_column_widths(tunnels, wide);
+    let rows = list_rows(tunnels, wide);
+    let widths = list_column_widths(&rows);
 
     println!(
         "{} {} {} {} {} SOURCE",
@@ -500,28 +501,71 @@ fn print_list(tunnels: &[&ResolvedTunnelConfig], wide: bool) {
         pad_display_width("TAGS", widths.tags)
     );
 
-    for resolved in tunnels {
-        print_tunnel_row(resolved, widths, wide);
+    for row in &rows {
+        print_tunnel_row(row, widths);
     }
 }
 
-/// トンネル設定の一覧行を表示する
-fn print_tunnel_row(resolved: &ResolvedTunnelConfig, widths: ListColumnWidths, wide: bool) {
-    let tunnel = &resolved.tunnel;
-    let local = format_local_endpoint(tunnel);
-    let remote = format_list_remote_endpoint(tunnel, wide);
-    let ssh = format_ssh_endpoint(tunnel);
-    let tags = format_tag_list(&tunnel.tags);
+/// list 表示用の行を生成する
+fn list_rows<'a>(tunnels: &[&'a ResolvedTunnelConfig], wide: bool) -> Vec<ListRow<'a>> {
+    tunnels
+        .iter()
+        .map(|resolved| ListRow::from_resolved_tunnel(resolved, wide))
+        .collect()
+}
 
+/// トンネル設定の一覧行を表示する
+fn print_tunnel_row(row: &ListRow<'_>, widths: ListColumnWidths) {
     println!(
         "{} {} {} {} {} {}",
-        pad_display_width(&tunnel.id, widths.id),
-        pad_display_width(&local, widths.local),
-        pad_display_width(&remote, widths.remote),
-        pad_display_width(&ssh, widths.ssh),
-        pad_display_width(&tags, widths.tags),
-        resolved.source.kind
+        pad_display_width_with_visible_width(row.id, row.id_width, widths.id),
+        pad_display_width_with_visible_width(&row.local, row.local_width, widths.local),
+        pad_display_width_with_visible_width(&row.remote, row.remote_width, widths.remote),
+        pad_display_width_with_visible_width(&row.ssh, row.ssh_width, widths.ssh),
+        pad_display_width_with_visible_width(&row.tags, row.tags_width, widths.tags),
+        row.source
     );
+}
+
+/// list 表示用に事前整形した 1 行を表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListRow<'a> {
+    id: &'a str,
+    id_width: usize,
+    local: String,
+    local_width: usize,
+    remote: String,
+    remote_width: usize,
+    ssh: String,
+    ssh_width: usize,
+    tags: String,
+    tags_width: usize,
+    source: ConfigSourceKind,
+}
+
+impl<'a> ListRow<'a> {
+    /// 統合済みトンネル設定から list 表示行を生成する
+    fn from_resolved_tunnel(resolved: &'a ResolvedTunnelConfig, wide: bool) -> Self {
+        let tunnel = &resolved.tunnel;
+        let local = format_local_endpoint(tunnel);
+        let remote = format_list_remote_endpoint(tunnel, wide);
+        let ssh = format_ssh_endpoint(tunnel);
+        let tags = format_tag_list(&tunnel.tags);
+
+        Self {
+            id: tunnel.id.as_str(),
+            id_width: display_width(&tunnel.id),
+            local_width: display_width(&local),
+            local,
+            remote_width: display_width(&remote),
+            remote,
+            ssh_width: display_width(&ssh),
+            ssh,
+            tags_width: display_width(&tags),
+            tags,
+            source: resolved.source.kind,
+        }
+    }
 }
 
 /// list 表示の列幅を表現する
@@ -548,24 +592,15 @@ impl ListColumnWidths {
 }
 
 /// list 表示対象の値から列幅を算出する
-fn list_column_widths(tunnels: &[&ResolvedTunnelConfig], wide: bool) -> ListColumnWidths {
-    tunnels
-        .iter()
-        .fold(ListColumnWidths::with_minimums(), |widths, resolved| {
-            let tunnel = &resolved.tunnel;
-
+fn list_column_widths(rows: &[ListRow<'_>]) -> ListColumnWidths {
+    rows.iter()
+        .fold(ListColumnWidths::with_minimums(), |widths, row| {
             ListColumnWidths {
-                id: widths.id.max(display_width(&tunnel.id)),
-                local: widths
-                    .local
-                    .max(display_width(&format_local_endpoint(tunnel))),
-                remote: widths
-                    .remote
-                    .max(display_width(&format_list_remote_endpoint(tunnel, wide))),
-                ssh: widths.ssh.max(display_width(&format_ssh_endpoint(tunnel))),
-                tags: widths
-                    .tags
-                    .max(display_width(&format_tag_list(&tunnel.tags))),
+                id: widths.id.max(row.id_width),
+                local: widths.local.max(row.local_width),
+                remote: widths.remote.max(row.remote_width),
+                ssh: widths.ssh.max(row.ssh_width),
+                tags: widths.tags.max(row.tags_width),
             }
         })
 }
@@ -967,12 +1002,13 @@ fn status_command(state_path: &Path) -> Result<ExitCode, CliError> {
 
     let now = current_unix_seconds();
     let statuses = sorted_statuses_by_id(&statuses);
-    let widths = status_column_widths(&statuses);
+    let rows = status_rows(&statuses, now);
+    let widths = status_column_widths(&rows);
 
     print_status_header(widths);
 
-    for status in statuses {
-        print_status_row(status, widths, now);
+    for row in &rows {
+        print_status_row(row, widths);
     }
 
     Ok(ExitCode::SUCCESS)
@@ -1124,11 +1160,23 @@ fn normalize_list_query(query: Option<String>) -> Option<String> {
 
 /// トンネルが list query に一致するかを判定する
 fn tunnel_matches_list_query(tunnel: &TunnelConfig, query: &str) -> bool {
-    tunnel.id.to_ascii_lowercase().contains(query)
+    ascii_case_insensitive_contains(&tunnel.id, query)
         || tunnel
             .description
             .as_deref()
-            .is_some_and(|description| description.to_ascii_lowercase().contains(query))
+            .is_some_and(|description| ascii_case_insensitive_contains(description, query))
+}
+
+/// ASCII の大文字小文字を無視して部分一致を判定する
+fn ascii_case_insensitive_contains(value: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+
+    value
+        .as_bytes()
+        .windows(query.len())
+        .any(|candidate| candidate.eq_ignore_ascii_case(query.as_bytes()))
 }
 
 /// list 絞り込み結果が空の場合のメッセージを生成する
@@ -1724,28 +1772,71 @@ fn print_status_header(widths: StatusColumnWidths) {
 }
 
 /// 状態一覧の 1 行を表示する
-fn print_status_row(status: &TunnelRuntimeStatus, widths: StatusColumnWidths, now: u64) {
-    let state = &status.state;
-    let local = format_status_local_endpoint(state);
-    let remote = format_status_remote_endpoint(state);
-    let pid = state.pid.to_string();
-    let process_state_text = process_state_plain_label(status.process_state);
-    let process_state = process_state_label(status.process_state, OutputStream::Stdout);
-    let started = relative_time_label(state.started_at_unix_seconds, now);
-
+fn print_status_row(row: &StatusRow<'_>, widths: StatusColumnWidths) {
     println!(
         "{} {} {} {} {} {}",
-        pad_display_width(&state.id, widths.id),
-        pad_display_width(&local, widths.local),
-        pad_display_width(&remote, widths.remote),
-        pad_display_width(&pid, widths.pid),
+        pad_display_width_with_visible_width(row.id, row.id_width, widths.id),
+        pad_display_width_with_visible_width(&row.local, row.local_width, widths.local),
+        pad_display_width_with_visible_width(&row.remote, row.remote_width, widths.remote),
+        pad_display_width_with_visible_width(&row.pid, row.pid_width, widths.pid),
         pad_display_width_with_visible_width(
-            &process_state,
-            display_width(process_state_text),
+            &row.process_state,
+            row.process_state_width,
             widths.state,
         ),
-        started
+        row.started
     );
+}
+
+/// status 表示用の行を生成する
+fn status_rows<'a>(statuses: &[&'a TunnelRuntimeStatus], now: u64) -> Vec<StatusRow<'a>> {
+    statuses
+        .iter()
+        .map(|status| StatusRow::from_status(status, now))
+        .collect()
+}
+
+/// status 表示用に事前整形した 1 行を表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusRow<'a> {
+    id: &'a str,
+    id_width: usize,
+    local: String,
+    local_width: usize,
+    remote: String,
+    remote_width: usize,
+    pid: String,
+    pid_width: usize,
+    process_state: String,
+    process_state_width: usize,
+    started: String,
+}
+
+impl<'a> StatusRow<'a> {
+    /// トンネル実行状態から status 表示行を生成する
+    fn from_status(status: &'a TunnelRuntimeStatus, now: u64) -> Self {
+        let state = &status.state;
+        let local = format_status_local_endpoint(state);
+        let remote = format_status_remote_endpoint(state);
+        let pid = state.pid.to_string();
+        let process_state = process_state_label(status.process_state, OutputStream::Stdout);
+        let process_state_width = display_width(process_state_plain_label(status.process_state));
+        let started = relative_time_label(state.started_at_unix_seconds, now);
+
+        Self {
+            id: state.id.as_str(),
+            id_width: display_width(&state.id),
+            local_width: display_width(&local),
+            local,
+            remote_width: display_width(&remote),
+            remote,
+            pid_width: display_width(&pid),
+            pid,
+            process_state_width,
+            process_state,
+            started,
+        }
+    }
 }
 
 /// status 表示の列幅を表現する
@@ -1772,25 +1863,15 @@ impl StatusColumnWidths {
 }
 
 /// status 表示対象の値から列幅を算出する
-fn status_column_widths(statuses: &[&TunnelRuntimeStatus]) -> StatusColumnWidths {
-    statuses
-        .iter()
-        .fold(StatusColumnWidths::with_minimums(), |widths, status| {
-            let state = &status.state;
-            let pid = state.pid.to_string();
-
+fn status_column_widths(rows: &[StatusRow<'_>]) -> StatusColumnWidths {
+    rows.iter()
+        .fold(StatusColumnWidths::with_minimums(), |widths, row| {
             StatusColumnWidths {
-                id: widths.id.max(display_width(&state.id)),
-                local: widths
-                    .local
-                    .max(display_width(&format_status_local_endpoint(state))),
-                remote: widths
-                    .remote
-                    .max(display_width(&format_status_remote_endpoint(state))),
-                pid: widths.pid.max(display_width(&pid)),
-                state: widths.state.max(display_width(process_state_plain_label(
-                    status.process_state,
-                ))),
+                id: widths.id.max(row.id_width),
+                local: widths.local.max(row.local_width),
+                remote: widths.remote.max(row.remote_width),
+                pid: widths.pid.max(row.pid_width),
+                state: widths.state.max(row.process_state_width),
             }
         })
 }
@@ -2272,7 +2353,8 @@ mod tests {
         ]);
         let tunnels = config.tunnels.iter().collect::<Vec<_>>();
 
-        let widths = list_column_widths(&tunnels, false);
+        let rows = list_rows(&tunnels, false);
+        let widths = list_column_widths(&rows);
 
         assert_eq!(widths.id, display_width("prod-登記情報管理システム"));
     }
@@ -2280,13 +2362,14 @@ mod tests {
     /// status 表示の列幅が最長 ID に合わせて拡張されることを検証する
     #[test]
     fn status_column_widths_expands_id_to_longest_value() {
-        let statuses = vec![
+        let statuses = [
             runtime_status("db", ProcessState::Running),
             runtime_status("prod-登記情報管理システム", ProcessState::Running),
         ];
         let statuses = statuses.iter().collect::<Vec<_>>();
 
-        let widths = status_column_widths(&statuses);
+        let rows = status_rows(&statuses, 1_700_000_000);
+        let widths = status_column_widths(&rows);
 
         assert_eq!(widths.id, display_width("prod-登記情報管理システム"));
     }

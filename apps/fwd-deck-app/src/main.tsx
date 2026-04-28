@@ -579,6 +579,7 @@ function App(): ReactElement {
             onStopTunnel={(id) => void stopSelected([id])}
             onStopTracked={(target) => void stopTracked(target)}
             onRemoveTunnel={setDeleteTarget}
+            onAddTunnel={() => setActiveView("add")}
           />
         ) : activeView === "add" ? (
           <AddTunnelView
@@ -789,6 +790,7 @@ interface DashboardViewProps {
   onStopTunnel: (id: string) => void;
   onStopTracked: (target: OperationTarget) => void;
   onRemoveTunnel: (tunnel: TunnelView) => void;
+  onAddTunnel: () => void;
 }
 
 /**
@@ -819,6 +821,7 @@ function DashboardView({
   onStopTunnel,
   onStopTracked,
   onRemoveTunnel,
+  onAddTunnel,
 }: DashboardViewProps): ReactElement {
   const [isTrackedPanelCollapsed, setIsTrackedPanelCollapsed] = useState<boolean>(true);
   const hasTrackedRuntime = (dashboard?.trackedTunnels.length ?? 0) > 0;
@@ -858,6 +861,7 @@ function DashboardView({
         onStart={onStartTunnel}
         onStop={onStopTunnel}
         onRemove={onRemoveTunnel}
+        onAddTunnel={onAddTunnel}
       />
       <TrackedPanel
         dashboard={dashboard}
@@ -1347,7 +1351,9 @@ function TunnelOperationsPanel({
                 <button
                   key={tag}
                   type="button"
-                  className={`btn btn-xs rounded-full ${selected ? "btn-primary" : "btn-outline"}`}
+                  className={`btn btn-xs rounded-full ${
+                    selected ? "btn-primary" : "btn-outline tag-outline"
+                  }`}
                   onClick={() => onToggleTag(tag)}
                   aria-pressed={selected}
                 >
@@ -1388,6 +1394,7 @@ interface TunnelDeckProps {
   onStart: (id: string) => void;
   onStop: (id: string) => void;
   onRemove: (tunnel: TunnelView) => void;
+  onAddTunnel: () => void;
 }
 
 /**
@@ -1403,6 +1410,7 @@ function TunnelDeck({
   onStart,
   onStop,
   onRemove,
+  onAddTunnel,
 }: TunnelDeckProps): ReactElement {
   if (dashboard === null) {
     return <EmptyState title="Loading tunnels">設定と実行状態を読み込んでいます。</EmptyState>;
@@ -1410,7 +1418,15 @@ function TunnelDeck({
 
   if (dashboard.tunnels.length === 0) {
     return (
-      <EmptyState title="No configured tunnels">
+      <EmptyState
+        title="No configured tunnels"
+        action={
+          <button className="btn btn-primary btn-sm" type="button" onClick={onAddTunnel}>
+            <CirclePlus size={16} />
+            Add tunnel
+          </button>
+        }
+      >
         Add tunnel から新しい接続を追加できます。
       </EmptyState>
     );
@@ -1445,12 +1461,13 @@ function TunnelDeck({
 interface EmptyStateProps {
   title: string;
   children: ReactNode;
+  action?: ReactNode;
 }
 
 /**
  * 空状態を表示する
  */
-function EmptyState({ title, children }: EmptyStateProps): ReactElement {
+function EmptyState({ title, children, action }: EmptyStateProps): ReactElement {
   return (
     <section className="rounded-lg border border-dashed border-base-300 bg-base-100/75 shadow-sm">
       <div className="flex min-h-40 flex-col items-center justify-center gap-2 px-5 py-8 text-center">
@@ -1459,6 +1476,7 @@ function EmptyState({ title, children }: EmptyStateProps): ReactElement {
         </div>
         <h2 className="text-base font-bold">{title}</h2>
         <p className="max-w-md text-sm text-base-content/60">{children}</p>
+        {action ? <div className="mt-2">{action}</div> : null}
       </div>
     </section>
   );
@@ -1611,7 +1629,7 @@ function TagList({ tags }: TagListProps): ReactElement {
   return (
     <div className="flex min-h-6 flex-wrap items-center gap-1">
       {tags.map((tag) => (
-        <span className="badge badge-primary badge-outline badge-sm" key={tag}>
+        <span className="badge badge-primary badge-outline badge-sm tag-outline" key={tag}>
           {tag}
         </span>
       ))}

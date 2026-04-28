@@ -73,6 +73,8 @@ enum Command {
         ids: Vec<String>,
         #[arg(long = "tag", value_name = "TAG", help = "Start tunnels matching tag")]
         tags: Vec<String>,
+        #[arg(long, help = "Start all configured tunnels")]
+        all: bool,
     },
     #[command(about = "Recover stale tracked tunnels")]
     Recover {
@@ -85,6 +87,8 @@ enum Command {
     Stop {
         #[arg(value_name = "ID", help = "Tunnel IDs to stop")]
         ids: Vec<String>,
+        #[arg(long, help = "Stop all tracked tunnels")]
+        all: bool,
     },
     #[command(about = "Edit configuration files")]
     Config {
@@ -171,10 +175,10 @@ fn run() -> Result<ExitCode, CliError> {
             let config = load_config(&cli)?;
             list_command(&config, tags.clone())
         }
-        Command::Start { ids, tags } => {
+        Command::Start { ids, tags, all } => {
             let config = load_config(&cli)?;
             let state_path = resolve_state_path(state_path)?;
-            start_command(&config, &state_path, ids.clone(), tags.clone())
+            start_command(&config, &state_path, ids.clone(), tags.clone(), *all)
         }
         Command::Recover { ids } => {
             let config = load_config(&cli)?;
@@ -185,9 +189,9 @@ fn run() -> Result<ExitCode, CliError> {
             let state_path = resolve_state_path(state_path)?;
             status_command(&state_path)
         }
-        Command::Stop { ids } => {
+        Command::Stop { ids, all } => {
             let state_path = resolve_state_path(state_path)?;
-            stop_command(&state_path, ids.clone())
+            stop_command(&state_path, ids.clone(), *all)
         }
         Command::Config { command } => {
             let paths = resolve_edit_config_paths(&cli)?;
@@ -425,6 +429,7 @@ fn start_command(
     state_path: &Path,
     ids: Vec<String>,
     tags: Vec<String>,
+    all: bool,
 ) -> Result<ExitCode, CliError> {
     if !config.has_sources() {
         eprintln!(
@@ -435,6 +440,17 @@ fn start_command(
     }
 
     if !print_validation_if_invalid(config) {
+        return Ok(ExitCode::FAILURE);
+    }
+
+    if all && (!ids.is_empty() || !tags.is_empty()) {
+        eprintln!(
+            "{}",
+            red(
+                "Cannot combine --all with tunnel IDs or --tag.",
+                OutputStream::Stderr
+            )
+        );
         return Ok(ExitCode::FAILURE);
     }
 
@@ -451,7 +467,13 @@ fn start_command(
 
     let tags = normalize_cli_tags(&tags)?;
 
-    let ids = if !tags.is_empty() {
+    let ids = if all {
+        config
+            .tunnels
+            .iter()
+            .map(|tunnel| tunnel.tunnel.id.clone())
+            .collect()
+    } else if !tags.is_empty() {
         let tunnels = select_tunnels_for_tags(config, &tags);
 
         if tunnels.is_empty() {
@@ -612,15 +634,31 @@ fn status_command(state_path: &Path) -> Result<ExitCode, CliError> {
 }
 
 /// トンネル停止コマンドを実行する
-fn stop_command(state_path: &Path, ids: Vec<String>) -> Result<ExitCode, CliError> {
+fn stop_command(state_path: &Path, ids: Vec<String>, all: bool) -> Result<ExitCode, CliError> {
     let statuses = tunnel_statuses(state_path)?;
+
+    if all && !ids.is_empty() {
+        eprintln!(
+            "{}",
+            red(
+                "Cannot combine --all with tunnel IDs.",
+                OutputStream::Stderr
+            )
+        );
+        return Ok(ExitCode::FAILURE);
+    }
 
     if statuses.is_empty() && ids.is_empty() {
         println!("No tracked tunnels.");
         return Ok(ExitCode::SUCCESS);
     }
 
-    let ids = if ids.is_empty() {
+    let ids = if all {
+        statuses
+            .iter()
+            .map(|status| status.state.id.clone())
+            .collect()
+    } else if ids.is_empty() {
         prompt_tunnels_to_stop(&statuses)?
     } else {
         ids

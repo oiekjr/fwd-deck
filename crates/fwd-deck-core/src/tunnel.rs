@@ -1,5 +1,7 @@
 use std::{
-    env, io,
+    env,
+    fmt::{self, Display},
+    io,
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -41,6 +43,66 @@ pub struct TunnelRuntimeStatus {
     pub process_state: ProcessState,
 }
 
+/// ローカルポートを使用しているプロセス一覧を表現する
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalPortProcesses(Vec<LocalPortProcess>);
+
+impl LocalPortProcesses {
+    /// プロセス一覧を初期化する
+    pub fn new(processes: Vec<LocalPortProcess>) -> Self {
+        Self(processes)
+    }
+
+    /// プロセス一覧が空かを判定する
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Display for LocalPortProcesses {
+    /// エラーメッセージへ付加するプロセス情報を出力する
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_empty() {
+            return Ok(());
+        }
+
+        let process_labels = self
+            .0
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let noun = if self.0.len() == 1 {
+            "listening process"
+        } else {
+            "listening processes"
+        };
+
+        write!(formatter, "; {noun}: {process_labels}")
+    }
+}
+
+/// ローカルポートを使用しているプロセスを表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalPortProcess {
+    pub command: String,
+    pub pid: u32,
+    pub endpoint: Option<String>,
+}
+
+impl Display for LocalPortProcess {
+    /// プロセス情報を表示用文字列へ変換する
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} (pid: {}", self.command, self.pid)?;
+
+        if let Some(endpoint) = &self.endpoint {
+            write!(formatter, ", endpoint: {endpoint}")?;
+        }
+
+        write!(formatter, ")")
+    }
+}
+
 /// トンネル実行時の失敗理由を表現する
 #[derive(Debug, Error)]
 pub enum TunnelRuntimeError {
@@ -50,12 +112,15 @@ pub enum TunnelRuntimeError {
     AlreadyRunning { id: String, pid: u32 },
     #[error("Tunnel is not tracked: {id}")]
     NotTracked { id: String },
-    #[error("Local endpoint is not available: {id} ({local_host}:{local_port}): {source}")]
+    #[error(
+        "Local endpoint is not available: {id} ({local_host}:{local_port}): {source}{processes}"
+    )]
     LocalEndpointUnavailable {
         id: String,
         local_host: String,
         local_port: u16,
         source: io::Error,
+        processes: LocalPortProcesses,
     },
     #[error("Failed to start ssh for tunnel: {id}: {source}")]
     Spawn { id: String, source: io::Error },
@@ -231,15 +296,107 @@ fn ensure_local_endpoint_available(
     resolved: &ResolvedTunnelConfig,
 ) -> Result<(), TunnelRuntimeError> {
     let tunnel = &resolved.tunnel;
+    let local_host = tunnel.effective_local_host();
+    let local_port = tunnel.local_port;
 
-    TcpListener::bind((tunnel.effective_local_host(), tunnel.local_port))
+    TcpListener::bind((local_host, local_port))
         .map(drop)
         .map_err(|source| TunnelRuntimeError::LocalEndpointUnavailable {
             id: tunnel.id.clone(),
-            local_host: tunnel.effective_local_host().to_owned(),
-            local_port: tunnel.local_port,
+            local_host: local_host.to_owned(),
+            local_port,
             source,
+            processes: find_local_port_processes(local_port),
         })
+}
+
+/// ローカルポートを使用している LISTEN プロセスを取得する
+fn find_local_port_processes(local_port: u16) -> LocalPortProcesses {
+    let port_selector = format!("-iTCP:{local_port}");
+    let output = Command::new("lsof")
+        .arg("-nP")
+        .arg(port_selector)
+        .arg("-sTCP:LISTEN")
+        .arg("-Fpcn")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+
+    let Ok(output) = output else {
+        return LocalPortProcesses::default();
+    };
+
+    if !output.status.success() {
+        return LocalPortProcesses::default();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_lsof_processes(&stdout)
+}
+
+/// lsof の field 出力からプロセス情報を抽出する
+fn parse_lsof_processes(output: &str) -> LocalPortProcesses {
+    let mut processes = Vec::new();
+    let mut current = LocalPortProcessBuilder::default();
+
+    for line in output.lines().filter(|line| !line.is_empty()) {
+        let (field, value) = line.split_at(1);
+
+        match field {
+            "p" => {
+                if let Some(process) = current.into_process() {
+                    processes.push(process);
+                }
+                current = LocalPortProcessBuilder::from_pid(value);
+            }
+            "c" => current.command = non_empty_string(value),
+            "n" => current.endpoint = non_empty_string(value),
+            _ => {}
+        }
+    }
+
+    if let Some(process) = current.into_process() {
+        processes.push(process);
+    }
+
+    LocalPortProcesses::new(processes)
+}
+
+/// 空ではない文字列を保持する
+fn non_empty_string(value: &str) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+/// lsof field 出力の途中状態を表現する
+#[derive(Debug, Default)]
+struct LocalPortProcessBuilder {
+    pid: Option<u32>,
+    command: Option<String>,
+    endpoint: Option<String>,
+}
+
+impl LocalPortProcessBuilder {
+    /// PID 行からプロセス情報の組み立てを開始する
+    fn from_pid(value: &str) -> Self {
+        Self {
+            pid: value.parse().ok(),
+            command: None,
+            endpoint: None,
+        }
+    }
+
+    /// 組み立て済みプロセス情報へ変換する
+    fn into_process(self) -> Option<LocalPortProcess> {
+        self.pid.map(|pid| LocalPortProcess {
+            command: self.command.unwrap_or_else(|| "unknown".to_owned()),
+            pid,
+            endpoint: self.endpoint,
+        })
+    }
 }
 
 /// プロセスが存在するかを判定する
@@ -353,6 +510,68 @@ mod tests {
         let duration = start_grace_period(timeouts);
 
         assert_eq!(duration, Duration::from_millis(50));
+    }
+
+    /// lsof の field 出力から LISTEN プロセス情報を抽出できることを検証する
+    #[test]
+    fn parse_lsof_processes_reads_field_output() {
+        let output = "\
+p1234
+cssh
+n127.0.0.1:15432 (LISTEN)
+p5678
+cpostgres
+n*:15432 (LISTEN)
+";
+
+        let processes = parse_lsof_processes(output);
+
+        assert_eq!(
+            processes,
+            LocalPortProcesses::new(vec![
+                LocalPortProcess {
+                    command: "ssh".to_owned(),
+                    pid: 1234,
+                    endpoint: Some("127.0.0.1:15432 (LISTEN)".to_owned()),
+                },
+                LocalPortProcess {
+                    command: "postgres".to_owned(),
+                    pid: 5678,
+                    endpoint: Some("*:15432 (LISTEN)".to_owned()),
+                },
+            ])
+        );
+    }
+
+    /// ポート使用プロセス情報がエラー表示へ含まれることを検証する
+    #[test]
+    fn local_endpoint_error_displays_listening_processes() {
+        let error = TunnelRuntimeError::LocalEndpointUnavailable {
+            id: "db".to_owned(),
+            local_host: "127.0.0.1".to_owned(),
+            local_port: 15432,
+            source: io::Error::new(io::ErrorKind::AddrInUse, "address already in use"),
+            processes: LocalPortProcesses::new(vec![LocalPortProcess {
+                command: "postgres".to_owned(),
+                pid: 5678,
+                endpoint: Some("127.0.0.1:15432 (LISTEN)".to_owned()),
+            }]),
+        };
+
+        let message = error.to_string();
+
+        assert!(message.contains("Local endpoint is not available: db (127.0.0.1:15432)"));
+        assert!(message.contains(
+            "listening process: postgres (pid: 5678, endpoint: 127.0.0.1:15432 (LISTEN))"
+        ));
+    }
+
+    /// ポート使用プロセス情報が空の場合に追加表示しないことを検証する
+    #[test]
+    fn empty_local_port_processes_display_is_empty() {
+        let processes = LocalPortProcesses::default();
+
+        assert_eq!(processes.to_string(), "");
     }
 
     /// `~/` 形式の identity_file が HOME 配下へ展開されることを検証する

@@ -37,6 +37,7 @@ cargo run -p fwd-deck-cli --bin fwd-deck -- validate
 
 `start` と `stop` は、ID を指定しない場合に対話選択を表示します。
 `start --all` は設定済みのすべてのトンネルを開始し、`stop --all` は追跡中のすべてのトンネルを停止します。
+`start` は local endpoint が使用中の場合、取得できる範囲でそのポートを使っている LISTEN プロセスも表示します。
 `list` と `start` は `--tag` を複数指定でき、指定したタグをすべて持つトンネルだけを対象にします。
 `stop` の対話選択には、追跡中のトンネルをまとめて停止する選択肢も表示されます。
 `recover` は、状態ファイル上で stale になっているトンネルを現在の設定に基づいて再起動します。

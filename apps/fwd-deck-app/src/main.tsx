@@ -40,7 +40,7 @@ type StatusFilter = "all" | TunnelStatus;
 
 type ScopeFilter = "all" | ConfigScope;
 
-type AppView = "dashboard" | "add" | "settings";
+type AppView = "dashboard" | "add";
 
 interface WorkspaceSelection {
   workspacePath: string;
@@ -237,6 +237,7 @@ function App(): ReactElement {
   const [filters, setFilters] = useState<TunnelFilters>(initialFilters);
   const [queryInput, setQueryInput] = useState<string>(initialFilters.query);
   const [activeView, setActiveView] = useState<AppView>("dashboard");
+  const [settingsDraft, setSettingsDraft] = useState<WorkspaceSelection | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<TunnelView | null>(null);
   const [message, setMessage] = useState<AppMessage | null>(null);
@@ -302,10 +303,28 @@ function App(): ReactElement {
     return () => window.clearTimeout(timeoutId);
   }, [queryInput]);
 
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (isSettingsKeyboardShortcut(event)) {
+        event.preventDefault();
+        setSettingsDraft((current) => current ?? paths);
+        return;
+      }
+
+      if (event.key === "Escape" && !isBusy) {
+        setSettingsDraft(null);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isBusy, paths]);
+
   /**
    * 現在のパス設定に基づいてダッシュボードを再取得する
    */
-  async function refreshDashboard(nextPaths: WorkspaceSelection = paths): Promise<void> {
+  async function refreshDashboard(nextPaths: WorkspaceSelection = paths): Promise<boolean> {
     setIsBusy(true);
 
     try {
@@ -317,8 +336,10 @@ function App(): ReactElement {
       setPaths(loaded.paths);
       setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
       setMessage(null);
+      return true;
     } catch (error) {
       setMessage({ kind: "error", text: stringifyError(error) });
+      return false;
     } finally {
       setIsBusy(false);
     }
@@ -454,14 +475,34 @@ function App(): ReactElement {
   }
 
   /**
-   * パス入力の変更を反映する
+   * 設定モーダルを現在の適用済み設定で開く
    */
-  function updatePath(field: keyof WorkspaceSelection, value: string | boolean): void {
-    setPaths((current) => ({ ...current, [field]: value }));
+  function openSettings(): void {
+    setSettingsDraft((current) => current ?? paths);
   }
 
   /**
-   * フォルダ選択ダイアログの結果をワークスペースへ反映する
+   * 設定モーダルを閉じて未適用の変更を破棄する
+   */
+  function closeSettings(): void {
+    setSettingsDraft(null);
+  }
+
+  /**
+   * 設定モーダルの未適用入力を更新する
+   */
+  function updateSettingsDraft(field: keyof WorkspaceSelection, value: string | boolean): void {
+    setSettingsDraft((current) => {
+      if (current === null) {
+        return current;
+      }
+
+      return { ...current, [field]: value };
+    });
+  }
+
+  /**
+   * フォルダ選択ダイアログの結果を未適用ワークスペースへ反映する
    */
   async function browseWorkspace(): Promise<void> {
     try {
@@ -470,17 +511,52 @@ function App(): ReactElement {
         return;
       }
 
-      setPaths((current) => ({ ...current, workspacePath: selected }));
+      updateSettingsDraft("workspacePath", selected);
     } catch (error) {
       setMessage({ kind: "error", text: stringifyError(error) });
     }
   }
 
   /**
-   * 履歴から選択したワークスペースを反映する
+   * ファイル選択ダイアログの結果を未適用グローバル設定へ反映する
+   */
+  async function browseGlobalConfig(): Promise<void> {
+    try {
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        filters: [{ name: "TOML", extensions: ["toml"] }],
+      });
+
+      if (typeof selected !== "string") {
+        return;
+      }
+
+      updateSettingsDraft("globalConfigPath", selected);
+    } catch (error) {
+      setMessage({ kind: "error", text: stringifyError(error) });
+    }
+  }
+
+  /**
+   * 履歴から選択したワークスペースを未適用入力へ反映する
    */
   function selectWorkspaceFromHistory(workspacePath: string): void {
-    setPaths((current) => ({ ...current, workspacePath }));
+    updateSettingsDraft("workspacePath", workspacePath);
+  }
+
+  /**
+   * 設定モーダルの入力を適用してダッシュボードを再読み込みする
+   */
+  async function applySettings(): Promise<void> {
+    if (settingsDraft === null) {
+      return;
+    }
+
+    const applied = await refreshDashboard(settingsDraft);
+    if (applied) {
+      closeSettings();
+    }
   }
 
   /**
@@ -548,6 +624,7 @@ function App(): ReactElement {
           activeView={activeView}
           isBusy={isBusy}
           onViewChange={setActiveView}
+          onOpenSettings={openSettings}
           onRefresh={() => void refreshDashboard()}
         />
 
@@ -588,18 +665,21 @@ function App(): ReactElement {
             isBusy={isBusy}
             onChange={updateForm}
             onSubmit={(event) => void submitTunnel(event)}
+            onOpenSettings={openSettings}
           />
-        ) : (
-          <SettingsView
-            paths={paths}
-            isBusy={isBusy}
-            onChange={updatePath}
-            onReload={() => void refreshDashboard(paths)}
-            onBrowseWorkspace={() => void browseWorkspace()}
-            onSelectWorkspace={selectWorkspaceFromHistory}
-          />
-        )}
+        ) : null}
       </div>
+      <SettingsModal
+        isOpen={settingsDraft !== null}
+        paths={settingsDraft ?? paths}
+        isBusy={isBusy}
+        onCancel={closeSettings}
+        onApply={() => void applySettings()}
+        onChange={updateSettingsDraft}
+        onBrowseWorkspace={() => void browseWorkspace()}
+        onBrowseGlobalConfig={() => void browseGlobalConfig()}
+        onSelectWorkspace={selectWorkspaceFromHistory}
+      />
       <ConfirmRemoveModal
         tunnel={deleteTarget}
         isBusy={isBusy}
@@ -621,6 +701,7 @@ interface AppHeaderProps {
   activeView: AppView;
   isBusy: boolean;
   onViewChange: (view: AppView) => void;
+  onOpenSettings: () => void;
   onRefresh: () => void;
 }
 
@@ -632,6 +713,7 @@ function AppHeader({
   activeView,
   isBusy,
   onViewChange,
+  onOpenSettings,
   onRefresh,
 }: AppHeaderProps): ReactElement {
   return (
@@ -670,10 +752,10 @@ function AppHeader({
             </button>
             <button
               type="button"
-              className={`btn btn-sm join-item flex-1 lg:flex-none ${
-                activeView === "settings" ? "btn-primary" : "btn-outline"
-              }`}
-              onClick={() => onViewChange("settings")}
+              className="btn btn-outline btn-sm join-item flex-1 lg:flex-none"
+              onClick={onOpenSettings}
+              aria-label="Settings"
+              title="Settings (Cmd/Ctrl + ,)"
             >
               <Settings2 size={15} />
               Settings
@@ -880,6 +962,7 @@ interface AddTunnelViewProps {
   isBusy: boolean;
   onChange: (field: keyof TunnelFormState, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onOpenSettings: () => void;
 }
 
 /**
@@ -891,6 +974,7 @@ function AddTunnelView({
   isBusy,
   onChange,
   onSubmit,
+  onOpenSettings,
 }: AddTunnelViewProps): ReactElement {
   return (
     <section className="mx-auto flex w-full max-w-6xl flex-col gap-4">
@@ -900,42 +984,104 @@ function AddTunnelView({
         isBusy={isBusy}
         onChange={onChange}
         onSubmit={onSubmit}
+        onOpenSettings={onOpenSettings}
       />
     </section>
   );
 }
 
-interface SettingsViewProps {
+interface SettingsModalProps {
+  isOpen: boolean;
   paths: WorkspaceSelection;
   isBusy: boolean;
   onChange: (field: keyof WorkspaceSelection, value: string | boolean) => void;
-  onReload: () => void;
+  onApply: () => void;
+  onCancel: () => void;
   onBrowseWorkspace: () => void;
+  onBrowseGlobalConfig: () => void;
   onSelectWorkspace: (workspacePath: string) => void;
 }
 
 /**
- * 設定ファイルと状態ファイルの参照先を編集する
+ * 設定ファイルと状態ファイルの参照先をモーダルで編集する
  */
-function SettingsView({
+function SettingsModal({
+  isOpen,
   paths,
   isBusy,
   onChange,
-  onReload,
+  onApply,
+  onCancel,
   onBrowseWorkspace,
+  onBrowseGlobalConfig,
   onSelectWorkspace,
-}: SettingsViewProps): ReactElement {
+}: SettingsModalProps): ReactElement | null {
+  if (!isOpen) {
+    return null;
+  }
+
   return (
-    <section className="mx-auto w-full max-w-4xl">
-      <PathPanel
-        paths={paths}
-        isBusy={isBusy}
-        onChange={onChange}
-        onReload={onReload}
-        onBrowseWorkspace={onBrowseWorkspace}
-        onSelectWorkspace={onSelectWorkspace}
-      />
-    </section>
+    <div
+      className="modal modal-open"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-title"
+    >
+      <div className="modal-box max-h-[calc(100vh-2rem)] w-11/12 max-w-5xl overflow-hidden p-0">
+        <div className="flex items-start justify-between gap-4 border-b border-base-300 px-5 py-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <Settings2 className="text-primary" size={18} />
+              <h2 id="settings-title" className="text-lg font-bold">
+                Settings
+              </h2>
+            </div>
+          </div>
+          <IconButton
+            label="設定を閉じる"
+            className="btn btn-square btn-ghost btn-sm"
+            onClick={onCancel}
+            disabled={isBusy}
+          >
+            <X size={17} />
+          </IconButton>
+        </div>
+
+        <div className="max-h-[calc(100vh-13rem)] overflow-y-auto px-5 py-4">
+          <PathPanel
+            paths={paths}
+            isBusy={isBusy}
+            onChange={onChange}
+            onBrowseWorkspace={onBrowseWorkspace}
+            onBrowseGlobalConfig={onBrowseGlobalConfig}
+            onSelectWorkspace={onSelectWorkspace}
+          />
+        </div>
+
+        <div className="flex justify-end gap-2 border-t border-base-300 px-5 py-4">
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={onCancel}
+            disabled={isBusy}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={onApply}
+            disabled={isBusy}
+          >
+            {isBusy ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+            Apply changes
+          </button>
+        </div>
+      </div>
+      <button className="modal-backdrop" type="button" onClick={onCancel} disabled={isBusy}>
+        close
+      </button>
+    </div>
   );
 }
 
@@ -943,8 +1089,8 @@ interface PathPanelProps {
   paths: WorkspaceSelection;
   isBusy: boolean;
   onChange: (field: keyof WorkspaceSelection, value: string | boolean) => void;
-  onReload: () => void;
   onBrowseWorkspace: () => void;
+  onBrowseGlobalConfig: () => void;
   onSelectWorkspace: (workspacePath: string) => void;
 }
 
@@ -955,89 +1101,103 @@ function PathPanel({
   paths,
   isBusy,
   onChange,
-  onReload,
   onBrowseWorkspace,
+  onBrowseGlobalConfig,
   onSelectWorkspace,
 }: PathPanelProps): ReactElement {
   return (
-    <section className="rounded-lg border border-base-300 bg-base-100 shadow-sm">
-      <div className="flex flex-col gap-4 p-5">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Settings2 className="text-primary" size={18} />
-            <h2 className="text-base font-bold">Configuration paths</h2>
-          </div>
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <section className="flex flex-col gap-3 rounded-lg border border-base-300 bg-base-200/30 p-4">
+        <div className="flex items-center gap-2">
+          <FolderOpen className="text-primary" size={17} />
+          <h3 className="text-sm font-bold">Workspace</h3>
+        </div>
+        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
+          <TextField
+            label="Workspace directory"
+            value={paths.workspacePath}
+            onChange={(value) => onChange("workspacePath", value)}
+          />
           <button
             type="button"
-            className="btn btn-outline btn-sm"
-            onClick={onReload}
+            className="btn btn-outline btn-sm mb-0"
+            onClick={onBrowseWorkspace}
             disabled={isBusy}
           >
-            <RefreshCw size={15} />
-            Apply
+            <FolderOpen size={15} />
+            Browse
           </button>
         </div>
-        <div className="grid grid-cols-1 gap-3">
-          <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
-            <TextField
-              label="Workspace"
-              value={paths.workspacePath}
-              onChange={(value) => onChange("workspacePath", value)}
-            />
-            <button
-              type="button"
-              className="btn btn-outline btn-sm mb-0"
-              onClick={onBrowseWorkspace}
-              disabled={isBusy}
-            >
-              <FolderOpen size={15} />
-              Browse
-            </button>
-          </div>
-          {paths.workspaceHistory.length > 0 ? (
-            <div className="rounded-md border border-base-300 bg-base-200/40 px-3 py-2">
-              <div className="mb-2 text-xs font-bold uppercase tracking-wide text-base-content/50">
-                Recent workspaces
-              </div>
-              <div className="flex flex-col gap-1">
-                {paths.workspaceHistory.map((workspacePath) => (
-                  <button
-                    key={workspacePath}
-                    type="button"
-                    className="btn btn-ghost btn-xs min-h-8 justify-start font-mono text-xs"
-                    onClick={() => onSelectWorkspace(workspacePath)}
-                    disabled={isBusy}
-                    title={workspacePath}
-                  >
-                    <span className="truncate">{workspacePath}</span>
-                  </button>
-                ))}
-              </div>
+        {paths.workspaceHistory.length > 0 ? (
+          <div className="rounded-md border border-base-300 bg-base-100 px-3 py-2">
+            <div className="mb-2 text-xs font-bold uppercase tracking-wide text-base-content/50">
+              Recent workspaces
             </div>
-          ) : null}
-          <PathValue label="Local config" value={paths.localConfigPath} />
+            <div className="flex max-h-36 flex-col gap-1 overflow-y-auto">
+              {paths.workspaceHistory.map((workspacePath) => (
+                <button
+                  key={workspacePath}
+                  type="button"
+                  className="btn btn-ghost btn-xs min-h-8 justify-start font-mono text-xs"
+                  onClick={() => onSelectWorkspace(workspacePath)}
+                  disabled={isBusy}
+                  title={workspacePath}
+                >
+                  <span className="truncate">{workspacePath}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </section>
+
+      <section className="flex flex-col gap-3 rounded-lg border border-base-300 bg-base-200/30 p-4">
+        <div className="flex items-center gap-2">
+          <Settings2 className="text-primary" size={17} />
+          <h3 className="text-sm font-bold">Configuration files</h3>
+        </div>
+        <PathValue label="Local config" value={paths.localConfigPath} />
+        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
           <TextField
             label="Global config"
             value={paths.globalConfigPath}
             onChange={(value) => onChange("globalConfigPath", value)}
             disabled={!paths.useGlobal}
           />
+          <button
+            type="button"
+            className="btn btn-outline btn-sm mb-0"
+            onClick={onBrowseGlobalConfig}
+            disabled={isBusy || !paths.useGlobal}
+          >
+            <FolderOpen size={15} />
+            Browse
+          </button>
+        </div>
+        <div className="rounded-md border border-base-300 bg-base-100 px-3 py-2">
+          <label className="flex cursor-pointer items-center justify-between gap-3">
+            <span className="text-sm font-semibold">Use global config</span>
+            <input
+              type="checkbox"
+              className="toggle toggle-primary toggle-sm"
+              checked={paths.useGlobal}
+              onChange={(event) => onChange("useGlobal", event.target.checked)}
+            />
+          </label>
+        </div>
+      </section>
+
+      <section className="flex flex-col gap-3 rounded-lg border border-base-300 bg-base-200/30 p-4 lg:col-span-2">
+        <div className="flex items-center gap-2">
+          <Activity className="text-primary" size={17} />
+          <h3 className="text-sm font-bold">Runtime state</h3>
+        </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           <PathValue label="Global state" value={paths.globalStatePath} />
           <PathValue label="Workspace state" value={paths.workspaceStatePath} />
-          <div className="rounded-md border border-base-300 bg-base-200/40 px-3 py-2">
-            <label className="flex cursor-pointer items-center justify-between gap-3">
-              <span className="text-sm font-semibold">Use global config</span>
-              <input
-                type="checkbox"
-                className="toggle toggle-primary toggle-sm"
-                checked={paths.useGlobal}
-                onChange={(event) => onChange("useGlobal", event.target.checked)}
-              />
-            </label>
-          </div>
         </div>
-      </div>
-    </section>
+      </section>
+    </div>
   );
 }
 
@@ -1141,8 +1301,8 @@ function AlertMessage({ kind, children }: AlertMessageProps): ReactElement {
       className={`flex items-center gap-3 rounded-lg border px-4 py-3 text-sm text-base-content shadow-sm ${toneClassName}`}
       role={kind === "error" ? "alert" : "status"}
     >
-      {icon}
-      <span>{children}</span>
+      <span className="shrink-0">{icon}</span>
+      <div className="min-w-0 flex-1">{children}</div>
     </div>
   );
 }
@@ -1781,6 +1941,7 @@ interface TunnelFormProps {
   isBusy: boolean;
   onChange: (field: keyof TunnelFormState, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onOpenSettings: () => void;
 }
 
 /**
@@ -1792,6 +1953,7 @@ function TunnelForm({
   isBusy,
   onChange,
   onSubmit,
+  onOpenSettings,
 }: TunnelFormProps): ReactElement {
   const localUnavailable = !canUseLocal;
 
@@ -1833,7 +1995,18 @@ function TunnelForm({
         {localUnavailable && form.scope === "local" ? (
           <div className="xl:col-span-3">
             <AlertMessage kind="warning">
-              local 設定に追加するには Settings でワークスペースを選択してください。
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <span>local 設定に追加するには Settings でワークスペースを選択してください。</span>
+                <button
+                  type="button"
+                  className="btn btn-outline btn-xs"
+                  onClick={onOpenSettings}
+                  disabled={isBusy}
+                >
+                  <Settings2 size={13} />
+                  Settings
+                </button>
+              </div>
             </AlertMessage>
           </div>
         ) : null}
@@ -2193,6 +2366,16 @@ function normalizeWorkspaceSelection(paths: WorkspaceSelection): WorkspaceSelect
     globalConfigPath: paths.globalConfigPath.trim(),
     useGlobal: paths.useGlobal,
   };
+}
+
+/**
+ * 設定モーダルを開くショートカット入力か判定する
+ */
+function isSettingsKeyboardShortcut(event: KeyboardEvent): boolean {
+  const hasPrimaryModifier = event.metaKey || event.ctrlKey;
+  const isCommaKey = event.key === "," || event.code === "Comma";
+
+  return hasPrimaryModifier && isCommaKey && !event.altKey && !event.shiftKey;
 }
 
 /**

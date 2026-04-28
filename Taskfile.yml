@@ -40,8 +40,52 @@ tasks:
     desc: 整形、テスト、lint をまとめて実行する
     deps:
       - fmt:check
+      - app:format:check
+      - app:build:web
+      - app:lint
       - test
       - lint
+
+  app:install:
+    desc: macOS アプリのフロントエンド依存関係をインストールする
+    dir: apps/fwd-deck-app
+    cmds:
+      - npm install
+
+  app:dev:
+    desc: Tauri アプリを開発モードで起動する
+    dir: apps/fwd-deck-app
+    cmds:
+      - npm run tauri dev
+
+  app:build:web:
+    desc: Tauri アプリのフロントエンドをビルドする
+    dir: apps/fwd-deck-app
+    cmds:
+      - npm run build
+
+  app:lint:
+    desc: Tauri アプリのフロントエンドを ESLint で検査する
+    dir: apps/fwd-deck-app
+    cmds:
+      - npm run lint
+
+  app:format:
+    desc: Tauri アプリのフロントエンドを Prettier で整形する
+    dir: apps/fwd-deck-app
+    cmds:
+      - npm run format
+
+  app:format:check:
+    desc: Tauri アプリのフロントエンド整形差分を確認する
+    dir: apps/fwd-deck-app
+    cmds:
+      - npm run format:check
+
+  app:check:
+    desc: Tauri アプリの Rust command 層を検査する
+    cmds:
+      - cargo check -p fwd-deck-app
 
   list:
     desc: 既定設定で list を実行する

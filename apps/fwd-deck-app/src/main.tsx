@@ -1,0 +1,1701 @@
+import { invoke } from "@tauri-apps/api/core";
+import {
+  Activity,
+  AlertTriangle,
+  ArrowRight,
+  CheckCircle2,
+  CirclePlus,
+  CircleStop,
+  Clock3,
+  Gauge,
+  KeyRound,
+  ListFilter,
+  Loader2,
+  Play,
+  RefreshCw,
+  Search,
+  Server,
+  Settings2,
+  Trash2,
+  X,
+} from "lucide-react";
+import { StrictMode, useEffect, useMemo, useState } from "react";
+import type { ChangeEvent, FormEvent, ReactElement, ReactNode } from "react";
+import { createRoot } from "react-dom/client";
+import "./styles.css";
+
+type ConfigScope = "local" | "global";
+
+type RuntimeState = "running" | "stale";
+
+type TunnelStatus = RuntimeState | "idle";
+
+type StatusFilter = "all" | TunnelStatus;
+
+type ScopeFilter = "all" | ConfigScope;
+
+interface PathSelection {
+  localConfigPath: string;
+  globalConfigPath: string;
+  useGlobal: boolean;
+  statePath: string;
+}
+
+interface DashboardState {
+  paths: PathSelection;
+  hasConfig: boolean;
+  validation: ValidationView;
+  tunnels: TunnelView[];
+  trackedTunnels: TrackedTunnelView[];
+}
+
+interface ValidationView {
+  isValid: boolean;
+  errors: ValidationIssueView[];
+  warnings: ValidationIssueView[];
+}
+
+interface ValidationIssueView {
+  source: string;
+  path: string;
+  tunnelId: string | null;
+  message: string;
+}
+
+interface TunnelView {
+  id: string;
+  description: string | null;
+  tags: string[];
+  local: string;
+  remote: string;
+  ssh: string;
+  source: ConfigScope;
+  sourcePath: string;
+  timeouts: TimeoutView;
+  status: RuntimeStatusView | null;
+}
+
+interface TrackedTunnelView {
+  id: string;
+  local: string;
+  remote: string;
+  ssh: string;
+  status: RuntimeStatusView;
+}
+
+interface RuntimeStatusView {
+  pid: number;
+  state: RuntimeState;
+  source: string;
+  sourcePath: string;
+  startedAtUnixSeconds: number;
+}
+
+interface TimeoutView {
+  connectTimeoutSeconds: number;
+  serverAliveIntervalSeconds: number;
+  serverAliveCountMax: number;
+  startGraceMilliseconds: number;
+}
+
+interface OperationReport {
+  succeeded: OperationSuccessView[];
+  failed: OperationFailureView[];
+}
+
+interface OperationSuccessView {
+  id: string;
+  message: string;
+}
+
+interface OperationFailureView {
+  id: string;
+  message: string;
+}
+
+interface TunnelFormState {
+  scope: ConfigScope;
+  id: string;
+  description: string;
+  tags: string;
+  localHost: string;
+  localPort: string;
+  remoteHost: string;
+  remotePort: string;
+  sshUser: string;
+  sshHost: string;
+  sshPort: string;
+  identityFile: string;
+}
+
+interface TunnelInput {
+  id: string;
+  description: string | null;
+  tags: string[];
+  localHost: string;
+  localPort: number;
+  remoteHost: string;
+  remotePort: number;
+  sshUser: string;
+  sshHost: string;
+  sshPort: number | null;
+  identityFile: string | null;
+}
+
+interface AppMessage {
+  kind: "success" | "error" | "info";
+  text: string;
+}
+
+interface TunnelFilters {
+  query: string;
+  status: StatusFilter;
+  scope: ScopeFilter;
+}
+
+const initialPaths: PathSelection = {
+  localConfigPath: "",
+  globalConfigPath: "",
+  useGlobal: true,
+  statePath: "",
+};
+
+const initialForm: TunnelFormState = {
+  scope: "local",
+  id: "",
+  description: "",
+  tags: "",
+  localHost: "127.0.0.1",
+  localPort: "",
+  remoteHost: "",
+  remotePort: "",
+  sshUser: "",
+  sshHost: "",
+  sshPort: "22",
+  identityFile: "",
+};
+
+const initialFilters: TunnelFilters = {
+  query: "",
+  status: "all",
+  scope: "all",
+};
+
+const statusFilterOptions: ReadonlyArray<{ value: StatusFilter; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "running", label: "Running" },
+  { value: "stale", label: "Stale" },
+  { value: "idle", label: "Idle" },
+];
+
+const scopeFilterOptions: ReadonlyArray<{ value: ScopeFilter; label: string }> = [
+  { value: "all", label: "All scopes" },
+  { value: "local", label: "Local" },
+  { value: "global", label: "Global" },
+];
+
+/**
+ * アプリ全体の UI を描画する
+ */
+function App(): ReactElement {
+  const [dashboard, setDashboard] = useState<DashboardState | null>(null);
+  const [paths, setPaths] = useState<PathSelection>(initialPaths);
+  const [form, setForm] = useState<TunnelFormState>(initialForm);
+  const [filters, setFilters] = useState<TunnelFilters>(initialFilters);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [deleteTarget, setDeleteTarget] = useState<TunnelView | null>(null);
+  const [message, setMessage] = useState<AppMessage | null>(null);
+  const [isBusy, setIsBusy] = useState<boolean>(false);
+
+  const stats = useMemo<DashboardStats>(() => calculateStats(dashboard), [dashboard]);
+  const selectedIdList = useMemo<string[]>(() => Array.from(selectedIds), [selectedIds]);
+  const filteredTunnels = useMemo<TunnelView[]>(
+    () => filterTunnels(dashboard?.tunnels ?? [], filters),
+    [dashboard, filters],
+  );
+  const hasActiveFilters = useMemo<boolean>(() => hasActiveTunnelFilters(filters), [filters]);
+
+  useEffect(() => {
+    async function loadInitialDashboard(): Promise<void> {
+      setIsBusy(true);
+
+      try {
+        const loaded = await invoke<DashboardState>("load_dashboard", {
+          paths: normalizePathSelection(initialPaths),
+        });
+
+        setDashboard(loaded);
+        setPaths(loaded.paths);
+        setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
+        setMessage(null);
+      } catch (error) {
+        setMessage({ kind: "error", text: stringifyError(error) });
+      } finally {
+        setIsBusy(false);
+      }
+    }
+
+    void loadInitialDashboard();
+  }, []);
+
+  /**
+   * 現在のパス設定に基づいてダッシュボードを再取得する
+   */
+  async function refreshDashboard(nextPaths: PathSelection = paths): Promise<void> {
+    setIsBusy(true);
+
+    try {
+      const loaded = await invoke<DashboardState>("load_dashboard", {
+        paths: normalizePathSelection(nextPaths),
+      });
+
+      setDashboard(loaded);
+      setPaths(loaded.paths);
+      setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
+      setMessage(null);
+    } catch (error) {
+      setMessage({ kind: "error", text: stringifyError(error) });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  /**
+   * 指定 ID のトンネルを開始する
+   */
+  async function startSelected(ids: string[]): Promise<void> {
+    if (ids.length === 0) {
+      setMessage({ kind: "info", text: "開始するトンネルを選択してください" });
+      return;
+    }
+
+    await runOperation("start_tunnels", ids);
+  }
+
+  /**
+   * 指定 ID のトンネルを停止する
+   */
+  async function stopSelected(ids: string[]): Promise<void> {
+    if (ids.length === 0) {
+      setMessage({ kind: "info", text: "停止するトンネルを選択してください" });
+      return;
+    }
+
+    await runOperation("stop_tunnels", ids);
+  }
+
+  /**
+   * トンネル操作を実行して結果を反映する
+   */
+  async function runOperation(
+    command: "start_tunnels" | "stop_tunnels",
+    ids: string[],
+  ): Promise<void> {
+    setIsBusy(true);
+
+    try {
+      const report = await invoke<OperationReport>(command, {
+        paths: normalizePathSelection(paths),
+        ids,
+      });
+
+      setMessage(operationMessage(report));
+      await refreshDashboard(paths);
+    } catch (error) {
+      setMessage({ kind: "error", text: stringifyError(error) });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  /**
+   * 設定ファイルへトンネルを追加する
+   */
+  async function submitTunnel(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+
+    let tunnel: TunnelInput;
+    try {
+      tunnel = formToTunnelInput(form);
+    } catch (error) {
+      setMessage({ kind: "error", text: stringifyError(error) });
+      return;
+    }
+
+    setIsBusy(true);
+
+    try {
+      const loaded = await invoke<DashboardState>("add_tunnel_entry", {
+        paths: normalizePathSelection(paths),
+        scope: form.scope,
+        tunnel,
+      });
+
+      setDashboard(loaded);
+      setPaths(loaded.paths);
+      setForm({ ...initialForm, scope: form.scope });
+      setMessage({ kind: "success", text: `${tunnel.id} を設定に追加しました` });
+    } catch (error) {
+      setMessage({ kind: "error", text: stringifyError(error) });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  /**
+   * 設定ファイルからトンネルを削除する
+   */
+  async function removeTunnel(tunnel: TunnelView): Promise<void> {
+    setDeleteTarget(null);
+    setIsBusy(true);
+
+    try {
+      const loaded = await invoke<DashboardState>("remove_tunnel_entry", {
+        paths: normalizePathSelection(paths),
+        scope: tunnel.source,
+        id: tunnel.id,
+      });
+
+      setDashboard(loaded);
+      setPaths(loaded.paths);
+      setSelectedIds((current) => removeSelection(current, tunnel.id));
+      setMessage({ kind: "success", text: `${tunnel.id} を設定から削除しました` });
+    } catch (error) {
+      setMessage({ kind: "error", text: stringifyError(error) });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  /**
+   * パス入力の変更を反映する
+   */
+  function updatePath(field: keyof PathSelection, value: string | boolean): void {
+    setPaths((current) => ({ ...current, [field]: value }));
+  }
+
+  /**
+   * 追加フォームの変更を反映する
+   */
+  function updateForm(field: keyof TunnelFormState, value: string): void {
+    setForm((current) => ({ ...current, [field]: value }));
+  }
+
+  /**
+   * トンネル選択状態を切り替える
+   */
+  function toggleSelection(id: string): void {
+    setSelectedIds((current) => toggleId(current, id));
+  }
+
+  /**
+   * 一覧の絞り込み条件を反映する
+   */
+  function updateFilter<K extends keyof TunnelFilters>(field: K, value: TunnelFilters[K]): void {
+    setFilters((current) => ({ ...current, [field]: value }));
+  }
+
+  /**
+   * 一覧の絞り込み条件を初期状態へ戻す
+   */
+  function resetFilters(): void {
+    setFilters(initialFilters);
+  }
+
+  return (
+    <main className="app-shell min-h-screen text-base-content">
+      <div className="mx-auto flex w-full max-w-[90rem] flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
+        <AppHeader stats={stats} isBusy={isBusy} onRefresh={() => void refreshDashboard()} />
+
+        <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_25rem]">
+          <section className="flex min-w-0 flex-col gap-4">
+            <MessagePanel message={message} />
+            <ValidationPanel dashboard={dashboard} />
+            <TunnelOperationsPanel
+              selectedCount={selectedIdList.length}
+              totalCount={dashboard?.tunnels.length ?? 0}
+              visibleCount={filteredTunnels.length}
+              filters={filters}
+              hasActiveFilters={hasActiveFilters}
+              isBusy={isBusy}
+              onFilterChange={updateFilter}
+              onResetFilters={resetFilters}
+              onStart={() => void startSelected(selectedIdList)}
+              onStop={() => void stopSelected(selectedIdList)}
+              onClear={() => setSelectedIds(new Set())}
+            />
+            <TunnelDeck
+              dashboard={dashboard}
+              tunnels={filteredTunnels}
+              hasActiveFilters={hasActiveFilters}
+              selectedIds={selectedIds}
+              isBusy={isBusy}
+              onToggle={toggleSelection}
+              onStart={(id) => void startSelected([id])}
+              onStop={(id) => void stopSelected([id])}
+              onRemove={setDeleteTarget}
+            />
+            <TrackedPanel
+              dashboard={dashboard}
+              isBusy={isBusy}
+              onStop={(id) => void stopSelected([id])}
+            />
+          </section>
+
+          <aside className="flex flex-col gap-4 xl:sticky xl:top-5 xl:self-start">
+            <TunnelForm
+              form={form}
+              isBusy={isBusy}
+              onChange={updateForm}
+              onSubmit={(event) => void submitTunnel(event)}
+            />
+            <PathPanel
+              paths={paths}
+              isBusy={isBusy}
+              onChange={updatePath}
+              onReload={() => void refreshDashboard(paths)}
+            />
+          </aside>
+        </div>
+      </div>
+      <ConfirmRemoveModal
+        tunnel={deleteTarget}
+        isBusy={isBusy}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={(tunnel) => void removeTunnel(tunnel)}
+      />
+    </main>
+  );
+}
+
+interface DashboardStats {
+  configured: number;
+  running: number;
+  stale: number;
+}
+
+interface AppHeaderProps {
+  stats: DashboardStats;
+  isBusy: boolean;
+  onRefresh: () => void;
+}
+
+/**
+ * アプリ全体の操作状況と再読み込み導線を表示する
+ */
+function AppHeader({ stats, isBusy, onRefresh }: AppHeaderProps): ReactElement {
+  return (
+    <header className="overflow-hidden rounded-lg border border-base-300 bg-base-100 shadow-sm">
+      <div className="flex flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <span className="text-xs font-bold uppercase tracking-wide text-primary">fwd-deck</span>
+          <h1 className="mt-1 truncate text-2xl leading-tight font-bold sm:text-3xl">
+            Port Forwarding Deck
+          </h1>
+          <p className="mt-1 text-sm text-base-content/60">
+            SSH tunnel operations for local development
+          </p>
+        </div>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-[repeat(3,minmax(7rem,1fr))_auto] lg:w-auto">
+          <StatusMetric label="Configured" value={stats.configured} icon={<Gauge size={17} />} />
+          <StatusMetric
+            label="Running"
+            value={stats.running}
+            tone="success"
+            icon={<Activity size={17} />}
+          />
+          <StatusMetric
+            label="Stale"
+            value={stats.stale}
+            tone="warning"
+            icon={<Clock3 size={17} />}
+          />
+          <IconButton
+            label="再読み込み"
+            className="btn btn-square btn-ghost h-full min-h-16 w-full border border-base-300 sm:w-16"
+            onClick={onRefresh}
+            disabled={isBusy}
+          >
+            {isBusy ? <Loader2 className="animate-spin" size={18} /> : <RefreshCw size={18} />}
+          </IconButton>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+interface StatusMetricProps {
+  label: string;
+  value: number;
+  icon: ReactNode;
+  tone?: "success" | "warning";
+}
+
+/**
+ * 上部の集計値を表示する
+ */
+function StatusMetric({ label, value, icon, tone }: StatusMetricProps): ReactElement {
+  const textColor = tone === "success" ? "text-success" : tone === "warning" ? "text-warning" : "";
+
+  return (
+    <div className="min-w-0 rounded-md border border-base-300 bg-base-200/50 px-3 py-2">
+      <div className="flex items-center gap-2 text-xs font-semibold text-base-content/60">
+        <span className={textColor}>{icon}</span>
+        <span className="truncate">{label}</span>
+      </div>
+      <div className={`mt-1 text-2xl leading-none font-bold ${textColor}`}>{value}</div>
+    </div>
+  );
+}
+
+interface IconButtonProps {
+  label: string;
+  className: string;
+  disabled?: boolean;
+  children: ReactNode;
+  onClick: () => void;
+}
+
+/**
+ * Tooltip 付きアイコンボタンを表示する
+ */
+function IconButton({
+  label,
+  className,
+  disabled = false,
+  children,
+  onClick,
+}: IconButtonProps): ReactElement {
+  return (
+    <div className="tooltip tooltip-left" data-tip={label}>
+      <button
+        className={className}
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        aria-label={label}
+      >
+        {children}
+      </button>
+    </div>
+  );
+}
+
+interface PathPanelProps {
+  paths: PathSelection;
+  isBusy: boolean;
+  onChange: (field: keyof PathSelection, value: string | boolean) => void;
+  onReload: () => void;
+}
+
+/**
+ * 設定ファイルと状態ファイルの参照先を表示する
+ */
+function PathPanel({ paths, isBusy, onChange, onReload }: PathPanelProps): ReactElement {
+  return (
+    <section className="rounded-lg border border-base-300 bg-base-100 shadow-sm">
+      <div className="flex flex-col gap-4 p-5">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Settings2 className="text-primary" size={18} />
+            <h2 className="text-base font-bold">Configuration paths</h2>
+          </div>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={onReload}
+            disabled={isBusy}
+          >
+            <RefreshCw size={15} />
+            Apply
+          </button>
+        </div>
+        <div className="grid grid-cols-1 gap-3">
+          <TextField
+            label="Local config"
+            value={paths.localConfigPath}
+            onChange={(value) => onChange("localConfigPath", value)}
+          />
+          <TextField
+            label="Global config"
+            value={paths.globalConfigPath}
+            onChange={(value) => onChange("globalConfigPath", value)}
+            disabled={!paths.useGlobal}
+          />
+          <TextField
+            label="State file"
+            value={paths.statePath}
+            onChange={(value) => onChange("statePath", value)}
+          />
+          <div className="rounded-md border border-base-300 bg-base-200/40 px-3 py-2">
+            <label className="flex cursor-pointer items-center justify-between gap-3">
+              <span className="text-sm font-semibold">Use global config</span>
+              <input
+                type="checkbox"
+                className="toggle toggle-primary toggle-sm"
+                checked={paths.useGlobal}
+                onChange={(event) => onChange("useGlobal", event.target.checked)}
+              />
+            </label>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+interface ValidationPanelProps {
+  dashboard: DashboardState | null;
+}
+
+/**
+ * 設定検証の結果を表示する
+ */
+function ValidationPanel({ dashboard }: ValidationPanelProps): ReactElement | null {
+  if (dashboard === null) {
+    return null;
+  }
+
+  if (!dashboard.hasConfig) {
+    return (
+      <AlertMessage kind="warning">
+        設定ファイルが見つかりません。右側のフォームから local または global 設定を作成できます。
+      </AlertMessage>
+    );
+  }
+
+  if (dashboard.validation.errors.length === 0 && dashboard.validation.warnings.length === 0) {
+    return <AlertMessage kind="success">設定は有効です。</AlertMessage>;
+  }
+
+  return (
+    <section className="flex flex-col gap-2">
+      {dashboard.validation.errors.map((issue) => (
+        <IssueRow
+          key={`${issue.path}:${issue.tunnelId ?? "file"}:${issue.message}`}
+          issue={issue}
+          kind="error"
+        />
+      ))}
+      {dashboard.validation.warnings.map((issue) => (
+        <IssueRow
+          key={`${issue.path}:${issue.tunnelId ?? "file"}:${issue.message}`}
+          issue={issue}
+          kind="warning"
+        />
+      ))}
+    </section>
+  );
+}
+
+interface AlertMessageProps {
+  kind: "success" | "warning" | "error" | "info";
+  children: ReactNode;
+}
+
+/**
+ * daisyUI の alert 表示を生成する
+ */
+function AlertMessage({ kind, children }: AlertMessageProps): ReactElement {
+  const icon = kind === "success" ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />;
+  const className =
+    kind === "success"
+      ? "alert alert-success"
+      : kind === "warning"
+        ? "alert alert-warning"
+        : kind === "error"
+          ? "alert alert-error"
+          : "alert alert-info";
+
+  return (
+    <div className={`${className} py-3 text-sm`}>
+      {icon}
+      <span>{children}</span>
+    </div>
+  );
+}
+
+interface IssueRowProps {
+  issue: ValidationIssueView;
+  kind: "error" | "warning";
+}
+
+/**
+ * 設定検証の 1 件を表示する
+ */
+function IssueRow({ issue, kind }: IssueRowProps): ReactElement {
+  return (
+    <AlertMessage kind={kind}>
+      {issue.tunnelId ? `${issue.tunnelId}: ` : ""}
+      {issue.message}
+    </AlertMessage>
+  );
+}
+
+interface TunnelOperationsPanelProps {
+  selectedCount: number;
+  totalCount: number;
+  visibleCount: number;
+  filters: TunnelFilters;
+  hasActiveFilters: boolean;
+  isBusy: boolean;
+  onFilterChange: <K extends keyof TunnelFilters>(field: K, value: TunnelFilters[K]) => void;
+  onResetFilters: () => void;
+  onStart: () => void;
+  onStop: () => void;
+  onClear: () => void;
+}
+
+/**
+ * 一覧の絞り込みと複数選択操作を表示する
+ */
+function TunnelOperationsPanel({
+  selectedCount,
+  totalCount,
+  visibleCount,
+  filters,
+  hasActiveFilters,
+  isBusy,
+  onFilterChange,
+  onResetFilters,
+  onStart,
+  onStop,
+  onClear,
+}: TunnelOperationsPanelProps): ReactElement {
+  return (
+    <section className="rounded-lg border border-base-300 bg-base-100 shadow-sm">
+      <div className="flex flex-col gap-4 p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <ListFilter className="text-primary" size={18} />
+              <h2 className="text-base leading-6 font-bold">Tunnels</h2>
+              <span className="badge badge-neutral badge-sm">
+                {visibleCount} / {totalCount}
+              </span>
+            </div>
+            <p className="mt-1 text-sm text-base-content/60">
+              {selectedCount} selected across the current dashboard
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 lg:justify-end">
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={onStart}
+              disabled={isBusy || selectedCount === 0}
+            >
+              <Play size={16} />
+              Start
+            </button>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={onStop}
+              disabled={isBusy || selectedCount === 0}
+            >
+              <CircleStop size={16} />
+              Stop
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={onClear}
+              disabled={isBusy || selectedCount === 0}
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(14rem,1fr)_auto_auto_auto] lg:items-center">
+          <div className="relative">
+            <Search
+              className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-base-content/40"
+              size={16}
+            />
+            <input
+              className="input input-bordered input-sm w-full pr-9 pl-9"
+              value={filters.query}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                onFilterChange("query", event.target.value)
+              }
+              placeholder="Search ID, tag, endpoint"
+              aria-label="Search tunnels"
+            />
+            {filters.query.length > 0 ? (
+              <button
+                type="button"
+                className="btn btn-square btn-ghost btn-xs absolute top-1/2 right-1 -translate-y-1/2"
+                onClick={() => onFilterChange("query", "")}
+                aria-label="検索条件を消去"
+                title="検索条件を消去"
+              >
+                <X size={14} />
+              </button>
+            ) : null}
+          </div>
+
+          <div className="join">
+            {statusFilterOptions.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={`btn btn-sm join-item ${
+                  filters.status === option.value ? "btn-neutral" : "btn-outline"
+                }`}
+                onClick={() => onFilterChange("status", option.value)}
+                aria-pressed={filters.status === option.value}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="join">
+            {scopeFilterOptions.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={`btn btn-sm join-item ${
+                  filters.scope === option.value ? "btn-neutral" : "btn-outline"
+                }`}
+                onClick={() => onFilterChange("scope", option.value)}
+                aria-pressed={filters.scope === option.value}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={onResetFilters}
+            disabled={!hasActiveFilters}
+          >
+            Reset
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+interface MessagePanelProps {
+  message: AppMessage | null;
+}
+
+/**
+ * 操作結果メッセージを表示する
+ */
+function MessagePanel({ message }: MessagePanelProps): ReactElement | null {
+  if (message === null) {
+    return null;
+  }
+
+  const kind = message.kind === "error" ? "error" : message.kind === "success" ? "success" : "info";
+  return <AlertMessage kind={kind}>{message.text}</AlertMessage>;
+}
+
+interface TunnelDeckProps {
+  dashboard: DashboardState | null;
+  tunnels: TunnelView[];
+  hasActiveFilters: boolean;
+  selectedIds: Set<string>;
+  isBusy: boolean;
+  onToggle: (id: string) => void;
+  onStart: (id: string) => void;
+  onStop: (id: string) => void;
+  onRemove: (tunnel: TunnelView) => void;
+}
+
+/**
+ * 設定済みトンネルのカード一覧を表示する
+ */
+function TunnelDeck({
+  dashboard,
+  tunnels,
+  hasActiveFilters,
+  selectedIds,
+  isBusy,
+  onToggle,
+  onStart,
+  onStop,
+  onRemove,
+}: TunnelDeckProps): ReactElement {
+  if (dashboard === null) {
+    return <EmptyState title="Loading tunnels">設定と実行状態を読み込んでいます。</EmptyState>;
+  }
+
+  if (dashboard.tunnels.length === 0) {
+    return (
+      <EmptyState title="No configured tunnels">
+        右側のフォームから新しい接続を追加できます。
+      </EmptyState>
+    );
+  }
+
+  if (tunnels.length === 0 && hasActiveFilters) {
+    return (
+      <EmptyState title="No matching tunnels">
+        検索条件またはフィルターを変更してください。
+      </EmptyState>
+    );
+  }
+
+  return (
+    <section className="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+      {tunnels.map((tunnel) => (
+        <TunnelCard
+          key={tunnel.id}
+          tunnel={tunnel}
+          checked={selectedIds.has(tunnel.id)}
+          isBusy={isBusy}
+          onToggle={onToggle}
+          onStart={onStart}
+          onStop={onStop}
+          onRemove={onRemove}
+        />
+      ))}
+    </section>
+  );
+}
+
+interface EmptyStateProps {
+  title: string;
+  children: ReactNode;
+}
+
+/**
+ * 空状態を表示する
+ */
+function EmptyState({ title, children }: EmptyStateProps): ReactElement {
+  return (
+    <section className="rounded-lg border border-dashed border-base-300 bg-base-100/75 shadow-sm">
+      <div className="flex min-h-40 flex-col items-center justify-center gap-2 px-5 py-8 text-center">
+        <div className="rounded-full bg-base-200 p-3 text-base-content/50">
+          <ListFilter size={22} />
+        </div>
+        <h2 className="text-base font-bold">{title}</h2>
+        <p className="max-w-md text-sm text-base-content/60">{children}</p>
+      </div>
+    </section>
+  );
+}
+
+interface TunnelCardProps {
+  tunnel: TunnelView;
+  checked: boolean;
+  isBusy: boolean;
+  onToggle: (id: string) => void;
+  onStart: (id: string) => void;
+  onStop: (id: string) => void;
+  onRemove: (tunnel: TunnelView) => void;
+}
+
+/**
+ * トンネル 1 件の操作カードを表示する
+ */
+function TunnelCard({
+  tunnel,
+  checked,
+  isBusy,
+  onToggle,
+  onStart,
+  onStop,
+  onRemove,
+}: TunnelCardProps): ReactElement {
+  const running = tunnel.status?.state === "running";
+  const status = tunnel.status?.state ?? "idle";
+
+  return (
+    <article
+      className={`flex h-full flex-col rounded-lg border bg-base-100 shadow-sm transition ${
+        checked
+          ? "border-primary ring-2 ring-primary/20"
+          : "border-base-300 hover:border-base-content/20"
+      }`}
+    >
+      <div className="flex h-full flex-col gap-4 p-5">
+        <div className="flex items-start justify-between gap-3">
+          <label className="flex min-w-0 cursor-pointer items-start gap-3">
+            <input
+              type="checkbox"
+              className="checkbox checkbox-primary checkbox-sm mt-1"
+              checked={checked}
+              onChange={() => onToggle(tunnel.id)}
+            />
+            <span className="min-w-0">
+              <span className="block truncate text-base leading-6 font-bold">{tunnel.id}</span>
+              <span className="mt-0.5 block truncate text-xs text-base-content/50">
+                {tunnel.sourcePath}
+              </span>
+            </span>
+          </label>
+          <StatusBadge status={status} />
+        </div>
+
+        <p className="min-h-10 text-sm leading-5 text-base-content/60">
+          {tunnel.description ?? "No description"}
+        </p>
+
+        <TagList tags={tunnel.tags} />
+        <EndpointList tunnel={tunnel} />
+
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <div className="rounded-md border border-base-300 bg-base-200/40 px-3 py-2">
+            <div className="font-semibold text-base-content/50">Source</div>
+            <div className="mt-1 font-mono text-base-content/80">{tunnel.source}</div>
+          </div>
+          <div className="rounded-md border border-base-300 bg-base-200/40 px-3 py-2">
+            <div className="font-semibold text-base-content/50">Runtime</div>
+            <div className="mt-1 font-mono text-base-content/80">
+              {tunnel.status ? `pid ${tunnel.status.pid}` : "not tracked"}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2 text-xs text-base-content/60">
+          <span className="badge badge-ghost badge-sm">
+            {tunnel.timeouts.connectTimeoutSeconds}s connect
+          </span>
+          <span className="badge badge-ghost badge-sm">
+            {tunnel.timeouts.startGraceMilliseconds}ms grace
+          </span>
+        </div>
+
+        <div className="mt-auto flex items-center justify-end gap-2 pt-1">
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={() => onStart(tunnel.id)}
+            disabled={isBusy || running}
+          >
+            <Play size={15} />
+            Start
+          </button>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={() => onStop(tunnel.id)}
+            disabled={isBusy || tunnel.status === null}
+          >
+            <CircleStop size={15} />
+            Stop
+          </button>
+          <IconButton
+            label="設定から削除"
+            className="btn btn-square btn-ghost btn-sm text-error"
+            onClick={() => onRemove(tunnel)}
+            disabled={isBusy}
+          >
+            <Trash2 size={16} />
+          </IconButton>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+interface StatusBadgeProps {
+  status: TunnelStatus;
+}
+
+/**
+ * トンネル状態の badge を表示する
+ */
+function StatusBadge({ status }: StatusBadgeProps): ReactElement {
+  const className =
+    status === "running"
+      ? "badge badge-success badge-sm"
+      : status === "stale"
+        ? "badge badge-warning badge-sm"
+        : "badge badge-ghost badge-sm";
+
+  return <span className={className}>{status}</span>;
+}
+
+interface TagListProps {
+  tags: string[];
+}
+
+/**
+ * タグ一覧を表示する
+ */
+function TagList({ tags }: TagListProps): ReactElement {
+  if (tags.length === 0) {
+    return <div className="min-h-6 text-xs leading-6 text-base-content/50">No tags</div>;
+  }
+
+  return (
+    <div className="flex min-h-6 flex-wrap items-center gap-1">
+      {tags.map((tag) => (
+        <span className="badge badge-primary badge-outline badge-sm" key={tag}>
+          {tag}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+interface EndpointListProps {
+  tunnel: TunnelView;
+}
+
+/**
+ * 接続先情報を表示する
+ */
+function EndpointList({ tunnel }: EndpointListProps): ReactElement {
+  return (
+    <div className="rounded-lg border border-base-300 bg-base-200/40 p-3">
+      <div className="grid gap-2">
+        <EndpointRow icon={<Server size={15} />} label="Local" value={tunnel.local} />
+        <div className="ml-3 h-3 border-l border-base-content/20" aria-hidden="true" />
+        <EndpointRow icon={<ArrowRight size={15} />} label="Remote" value={tunnel.remote} />
+        <div className="ml-3 h-3 border-l border-base-content/20" aria-hidden="true" />
+        <EndpointRow icon={<KeyRound size={15} />} label="SSH" value={tunnel.ssh} />
+      </div>
+    </div>
+  );
+}
+
+interface EndpointRowProps {
+  icon: ReactNode;
+  label: string;
+  value: string;
+}
+
+/**
+ * 接続先情報の 1 行を表示する
+ */
+function EndpointRow({ icon, label, value }: EndpointRowProps): ReactElement {
+  return (
+    <div className="grid grid-cols-[1.5rem_4.25rem_minmax(0,1fr)] items-center gap-2 text-sm">
+      <span className="text-base-content/50">{icon}</span>
+      <span className="font-semibold text-base-content/60">{label}</span>
+      <span className="truncate font-mono text-xs text-base-content/90" title={value}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+interface TrackedPanelProps {
+  dashboard: DashboardState | null;
+  isBusy: boolean;
+  onStop: (id: string) => void;
+}
+
+/**
+ * 状態ファイルで追跡中のトンネルを表示する
+ */
+function TrackedPanel({ dashboard, isBusy, onStop }: TrackedPanelProps): ReactElement | null {
+  if (dashboard === null || dashboard.trackedTunnels.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="rounded-lg border border-base-300 bg-base-100 shadow-sm">
+      <div className="flex flex-col gap-3 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Activity className="text-primary" size={18} />
+            <h2 className="text-base font-bold">Tracked runtime</h2>
+          </div>
+          <span className="badge badge-neutral badge-sm">{dashboard.trackedTunnels.length}</span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="table table-sm">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Endpoint</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {dashboard.trackedTunnels.map((tracked) => (
+                <tr key={tracked.id}>
+                  <td className="font-bold">{tracked.id}</td>
+                  <td className="max-w-md truncate font-mono text-xs">
+                    {tracked.local} {" -> "} {tracked.remote}
+                  </td>
+                  <td>
+                    <StatusBadge status={tracked.status.state} />
+                  </td>
+                  <td className="text-right">
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-xs"
+                      onClick={() => onStop(tracked.id)}
+                      disabled={isBusy}
+                    >
+                      <CircleStop size={13} />
+                      Stop
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+interface TunnelFormProps {
+  form: TunnelFormState;
+  isBusy: boolean;
+  onChange: (field: keyof TunnelFormState, value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}
+
+/**
+ * 設定追加フォームを表示する
+ */
+function TunnelForm({ form, isBusy, onChange, onSubmit }: TunnelFormProps): ReactElement {
+  return (
+    <form className="rounded-lg border border-base-300 bg-base-100 shadow-sm" onSubmit={onSubmit}>
+      <div className="flex flex-col gap-4 p-5">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <CirclePlus className="text-primary" size={18} />
+            <h2 className="text-base font-bold">Add tunnel</h2>
+          </div>
+          <span className="badge badge-outline badge-sm">{form.scope}</span>
+        </div>
+
+        <div className="join w-full rounded-md bg-base-200/60 p-1">
+          <button
+            type="button"
+            className={`btn btn-sm join-item flex-1 ${
+              form.scope === "local" ? "btn-primary" : "btn-ghost"
+            }`}
+            onClick={() => onChange("scope", "local")}
+          >
+            Local
+          </button>
+          <button
+            type="button"
+            className={`btn btn-sm join-item flex-1 ${
+              form.scope === "global" ? "btn-primary" : "btn-ghost"
+            }`}
+            onClick={() => onChange("scope", "global")}
+          >
+            Global
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-3 border-t border-base-300 pt-4">
+          <h3 className="text-xs font-bold uppercase tracking-wide text-base-content/50">
+            Identity
+          </h3>
+          <TextField
+            label="ID"
+            value={form.id}
+            onChange={(value) => onChange("id", value)}
+            required
+          />
+          <TextField
+            label="Description"
+            value={form.description}
+            onChange={(value) => onChange("description", value)}
+          />
+          <TextField
+            label="Tags"
+            value={form.tags}
+            onChange={(value) => onChange("tags", value)}
+            placeholder="dev,project-a"
+          />
+        </div>
+
+        <div className="flex flex-col gap-3 border-t border-base-300 pt-4">
+          <h3 className="text-xs font-bold uppercase tracking-wide text-base-content/50">
+            Routing
+          </h3>
+          <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+            <TextField
+              label="Local host"
+              value={form.localHost}
+              onChange={(value) => onChange("localHost", value)}
+              required
+            />
+            <TextField
+              label="Local port"
+              value={form.localPort}
+              onChange={(value) => onChange("localPort", value)}
+              inputMode="numeric"
+              required
+            />
+          </div>
+          <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+            <TextField
+              label="Remote host"
+              value={form.remoteHost}
+              onChange={(value) => onChange("remoteHost", value)}
+              required
+            />
+            <TextField
+              label="Remote port"
+              value={form.remotePort}
+              onChange={(value) => onChange("remotePort", value)}
+              inputMode="numeric"
+              required
+            />
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-3 border-t border-base-300 pt-4">
+          <h3 className="text-xs font-bold uppercase tracking-wide text-base-content/50">SSH</h3>
+          <TextField
+            label="SSH user"
+            value={form.sshUser}
+            onChange={(value) => onChange("sshUser", value)}
+            required
+          />
+          <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+            <TextField
+              label="SSH host"
+              value={form.sshHost}
+              onChange={(value) => onChange("sshHost", value)}
+              required
+            />
+            <TextField
+              label="SSH port"
+              value={form.sshPort}
+              onChange={(value) => onChange("sshPort", value)}
+              inputMode="numeric"
+            />
+          </div>
+          <TextField
+            label="Identity file"
+            value={form.identityFile}
+            onChange={(value) => onChange("identityFile", value)}
+            placeholder="~/.ssh/id_ed25519"
+          />
+        </div>
+
+        <button className="btn btn-primary btn-sm w-full" type="submit" disabled={isBusy}>
+          <CirclePlus size={16} />
+          Add tunnel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+interface TextFieldProps {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  inputMode?: "text" | "numeric";
+  required?: boolean;
+  disabled?: boolean;
+}
+
+/**
+ * ラベル付き入力欄を表示する
+ */
+function TextField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  inputMode = "text",
+  required = false,
+  disabled = false,
+}: TextFieldProps): ReactElement {
+  return (
+    <label className="form-control w-full">
+      <div className="label py-1">
+        <span className="label-text text-xs font-semibold">{label}</span>
+      </div>
+      <input
+        className="input input-bordered input-sm w-full text-sm"
+        value={value}
+        onChange={(event: ChangeEvent<HTMLInputElement>) => onChange(event.target.value)}
+        placeholder={placeholder}
+        inputMode={inputMode}
+        required={required}
+        disabled={disabled}
+      />
+    </label>
+  );
+}
+
+interface ConfirmRemoveModalProps {
+  tunnel: TunnelView | null;
+  isBusy: boolean;
+  onCancel: () => void;
+  onConfirm: (tunnel: TunnelView) => void;
+}
+
+/**
+ * トンネル設定削除の確認モーダルを表示する
+ */
+function ConfirmRemoveModal({
+  tunnel,
+  isBusy,
+  onCancel,
+  onConfirm,
+}: ConfirmRemoveModalProps): ReactElement | null {
+  if (tunnel === null) {
+    return null;
+  }
+
+  return (
+    <div className="modal modal-open" role="dialog" aria-modal="true">
+      <div className="modal-box">
+        <h3 className="text-lg font-bold">Remove tunnel</h3>
+        <p className="py-4">
+          {tunnel.id} を {tunnel.source} 設定から削除します。この操作は設定ファイルを書き換えます。
+        </p>
+        <div className="modal-action">
+          <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={isBusy}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn btn-error"
+            onClick={() => onConfirm(tunnel)}
+            disabled={isBusy}
+          >
+            Remove
+          </button>
+        </div>
+      </div>
+      <button className="modal-backdrop" type="button" onClick={onCancel} disabled={isBusy}>
+        close
+      </button>
+    </div>
+  );
+}
+
+/**
+ * トンネル一覧を画面上の絞り込み条件で抽出する
+ */
+function filterTunnels(tunnels: TunnelView[], filters: TunnelFilters): TunnelView[] {
+  const query = filters.query.trim().toLowerCase();
+
+  return tunnels.filter((tunnel) => {
+    const status = tunnelStatus(tunnel);
+    const matchesStatus = filters.status === "all" || filters.status === status;
+    const matchesScope = filters.scope === "all" || filters.scope === tunnel.source;
+    const matchesQuery = query.length === 0 || tunnelContainsQuery(tunnel, query);
+
+    return matchesStatus && matchesScope && matchesQuery;
+  });
+}
+
+/**
+ * 絞り込み条件が初期状態から変更されているか判定する
+ */
+function hasActiveTunnelFilters(filters: TunnelFilters): boolean {
+  return (
+    filters.query.trim().length > 0 ||
+    filters.status !== initialFilters.status ||
+    filters.scope !== initialFilters.scope
+  );
+}
+
+/**
+ * トンネルの表示用状態を統一する
+ */
+function tunnelStatus(tunnel: TunnelView): TunnelStatus {
+  return tunnel.status?.state ?? "idle";
+}
+
+/**
+ * トンネルが検索語を含むか判定する
+ */
+function tunnelContainsQuery(tunnel: TunnelView, query: string): boolean {
+  const fields = [
+    tunnel.id,
+    tunnel.description ?? "",
+    tunnel.local,
+    tunnel.remote,
+    tunnel.ssh,
+    tunnel.source,
+    tunnel.sourcePath,
+    ...tunnel.tags,
+  ];
+
+  return fields.some((field) => field.toLowerCase().includes(query));
+}
+
+/**
+ * ダッシュボードの集計値を算出する
+ */
+function calculateStats(dashboard: DashboardState | null): DashboardStats {
+  if (dashboard === null) {
+    return { configured: 0, running: 0, stale: 0 };
+  }
+
+  return {
+    configured: dashboard.tunnels.length,
+    running: dashboard.trackedTunnels.filter((tracked) => tracked.status.state === "running")
+      .length,
+    stale: dashboard.trackedTunnels.filter((tracked) => tracked.status.state === "stale").length,
+  };
+}
+
+/**
+ * フォーム入力を command 入力へ変換する
+ */
+function formToTunnelInput(form: TunnelFormState): TunnelInput {
+  return {
+    id: requireText(form.id, "ID"),
+    description: optionalText(form.description),
+    tags: parseTags(form.tags),
+    localHost: requireText(form.localHost, "Local host"),
+    localPort: parsePort(form.localPort, "Local port", true),
+    remoteHost: requireText(form.remoteHost, "Remote host"),
+    remotePort: parsePort(form.remotePort, "Remote port", true),
+    sshUser: requireText(form.sshUser, "SSH user"),
+    sshHost: requireText(form.sshHost, "SSH host"),
+    sshPort: parsePort(form.sshPort, "SSH port", false),
+    identityFile: optionalText(form.identityFile),
+  };
+}
+
+/**
+ * 必須文字列を検証して返す
+ */
+function requireText(value: string, label: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    throw new Error(`${label} は必須です`);
+  }
+
+  return trimmed;
+}
+
+/**
+ * 任意文字列を空値なら null へ変換する
+ */
+function optionalText(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? null : trimmed;
+}
+
+/**
+ * カンマ区切りタグ入力を配列へ変換する
+ */
+function parseTags(value: string): string[] {
+  if (value.trim().length === 0) {
+    return [];
+  }
+
+  return value
+    .split(",")
+    .map((tag) => tag.trim().toLowerCase())
+    .filter((tag) => tag.length > 0);
+}
+
+/**
+ * ポート番号入力を数値へ変換する
+ */
+function parsePort(value: string, label: string, required: true): number;
+function parsePort(value: string, label: string, required: false): number | null;
+function parsePort(value: string, label: string, required: boolean): number | null {
+  const trimmed = value.trim();
+  if (trimmed.length === 0 && !required) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    throw new Error(`${label} は 1 から 65535 の数値で入力してください`);
+  }
+
+  return parsed;
+}
+
+/**
+ * パス入力を command 入力へ正規化する
+ */
+function normalizePathSelection(paths: PathSelection): PathSelection {
+  return {
+    localConfigPath: paths.localConfigPath.trim(),
+    globalConfigPath: paths.globalConfigPath.trim(),
+    useGlobal: paths.useGlobal,
+    statePath: paths.statePath.trim(),
+  };
+}
+
+/**
+ * 現在存在するトンネルだけを選択状態として残す
+ */
+function keepExistingSelections(current: Set<string>, tunnels: TunnelView[]): Set<string> {
+  const ids = new Set(tunnels.map((tunnel) => tunnel.id));
+  return new Set(Array.from(current).filter((id) => ids.has(id)));
+}
+
+/**
+ * 指定 ID の選択状態を切り替える
+ */
+function toggleId(current: Set<string>, id: string): Set<string> {
+  const next = new Set(current);
+  if (next.has(id)) {
+    next.delete(id);
+  } else {
+    next.add(id);
+  }
+
+  return next;
+}
+
+/**
+ * 指定 ID を選択状態から除外する
+ */
+function removeSelection(current: Set<string>, id: string): Set<string> {
+  const next = new Set(current);
+  next.delete(id);
+  return next;
+}
+
+/**
+ * 操作結果を通知文へ変換する
+ */
+function operationMessage(report: OperationReport): AppMessage {
+  const successCount = report.succeeded.length;
+  const failureCount = report.failed.length;
+
+  if (failureCount === 0) {
+    return {
+      kind: "success",
+      text: `${successCount} 件の操作が完了しました`,
+    };
+  }
+
+  const failed = report.failed.map((failure) => `${failure.id}: ${failure.message}`).join(" / ");
+  return {
+    kind: successCount > 0 ? "info" : "error",
+    text: `${successCount} 件成功、${failureCount} 件失敗しました。${failed}`,
+  };
+}
+
+/**
+ * unknown のエラー値を表示文字列へ変換する
+ */
+function stringifyError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  return "予期しないエラーが発生しました";
+}
+
+createRoot(document.getElementById("root") as HTMLElement).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);

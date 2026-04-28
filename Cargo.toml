@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/fwd-deck-app/src-tauri",
     "crates/fwd-deck-core",
     "crates/fwd-deck-cli",
 ]
@@ -15,6 +16,9 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 inquire = "0.9"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = "2.10.3"
+tauri-build = "2.5.6"
 tempfile = "3"
 thiserror = "2"
 toml = "0.8"

@@ -292,6 +292,18 @@ task test
 task lint
 ```
 
+macOS アプリは `apps/fwd-deck-app` にあります。
+Tauri の Rust command 層は `fwd-deck-core` を直接利用し、フロントエンドは React / Vite / TypeScript で構成しています。
+
+```sh
+task app:install
+task app:dev
+task app:build:web
+task app:lint
+task app:format:check
+task app:check
+```
+
 ローカルの `fwd-deck.toml` を使って CLI の動作を確認する場合は、次の task を使います。
 
 ```sh
@@ -308,6 +320,9 @@ CI でも同じ品質確認を行います。
 
 ```sh
 cargo fmt --all --check
+npm --prefix apps/fwd-deck-app run format:check
+npm --prefix apps/fwd-deck-app run build
+npm --prefix apps/fwd-deck-app run lint
 cargo test --workspace
 cargo clippy --workspace -- -D warnings
 ```
@@ -322,6 +337,7 @@ cargo run -p fwd-deck-cli --bin fwd-deck -- list
 ワークスペースは CLI と core crate に分かれています。
 
 ```text
+apps/fwd-deck-app   Tauri app and React frontend
 crates/fwd-deck-cli   CLI entrypoint and user interaction
 crates/fwd-deck-core  Configuration, state, and tunnel runtime logic
 ```

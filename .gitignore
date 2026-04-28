@@ -1,2 +1,7 @@
 /target/
 fwd-deck.toml
+apps/fwd-deck-app/dist/
+apps/fwd-deck-app/node_modules/
+apps/fwd-deck-app/src-tauri/assets/fwd-deck.png
+!apps/fwd-deck-app/src-tauri/icons/
+!apps/fwd-deck-app/src-tauri/icons/**

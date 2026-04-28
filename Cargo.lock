@@ -243,6 +243,7 @@ dependencies = [
  "clap_complete",
  "fwd-deck-core",
  "inquire",
+ "tempfile",
  "thiserror",
 ]
 

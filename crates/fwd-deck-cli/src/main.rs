@@ -8,7 +8,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 use fwd_deck_core::{
     ConfigEditError, ConfigPaths, ConfigSourceKind, DEFAULT_LOCAL_HOST, EffectiveConfig,
     ProcessState, ResolvedTunnelConfig, StartedTunnel, StoppedTunnel, TimeoutConfig, TunnelConfig,
@@ -113,6 +114,11 @@ enum Command {
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+    #[command(about = "Generate shell completion script")]
+    Completion {
+        #[arg(value_enum, help = "Shell to generate completions for")]
+        shell: Shell,
     },
     #[command(about = "Validate configuration files")]
     Validate,
@@ -236,6 +242,7 @@ fn run() -> Result<ExitCode, CliError> {
             let paths = resolve_edit_config_paths(&cli)?;
             config_command(&paths, command.clone())
         }
+        Command::Completion { shell } => completion_command(*shell),
         Command::Validate => {
             let config = load_config(&cli)?;
             Ok(print_validation(&config))
@@ -290,6 +297,16 @@ fn resolve_state_path(state_path: Option<PathBuf>) -> Result<PathBuf, CliError> 
     state_path
         .or_else(default_state_file_path)
         .ok_or(CliError::MissingStateHome)
+}
+
+/// シェル補完スクリプトを生成する
+fn completion_command(shell: Shell) -> Result<ExitCode, CliError> {
+    let mut command = Cli::command();
+    let binary_name = command.get_name().to_owned();
+
+    clap_complete::generate(shell, &mut command, binary_name, &mut io::stdout());
+
+    Ok(ExitCode::SUCCESS)
 }
 
 /// 設定編集コマンドを実行する

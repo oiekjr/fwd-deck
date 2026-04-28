@@ -25,6 +25,7 @@ fwd-deck config add
 fwd-deck config add --scope local
 fwd-deck config remove
 fwd-deck config remove --scope global
+fwd-deck completion zsh
 fwd-deck validate
 ```
 
@@ -46,6 +47,22 @@ cargo run -p fwd-deck-cli --bin fwd-deck -- validate
 `recover` は、状態ファイル上で stale になっているトンネルを現在の設定に基づいて再起動します。
 `watch` は、状態ファイル上で追跡中のトンネルを監視し、stale になった場合に自動で再起動します。
 `config add` と `config remove` は、グローバル設定またはローカル設定を選択して対話形式で編集します。
+`completion` は、指定した shell 用の補完スクリプトを標準出力へ生成します。
+
+zsh で補完を有効にする場合は、以下のように生成した補完スクリプトを `fpath` 配下へ配置します。
+
+```sh
+mkdir -p ~/.zfunc
+fwd-deck completion zsh > ~/.zfunc/_fwd-deck
+```
+
+`~/.zshrc` で `~/.zfunc` を `fpath` に追加し、`compinit` を有効にします。
+
+```sh
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit
+compinit
+```
 
 ## 設定ファイル
 
@@ -110,6 +127,7 @@ task --list
 task check
 task config:add
 task config:remove
+task completion:zsh
 task list
 task recover
 task start:dry-run

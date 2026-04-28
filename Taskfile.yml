@@ -21,6 +21,11 @@ tasks:
     cmds:
       - cargo run -p fwd-deck-cli --bin fwd-deck -- --help
 
+  completion:zsh:
+    desc: zsh 補完スクリプトを表示する
+    cmds:
+      - cargo run -p fwd-deck-cli --bin fwd-deck -- completion zsh
+
   test:
     desc: workspace 全体のテストを実行する
     cmds:

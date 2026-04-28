@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+clap_complete.workspace = true
 fwd-deck-core = { path = "../fwd-deck-core" }
 inquire.workspace = true
 thiserror.workspace = true

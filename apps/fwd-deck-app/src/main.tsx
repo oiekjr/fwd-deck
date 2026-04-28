@@ -1361,8 +1361,7 @@ function DashboardView({
   const [isTrackedPanelCollapsed, setIsTrackedPanelCollapsed] = useState<boolean>(true);
   const hasTrackedRuntime = (dashboard?.trackedTunnels.length ?? 0) > 0;
   const hasSelection = selectedCount > 0;
-  const shouldShowSelectionActionBar =
-    hasSelection || (hasActiveFilters && filteredTunnels.length > 0);
+  const shouldShowSelectionActionBar = hasSelection || filteredTunnels.length > 0;
   const [selectionBarRef, selectionBarHeight] = useMeasuredElementHeight<HTMLDivElement>(
     shouldShowSelectionActionBar,
   );
@@ -2093,7 +2092,7 @@ interface SelectionActionBarProps {
 }
 
 /**
- * 選択中トンネルの一括操作を横長バーで表示する
+ * 表示中または選択中のトンネルに対する一括操作を横長バーで表示する
  */
 function SelectionActionBar({
   isVisible,
@@ -2134,7 +2133,7 @@ function SelectionActionBar({
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <CheckCircle2 className="text-primary" size={18} />
-            <h2 className="text-sm leading-6 font-bold">Selection</h2>
+            <h2 className="text-sm leading-6 font-bold">Bulk actions</h2>
             <span className="badge badge-primary badge-sm">{selectedCount} total selected</span>
             <span className="badge badge-ghost badge-sm">{selectedInViewLabel}</span>
             {hiddenSelectedCount > 0 ? (

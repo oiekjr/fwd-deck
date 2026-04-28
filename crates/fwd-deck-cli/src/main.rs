@@ -268,7 +268,8 @@ fn config_add_command(
 ) -> Result<ExitCode, CliError> {
     let scope = resolve_config_scope(paths, scope)?;
     let path = config_path_for_scope(paths, scope)?;
-    let tunnel = prompt_tunnel_config()?;
+    let config = load_effective_config(paths)?;
+    let tunnel = prompt_tunnel_config(&config)?;
 
     add_tunnel_to_config_file(&path, scope, tunnel)?;
     println!(
@@ -758,12 +759,12 @@ fn prompt_config_scope(paths: &ConfigPaths) -> Result<ConfigSourceKind, InquireE
 }
 
 /// 追加するトンネル設定を対話的に入力する
-fn prompt_tunnel_config() -> Result<TunnelConfig, CliError> {
-    let id = prompt_required_text("Tunnel id:")?;
+fn prompt_tunnel_config(config: &EffectiveConfig) -> Result<TunnelConfig, CliError> {
+    let id = prompt_available_tunnel_id(config)?;
     let description = prompt_optional_text("Description:")?;
     let tags = prompt_tags()?;
     let local_host = Some(prompt_local_host()?);
-    let local_port = prompt_port("Local port:", None)?;
+    let local_port = prompt_available_local_port(config, &id)?;
     let remote_host = prompt_required_text("Remote host:")?;
     let remote_port = prompt_port("Remote port:", None)?;
     let ssh_user = prompt_required_text("SSH user:")?;
@@ -783,6 +784,78 @@ fn prompt_tunnel_config() -> Result<TunnelConfig, CliError> {
         ssh_host,
         ssh_port,
         identity_file,
+    })
+}
+
+/// 既存設定と重複しないトンネル ID の入力を受け取る
+fn prompt_available_tunnel_id(config: &EffectiveConfig) -> Result<String, CliError> {
+    loop {
+        let id = prompt_required_text("Tunnel id:")?;
+
+        if let Some(conflict) = find_tunnel_id_conflict(config, &id) {
+            eprintln!(
+                "{}",
+                red(
+                    &format!(
+                        "Tunnel id is already used: {} ({}: {})",
+                        conflict.tunnel.id,
+                        conflict.source.kind,
+                        conflict.source.path.display()
+                    ),
+                    OutputStream::Stderr
+                )
+            );
+            continue;
+        }
+
+        return Ok(id);
+    }
+}
+
+/// トンネル ID が重複する既存トンネルを取得する
+fn find_tunnel_id_conflict<'a>(
+    config: &'a EffectiveConfig,
+    tunnel_id: &str,
+) -> Option<&'a ResolvedTunnelConfig> {
+    config
+        .tunnels
+        .iter()
+        .find(|resolved| resolved.tunnel.id == tunnel_id)
+}
+
+/// 既存設定と重複しない local_port の入力を受け取る
+fn prompt_available_local_port(config: &EffectiveConfig, tunnel_id: &str) -> Result<u16, CliError> {
+    loop {
+        let local_port = prompt_port("Local port:", None)?;
+
+        if let Some(conflict) = find_local_port_conflict(config, tunnel_id, local_port) {
+            eprintln!(
+                "{}",
+                red(
+                    &format!(
+                        "Local port is already used by tunnel: {} ({}:{})",
+                        conflict.tunnel.id,
+                        conflict.tunnel.effective_local_host(),
+                        conflict.tunnel.local_port
+                    ),
+                    OutputStream::Stderr
+                )
+            );
+            continue;
+        }
+
+        return Ok(local_port);
+    }
+}
+
+/// local_port が重複する既存トンネルを取得する
+fn find_local_port_conflict<'a>(
+    config: &'a EffectiveConfig,
+    tunnel_id: &str,
+    local_port: u16,
+) -> Option<&'a ResolvedTunnelConfig> {
+    config.tunnels.iter().find(|resolved| {
+        resolved.tunnel.id != tunnel_id && resolved.tunnel.local_port == local_port
     })
 }
 
@@ -1375,5 +1448,90 @@ fn is_terminal(stream: OutputStream) -> bool {
     match stream {
         OutputStream::Stdout => io::stdout().is_terminal(),
         OutputStream::Stderr => io::stderr().is_terminal(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fwd_deck_core::{ConfigSource, config::LoadedConfigFile};
+
+    use super::*;
+
+    /// 既存トンネルと同じ ID が検出されることを検証する
+    #[test]
+    fn find_tunnel_id_conflict_detects_existing_tunnel() {
+        let config = effective_config_with_tunnels(vec![tunnel("db", 15432)]);
+
+        let conflict = find_tunnel_id_conflict(&config, "db");
+
+        assert_eq!(
+            conflict.map(|resolved| resolved.tunnel.id.as_str()),
+            Some("db")
+        );
+    }
+
+    /// 未使用の ID は重複扱いしないことを検証する
+    #[test]
+    fn find_tunnel_id_conflict_returns_none_for_new_tunnel() {
+        let config = effective_config_with_tunnels(vec![tunnel("db", 15432)]);
+
+        let conflict = find_tunnel_id_conflict(&config, "cache");
+
+        assert!(conflict.is_none());
+    }
+
+    /// 同じ local_port を使う別 ID のトンネルが検出されることを検証する
+    #[test]
+    fn find_local_port_conflict_detects_other_tunnel() {
+        let config = effective_config_with_tunnels(vec![tunnel("db", 15432)]);
+
+        let conflict = find_local_port_conflict(&config, "cache", 15432);
+
+        assert_eq!(
+            conflict.map(|resolved| resolved.tunnel.id.as_str()),
+            Some("db")
+        );
+    }
+
+    /// 同一 ID の既存トンネルは上書き候補として重複扱いしないことを検証する
+    #[test]
+    fn find_local_port_conflict_ignores_same_tunnel_id() {
+        let config = effective_config_with_tunnels(vec![tunnel("db", 15432)]);
+
+        let conflict = find_local_port_conflict(&config, "db", 15432);
+
+        assert!(conflict.is_none());
+    }
+
+    /// テスト用の統合済み設定を生成する
+    fn effective_config_with_tunnels(tunnels: Vec<TunnelConfig>) -> EffectiveConfig {
+        let source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml"));
+        let resolved_tunnels = tunnels
+            .iter()
+            .cloned()
+            .map(|tunnel| ResolvedTunnelConfig::new(source.clone(), tunnel))
+            .collect::<Vec<_>>();
+
+        EffectiveConfig::new(
+            vec![LoadedConfigFile::new(source, tunnels)],
+            resolved_tunnels,
+        )
+    }
+
+    /// テスト用のトンネル設定を生成する
+    fn tunnel(id: &str, local_port: u16) -> TunnelConfig {
+        TunnelConfig {
+            id: id.to_owned(),
+            description: None,
+            tags: Vec::new(),
+            local_host: None,
+            local_port,
+            remote_host: "db.internal".to_owned(),
+            remote_port: 5432,
+            ssh_user: "user".to_owned(),
+            ssh_host: "bastion.example.com".to_owned(),
+            ssh_port: None,
+            identity_file: None,
+        }
     }
 }

@@ -53,6 +53,7 @@ cargo run -p fwd-deck-cli --bin fwd-deck -- validate
 `local_port` が `1024` 未満の場合、`validate` は権限が必要になる可能性を warning として表示します。
 `fwd-deck.toml` はローカル環境用の設定として git 管理から除外しています。
 `config add` は対象ファイルが存在しない場合に新規作成します。
+`config add` は、既存の有効設定と重複する `id` と `local_port` を入力時に拒否します。
 `config remove` は対象ファイル内のトンネルだけを削除対象として表示します。
 
 ```sh

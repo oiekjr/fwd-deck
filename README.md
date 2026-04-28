@@ -13,6 +13,8 @@ fwd-deck start --all
 fwd-deck start --tag dev --tag project-a
 fwd-deck recover
 fwd-deck recover dev-db
+fwd-deck watch
+fwd-deck watch dev-db --interval-seconds 5
 fwd-deck status
 fwd-deck stop
 fwd-deck stop dev-db
@@ -38,6 +40,7 @@ cargo run -p fwd-deck-cli --bin fwd-deck -- validate
 `list` と `start` は `--tag` を複数指定でき、指定したタグをすべて持つトンネルだけを対象にします。
 `stop` の対話選択には、追跡中のトンネルをまとめて停止する選択肢も表示されます。
 `recover` は、状態ファイル上で stale になっているトンネルを現在の設定に基づいて再起動します。
+`watch` は、状態ファイル上で追跡中のトンネルを監視し、stale になった場合に自動で再起動します。
 `config add` と `config remove` は、グローバル設定またはローカル設定を選択して対話形式で編集します。
 
 ## 設定ファイル
@@ -106,5 +109,6 @@ task config:remove
 task list
 task recover
 task status
+task watch
 task validate
 ```

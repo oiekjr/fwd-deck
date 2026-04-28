@@ -62,6 +62,14 @@ tasks:
     cmds:
       - cargo run -p fwd-deck-cli --bin fwd-deck -- recover
 
+  watch:
+    desc: 追跡中トンネルを監視して stale 時に再起動する
+    preconditions:
+      - sh: test -f fwd-deck.toml
+        msg: fwd-deck.toml is required. Create it from fwd-deck.example.toml.
+    cmds:
+      - cargo run -p fwd-deck-cli --bin fwd-deck -- watch
+
   status:
     desc: status を実行する
     cmds:

@@ -4,7 +4,8 @@ use std::{
     io::{self, IsTerminal},
     path::{Path, PathBuf},
     process::ExitCode,
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -19,6 +20,8 @@ use fwd_deck_core::{
 };
 use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
 use thiserror::Error;
+
+const DEFAULT_WATCH_INTERVAL_SECONDS: u64 = 5;
 
 /// fwd-deck の CLI 引数を表現する
 #[derive(Debug, Parser)]
@@ -80,6 +83,18 @@ enum Command {
     Recover {
         #[arg(value_name = "ID", help = "Tunnel IDs to recover")]
         ids: Vec<String>,
+    },
+    #[command(about = "Watch tracked tunnels and recover stale tunnels")]
+    Watch {
+        #[arg(value_name = "ID", help = "Tunnel IDs to watch")]
+        ids: Vec<String>,
+        #[arg(
+            long,
+            default_value_t = DEFAULT_WATCH_INTERVAL_SECONDS,
+            value_parser = clap::value_parser!(u64).range(1..),
+            help = "Watch interval in seconds"
+        )]
+        interval_seconds: u64,
     },
     #[command(about = "Show tracked tunnel status")]
     Status,
@@ -184,6 +199,14 @@ fn run() -> Result<ExitCode, CliError> {
             let config = load_config(&cli)?;
             let state_path = resolve_state_path(state_path)?;
             recover_command(&config, &state_path, ids.clone())
+        }
+        Command::Watch {
+            ids,
+            interval_seconds,
+        } => {
+            let config = load_config(&cli)?;
+            let state_path = resolve_state_path(state_path)?;
+            watch_command(&config, &state_path, ids.clone(), *interval_seconds)
         }
         Command::Status => {
             let state_path = resolve_state_path(state_path)?;
@@ -609,6 +632,56 @@ fn recover_command(
     }
 
     Ok(exit_code_from_failure(failed))
+}
+
+/// 追跡中トンネルを監視して stale なトンネルを再起動する
+fn watch_command(
+    config: &EffectiveConfig,
+    state_path: &Path,
+    ids: Vec<String>,
+    interval_seconds: u64,
+) -> Result<ExitCode, CliError> {
+    if !config.has_sources() {
+        eprintln!(
+            "{}",
+            red("No configuration files were found.", OutputStream::Stderr)
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+
+    if !print_validation_if_invalid(config) {
+        return Ok(ExitCode::FAILURE);
+    }
+
+    if interval_seconds == 0 {
+        eprintln!(
+            "{}",
+            red(
+                "Watch interval must be greater than or equal to 1 second.",
+                OutputStream::Stderr
+            )
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+
+    if !ids.is_empty() && find_tunnels_by_ids(config, &ids).is_err() {
+        print_unknown_ids(config, &ids);
+        return Ok(ExitCode::FAILURE);
+    }
+
+    print_watch_started(&ids, interval_seconds);
+    let interval = Duration::from_secs(interval_seconds);
+
+    loop {
+        let statuses = tunnel_statuses(state_path)?;
+        let stale_ids = watched_stale_tunnel_ids(&statuses, &ids);
+
+        if !stale_ids.is_empty() {
+            recover_watch_stale_tunnels(config, state_path, &stale_ids)?;
+        }
+
+        thread::sleep(interval);
+    }
 }
 
 /// トンネル状態表示コマンドを実行する
@@ -1063,6 +1136,45 @@ fn stale_tunnel_ids(statuses: &[TunnelRuntimeStatus]) -> Vec<String> {
         .collect()
 }
 
+/// watch 対象の stale なトンネル ID を取得する
+fn watched_stale_tunnel_ids(statuses: &[TunnelRuntimeStatus], ids: &[String]) -> Vec<String> {
+    statuses
+        .iter()
+        .filter(|status| status.process_state == ProcessState::Stale)
+        .filter(|status| ids.is_empty() || ids.contains(&status.state.id))
+        .map(|status| status.state.id.clone())
+        .collect()
+}
+
+/// watch で検出した stale なトンネルを再起動する
+fn recover_watch_stale_tunnels(
+    config: &EffectiveConfig,
+    state_path: &Path,
+    ids: &[String],
+) -> Result<(), CliError> {
+    for id in ids {
+        let Some(tunnel) = find_tunnel_by_id(config, id) else {
+            eprintln!(
+                "{}",
+                red(
+                    &format!("Configured tunnel not found for stale state: {id}"),
+                    OutputStream::Stderr
+                )
+            );
+            continue;
+        };
+
+        match start_tunnel(tunnel, state_path) {
+            Ok(started) => print_started_tunnel(&started),
+            Err(error) => {
+                eprintln!("{}", red(&error.to_string(), OutputStream::Stderr));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// 未知の ID を表示する
 fn print_unknown_ids(config: &EffectiveConfig, ids: &[String]) {
     let known_ids = config
@@ -1079,6 +1191,18 @@ fn print_unknown_ids(config: &EffectiveConfig, ids: &[String]) {
             );
         }
     }
+}
+
+/// watch の開始を表示する
+fn print_watch_started(ids: &[String], interval_seconds: u64) {
+    let target = if ids.is_empty() {
+        "tracked tunnels".to_owned()
+    } else {
+        format!("tracked tunnels: {}", ids.join(", "))
+    };
+    let message = format!("Watching {target} every {interval_seconds}s. Press Ctrl-C to stop.");
+
+    println!("{}", green(&message, OutputStream::Stdout));
 }
 
 /// 起動したトンネルを表示する
@@ -1454,7 +1578,7 @@ fn is_terminal(stream: OutputStream) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use fwd_deck_core::{ConfigSource, config::LoadedConfigFile};
+    use fwd_deck_core::{ConfigSource, TunnelState, config::LoadedConfigFile};
 
     use super::*;
 
@@ -1504,6 +1628,34 @@ mod tests {
         assert!(conflict.is_none());
     }
 
+    /// watch 対象未指定時に stale なトンネルがすべて対象になることを検証する
+    #[test]
+    fn watched_stale_tunnel_ids_returns_all_stale_tunnels_without_filter() {
+        let statuses = vec![
+            runtime_status("db", ProcessState::Stale),
+            runtime_status("cache", ProcessState::Running),
+            runtime_status("search", ProcessState::Stale),
+        ];
+
+        let ids = watched_stale_tunnel_ids(&statuses, &[]);
+
+        assert_eq!(ids, vec!["db".to_owned(), "search".to_owned()]);
+    }
+
+    /// watch 対象指定時に指定 ID の stale なトンネルだけが対象になることを検証する
+    #[test]
+    fn watched_stale_tunnel_ids_filters_by_requested_ids() {
+        let statuses = vec![
+            runtime_status("db", ProcessState::Stale),
+            runtime_status("cache", ProcessState::Stale),
+            runtime_status("search", ProcessState::Running),
+        ];
+
+        let ids = watched_stale_tunnel_ids(&statuses, &["cache".to_owned(), "search".to_owned()]);
+
+        assert_eq!(ids, vec!["cache".to_owned()]);
+    }
+
     /// テスト用の統合済み設定を生成する
     fn effective_config_with_tunnels(tunnels: Vec<TunnelConfig>) -> EffectiveConfig {
         let source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml"));
@@ -1517,6 +1669,27 @@ mod tests {
             vec![LoadedConfigFile::new(source, tunnels)],
             resolved_tunnels,
         )
+    }
+
+    /// テスト用のトンネル実行状態を生成する
+    fn runtime_status(id: &str, process_state: ProcessState) -> TunnelRuntimeStatus {
+        TunnelRuntimeStatus {
+            state: TunnelState {
+                id: id.to_owned(),
+                pid: 1000,
+                local_host: "127.0.0.1".to_owned(),
+                local_port: 15432,
+                remote_host: "db.internal".to_owned(),
+                remote_port: 5432,
+                ssh_user: "user".to_owned(),
+                ssh_host: "bastion.example.com".to_owned(),
+                ssh_port: None,
+                source_kind: ConfigSourceKind::Local,
+                source_path: PathBuf::from("fwd-deck.toml"),
+                started_at_unix_seconds: 1_700_000_000,
+            },
+            process_state,
+        }
     }
 
     /// テスト用のトンネル設定を生成する

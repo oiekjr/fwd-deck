@@ -16,6 +16,7 @@ import {
   KeyRound,
   ListFilter,
   Loader2,
+  Minus,
   Play,
   RefreshCw,
   Search,
@@ -1739,14 +1740,16 @@ function BulkActionPanel({
           onClick={onSelectVisible}
           disabled={isBusy || visibleCount === 0 || selectedVisibleCount === visibleCount}
         >
+          <CheckCircle2 size={16} />
           Select visible
         </button>
         <button
           type="button"
-          className="btn btn-ghost btn-sm"
+          className="btn btn-outline btn-sm"
           onClick={onDeselectVisible}
           disabled={isBusy || selectedVisibleCount === 0}
         >
+          <Minus size={16} />
           Deselect
         </button>
       </div>
@@ -1772,10 +1775,11 @@ function BulkActionPanel({
         </button>
         <button
           type="button"
-          className="btn btn-ghost btn-sm"
+          className="btn btn-outline btn-sm"
           onClick={onClear}
           disabled={isBusy || selectedCount === 0}
         >
+          <X size={16} />
           Clear
         </button>
       </div>

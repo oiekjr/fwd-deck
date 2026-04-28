@@ -17,5 +17,5 @@ pub use config::{
 pub use state::{StateFileError, TunnelState, TunnelStateFile, default_state_file_path};
 pub use tunnel::{
     ProcessState, StartedTunnel, StoppedTunnel, TunnelRuntimeError, TunnelRuntimeStatus,
-    start_tunnel, stop_tunnel, tunnel_statuses,
+    build_ssh_command_args, start_tunnel, stop_tunnel, tunnel_statuses,
 };

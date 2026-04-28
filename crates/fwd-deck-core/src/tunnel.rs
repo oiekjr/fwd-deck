@@ -227,6 +227,11 @@ pub fn stop_tunnel(id: &str, state_path: &Path) -> Result<StoppedTunnel, TunnelR
     })
 }
 
+/// SSH 起動コマンドの引数を構築する
+pub fn build_ssh_command_args(resolved: &ResolvedTunnelConfig) -> Vec<String> {
+    build_ssh_args(resolved)
+}
+
 /// SSH 起動引数を構築する
 fn build_ssh_args(resolved: &ResolvedTunnelConfig) -> Vec<String> {
     let tunnel = &resolved.tunnel;

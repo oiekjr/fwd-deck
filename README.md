@@ -9,6 +9,7 @@ fwd-deck list
 fwd-deck list --tag dev
 fwd-deck start
 fwd-deck start dev-db
+fwd-deck start dev-db --dry-run
 fwd-deck start --all
 fwd-deck start --tag dev --tag project-a
 fwd-deck recover
@@ -18,6 +19,7 @@ fwd-deck watch dev-db --interval-seconds 5
 fwd-deck status
 fwd-deck stop
 fwd-deck stop dev-db
+fwd-deck stop dev-db --dry-run
 fwd-deck stop --all
 fwd-deck config add
 fwd-deck config add --scope local
@@ -36,6 +38,7 @@ cargo run -p fwd-deck-cli --bin fwd-deck -- validate
 ```
 
 `start` と `stop` は、ID を指定しない場合に対話選択を表示します。
+`start --dry-run` と `stop --dry-run` は、実際の起動・停止・状態ファイル更新を行わずに実行予定だけを表示します。
 `start --all` は設定済みのすべてのトンネルを開始し、`stop --all` は追跡中のすべてのトンネルを停止します。
 `start` は local endpoint が使用中の場合、取得できる範囲でそのポートを使っている LISTEN プロセスも表示します。
 `list` と `start` は `--tag` を複数指定でき、指定したタグをすべて持つトンネルだけを対象にします。
@@ -109,7 +112,9 @@ task config:add
 task config:remove
 task list
 task recover
+task start:dry-run
 task status
+task stop:dry-run
 task watch
 task validate
 ```

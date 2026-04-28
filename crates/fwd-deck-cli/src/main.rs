@@ -13,10 +13,10 @@ use fwd_deck_core::{
     ConfigEditError, ConfigPaths, ConfigSourceKind, DEFAULT_LOCAL_HOST, EffectiveConfig,
     ProcessState, ResolvedTunnelConfig, StartedTunnel, StoppedTunnel, TimeoutConfig, TunnelConfig,
     TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport, add_tunnel_to_config_file,
-    default_global_config_path, default_local_config_path, default_state_file_path,
-    filter_tunnels_by_tags, load_effective_config, normalize_tag, read_config_file,
-    remove_tunnel_from_config_file, start_tunnel, stop_tunnel, tag_is_valid, tunnel_statuses,
-    validate_config,
+    build_ssh_command_args, default_global_config_path, default_local_config_path,
+    default_state_file_path, filter_tunnels_by_tags, load_effective_config, normalize_tag,
+    read_config_file, remove_tunnel_from_config_file, start_tunnel, stop_tunnel, tag_is_valid,
+    tunnel_statuses, validate_config,
 };
 use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
 use thiserror::Error;
@@ -78,6 +78,8 @@ enum Command {
         tags: Vec<String>,
         #[arg(long, help = "Start all configured tunnels")]
         all: bool,
+        #[arg(long, help = "Preview start actions without starting ssh")]
+        dry_run: bool,
     },
     #[command(about = "Recover stale tracked tunnels")]
     Recover {
@@ -104,6 +106,8 @@ enum Command {
         ids: Vec<String>,
         #[arg(long, help = "Stop all tracked tunnels")]
         all: bool,
+        #[arg(long, help = "Preview stop actions without stopping processes")]
+        dry_run: bool,
     },
     #[command(about = "Edit configuration files")]
     Config {
@@ -190,10 +194,22 @@ fn run() -> Result<ExitCode, CliError> {
             let config = load_config(&cli)?;
             list_command(&config, tags.clone())
         }
-        Command::Start { ids, tags, all } => {
+        Command::Start {
+            ids,
+            tags,
+            all,
+            dry_run,
+        } => {
             let config = load_config(&cli)?;
             let state_path = resolve_state_path(state_path)?;
-            start_command(&config, &state_path, ids.clone(), tags.clone(), *all)
+            start_command(
+                &config,
+                &state_path,
+                ids.clone(),
+                tags.clone(),
+                *all,
+                *dry_run,
+            )
         }
         Command::Recover { ids } => {
             let config = load_config(&cli)?;
@@ -212,9 +228,9 @@ fn run() -> Result<ExitCode, CliError> {
             let state_path = resolve_state_path(state_path)?;
             status_command(&state_path)
         }
-        Command::Stop { ids, all } => {
+        Command::Stop { ids, all, dry_run } => {
             let state_path = resolve_state_path(state_path)?;
-            stop_command(&state_path, ids.clone(), *all)
+            stop_command(&state_path, ids.clone(), *all, *dry_run)
         }
         Command::Config { command } => {
             let paths = resolve_edit_config_paths(&cli)?;
@@ -454,6 +470,7 @@ fn start_command(
     ids: Vec<String>,
     tags: Vec<String>,
     all: bool,
+    dry_run: bool,
 ) -> Result<ExitCode, CliError> {
     if !config.has_sources() {
         eprintln!(
@@ -530,6 +547,12 @@ fn start_command(
         print_unknown_ids(config, &ids);
         return Ok(ExitCode::FAILURE);
     };
+
+    if dry_run {
+        print_start_dry_run(&tunnels, state_path);
+        return Ok(ExitCode::SUCCESS);
+    }
+
     let mut failed = false;
 
     for tunnel in tunnels {
@@ -708,7 +731,12 @@ fn status_command(state_path: &Path) -> Result<ExitCode, CliError> {
 }
 
 /// トンネル停止コマンドを実行する
-fn stop_command(state_path: &Path, ids: Vec<String>, all: bool) -> Result<ExitCode, CliError> {
+fn stop_command(
+    state_path: &Path,
+    ids: Vec<String>,
+    all: bool,
+    dry_run: bool,
+) -> Result<ExitCode, CliError> {
     let statuses = tunnel_statuses(state_path)?;
 
     if all && !ids.is_empty() {
@@ -741,6 +769,10 @@ fn stop_command(state_path: &Path, ids: Vec<String>, all: bool) -> Result<ExitCo
     if ids.is_empty() {
         println!("No tunnels were selected.");
         return Ok(ExitCode::SUCCESS);
+    }
+
+    if dry_run {
+        return Ok(print_stop_dry_run(&statuses, &ids, state_path));
     }
 
     let mut failed = false;
@@ -1205,6 +1237,103 @@ fn print_watch_started(ids: &[String], interval_seconds: u64) {
     println!("{}", green(&message, OutputStream::Stdout));
 }
 
+/// SSH コマンド引数をシェル表示用の文字列へ変換する
+fn format_ssh_command(args: &[String]) -> String {
+    std::iter::once("ssh".to_owned())
+        .chain(args.iter().map(|arg| shell_quote(arg)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// シェル上で読みやすい単一引数表現へ変換する
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "@%_+=:,./-".contains(character))
+    {
+        return value.to_owned();
+    }
+
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// start の dry-run 結果を表示する
+fn print_start_dry_run(tunnels: &[&ResolvedTunnelConfig], state_path: &Path) {
+    println!("Dry run: no ssh process will be started and state file will not be written.");
+    println!("State file: {}", state_path.display());
+
+    for tunnel in tunnels {
+        print_start_dry_run_tunnel(tunnel);
+    }
+}
+
+/// start dry-run のトンネル単位の結果を表示する
+fn print_start_dry_run_tunnel(resolved: &ResolvedTunnelConfig) {
+    let tunnel = &resolved.tunnel;
+    let local = format!("{}:{}", tunnel.effective_local_host(), tunnel.local_port);
+    let remote = format!("{}:{}", tunnel.remote_host, tunnel.remote_port);
+    let ssh = match tunnel.ssh_port {
+        Some(port) => format!("{}@{}:{}", tunnel.ssh_user, tunnel.ssh_host, port),
+        None => format!("{}@{}", tunnel.ssh_user, tunnel.ssh_host),
+    };
+    let command = format_ssh_command(&build_ssh_command_args(resolved));
+
+    println!("Would start tunnel: {}", tunnel.id);
+    println!("  Local: {local}");
+    println!("  Remote: {remote}");
+    println!("  SSH: {ssh}");
+    println!("  Command: {command}");
+}
+
+/// stop の dry-run 結果を表示する
+fn print_stop_dry_run(
+    statuses: &[TunnelRuntimeStatus],
+    ids: &[String],
+    state_path: &Path,
+) -> ExitCode {
+    println!("Dry run: no process will be stopped and state file will not be modified.");
+    println!("State file: {}", state_path.display());
+
+    let mut failed = false;
+
+    for id in ids {
+        let Some(status) = statuses.iter().find(|status| status.state.id == *id) else {
+            failed = true;
+            eprintln!(
+                "{}",
+                red(
+                    &format!("Tunnel is not tracked: {id}"),
+                    OutputStream::Stderr
+                )
+            );
+            continue;
+        };
+
+        print_stop_dry_run_tunnel(status);
+    }
+
+    exit_code_from_failure(failed)
+}
+
+/// stop dry-run のトンネル単位の結果を表示する
+fn print_stop_dry_run_tunnel(status: &TunnelRuntimeStatus) {
+    match status.process_state {
+        ProcessState::Running => {
+            println!(
+                "Would stop tunnel: {} (pid: {})",
+                status.state.id, status.state.pid
+            );
+            println!("Would remove state entry: {}", status.state.id);
+        }
+        ProcessState::Stale => {
+            println!(
+                "Would remove stale tunnel state: {} (pid: {})",
+                status.state.id, status.state.pid
+            );
+        }
+    }
+}
+
 /// 起動したトンネルを表示する
 fn print_started_tunnel(started: &StartedTunnel) {
     println!(
@@ -1654,6 +1783,22 @@ mod tests {
         let ids = watched_stale_tunnel_ids(&statuses, &["cache".to_owned(), "search".to_owned()]);
 
         assert_eq!(ids, vec!["cache".to_owned()]);
+    }
+
+    /// シェル表示用コマンドが安全な引数をそのまま表示することを検証する
+    #[test]
+    fn shell_quote_keeps_safe_arguments_unquoted() {
+        let quoted = shell_quote("127.0.0.1:15432:db.internal:5432");
+
+        assert_eq!(quoted, "127.0.0.1:15432:db.internal:5432");
+    }
+
+    /// シェル表示用コマンドが空白やシングルクォートを含む引数を quote することを検証する
+    #[test]
+    fn shell_quote_quotes_arguments_with_spaces_and_single_quotes() {
+        let quoted = shell_quote("/tmp/key file's name");
+
+        assert_eq!(quoted, "'/tmp/key file'\\''s name'");
     }
 
     /// テスト用の統合済み設定を生成する

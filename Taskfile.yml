@@ -54,6 +54,14 @@ tasks:
     cmds:
       - cargo run -p fwd-deck-cli --bin fwd-deck -- start
 
+  start:dry-run:
+    desc: fwd-deck.toml で start の実行予定を確認する
+    preconditions:
+      - sh: test -f fwd-deck.toml
+        msg: fwd-deck.toml is required. Create it from fwd-deck.example.toml.
+    cmds:
+      - cargo run -p fwd-deck-cli --bin fwd-deck -- start --all --dry-run
+
   recover:
     desc: stale なトンネルを再起動する
     preconditions:
@@ -79,6 +87,11 @@ tasks:
     desc: stop を実行する
     cmds:
       - cargo run -p fwd-deck-cli --bin fwd-deck -- stop
+
+  stop:dry-run:
+    desc: stop の実行予定を確認する
+    cmds:
+      - cargo run -p fwd-deck-cli --bin fwd-deck -- stop --all --dry-run
 
   config:add:
     desc: 対話形式で設定を追加する

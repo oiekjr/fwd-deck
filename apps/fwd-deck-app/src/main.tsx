@@ -24,7 +24,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { StrictMode, useEffect, useMemo, useState } from "react";
+import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent, ReactElement, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
@@ -181,6 +181,11 @@ interface AppMessage {
   text: string;
 }
 
+interface RefreshDashboardOptions {
+  silent?: boolean;
+  persistPaths?: boolean;
+}
+
 interface TauriRuntimeWindow extends Window {
   __TAURI_INTERNALS__?: {
     invoke?: unknown;
@@ -227,6 +232,7 @@ const initialFilters: TunnelFilters = {
 };
 
 const searchDebounceMilliseconds = 200;
+const autoRefreshIntervalMilliseconds = 2_000;
 const missingTauriRuntimeMessage =
   "Tauri 実行環境が見つかりません。アプリの操作確認は npm run tauri dev またはビルド済みアプリから実行してください";
 
@@ -259,6 +265,7 @@ function App(): ReactElement {
   const [message, setMessage] = useState<AppMessage | null>(null);
   const [isBusy, setIsBusy] = useState<boolean>(false);
   const [hasCompletedInitialLoad, setHasCompletedInitialLoad] = useState<boolean>(false);
+  const autoRefreshInFlightRef = useRef<boolean>(false);
 
   const stats = useMemo<DashboardStats>(() => calculateStats(dashboard), [dashboard]);
   const selectedIdList = useMemo<string[]>(() => Array.from(selectedIds), [selectedIds]);
@@ -282,30 +289,6 @@ function App(): ReactElement {
     () => hasActiveTunnelFilters(filters) || queryInput.trim().length > 0,
     [filters, queryInput],
   );
-
-  useEffect(() => {
-    async function loadInitialDashboard(): Promise<void> {
-      setIsBusy(true);
-
-      try {
-        const loaded = await invokeCommand<DashboardState>("load_dashboard", {
-          paths: null,
-        });
-
-        setDashboard(loaded);
-        setPaths(loaded.paths);
-        setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
-        setMessage(null);
-      } catch (error) {
-        setMessage({ kind: "error", text: stringifyError(error) });
-      } finally {
-        setIsBusy(false);
-        setHasCompletedInitialLoad(true);
-      }
-    }
-
-    void loadInitialDashboard();
-  }, []);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -342,26 +325,104 @@ function App(): ReactElement {
   /**
    * 現在のパス設定に基づいてダッシュボードを再取得する
    */
-  async function refreshDashboard(nextPaths: WorkspaceSelection = paths): Promise<boolean> {
-    setIsBusy(true);
+  const refreshDashboard = useCallback(
+    async (
+      nextPaths: WorkspaceSelection = paths,
+      options: RefreshDashboardOptions = {},
+    ): Promise<boolean> => {
+      const isSilent = options.silent === true;
+      const shouldPersistPaths = options.persistPaths !== false;
 
-    try {
-      const loaded = await invokeCommand<DashboardState>("load_dashboard", {
-        paths: normalizeWorkspaceSelection(nextPaths),
-      });
+      if (!isSilent) {
+        setIsBusy(true);
+      }
 
-      setDashboard(loaded);
-      setPaths(loaded.paths);
-      setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
-      setMessage(null);
-      return true;
-    } catch (error) {
-      setMessage({ kind: "error", text: stringifyError(error) });
-      return false;
-    } finally {
-      setIsBusy(false);
+      try {
+        const loaded = await invokeCommand<DashboardState>("load_dashboard", {
+          paths: shouldPersistPaths ? normalizeWorkspaceSelection(nextPaths) : null,
+        });
+
+        setDashboard(loaded);
+        setPaths(loaded.paths);
+        setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
+
+        if (!isSilent) {
+          setMessage(null);
+        }
+
+        return true;
+      } catch (error) {
+        if (!isSilent) {
+          setMessage({ kind: "error", text: stringifyError(error) });
+        }
+
+        return false;
+      } finally {
+        if (!isSilent) {
+          setIsBusy(false);
+        }
+      }
+    },
+    [paths],
+  );
+
+  useEffect(() => {
+    async function loadInitialDashboard(): Promise<void> {
+      setIsBusy(true);
+
+      try {
+        const loaded = await invokeCommand<DashboardState>("load_dashboard", {
+          paths: null,
+        });
+
+        setDashboard(loaded);
+        setPaths(loaded.paths);
+        setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
+        setMessage(null);
+      } catch (error) {
+        setMessage({ kind: "error", text: stringifyError(error) });
+      } finally {
+        setIsBusy(false);
+        setHasCompletedInitialLoad(true);
+      }
     }
-  }
+
+    void loadInitialDashboard();
+  }, []);
+
+  useEffect(() => {
+    if (!hasCompletedInitialLoad) {
+      return;
+    }
+
+    function runAutoRefresh(): void {
+      if (autoRefreshInFlightRef.current) {
+        return;
+      }
+
+      autoRefreshInFlightRef.current = true;
+      void refreshDashboard(paths, { persistPaths: false, silent: true }).finally(() => {
+        autoRefreshInFlightRef.current = false;
+      });
+    }
+
+    function refreshWhenVisible(): void {
+      if (document.visibilityState === "visible") {
+        runAutoRefresh();
+      }
+    }
+
+    const intervalId = window.setInterval(runAutoRefresh, autoRefreshIntervalMilliseconds);
+
+    window.addEventListener("focus", runAutoRefresh);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", runAutoRefresh);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [hasCompletedInitialLoad, paths, refreshDashboard]);
 
   /**
    * 指定 ID のトンネルを開始する
@@ -389,7 +450,7 @@ function App(): ReactElement {
 
     await runOperation(
       "stop_tunnels",
-      ids.map((id) => ({ id })),
+      ids.map((id) => operationTargetForStop(id, dashboard)),
     );
   }
 
@@ -415,8 +476,8 @@ function App(): ReactElement {
         targets,
       });
 
+      await refreshDashboard(paths, { silent: true });
       setMessage(operationMessage(report));
-      await refreshDashboard(paths);
     } catch (error) {
       setMessage({ kind: "error", text: stringifyError(error) });
     } finally {
@@ -2703,6 +2764,19 @@ function normalizeWorkspaceSelection(paths: WorkspaceSelection): WorkspaceSelect
     globalConfigPath: paths.globalConfigPath.trim(),
     useGlobal: paths.useGlobal,
   };
+}
+
+/**
+ * 停止対象の runtime scope を現在の表示状態から取得する
+ */
+function operationTargetForStop(id: string, dashboard: DashboardState | null): OperationTarget {
+  const runtimeScope = dashboard?.tunnels.find((tunnel) => tunnel.id === id)?.status?.runtimeScope;
+
+  if (runtimeScope === undefined) {
+    return { id };
+  }
+
+  return { id, runtimeScope };
 }
 
 /**

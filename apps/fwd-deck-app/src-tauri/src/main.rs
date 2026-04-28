@@ -768,7 +768,7 @@ fn load_scoped_runtime_statuses(
 ) -> Result<Vec<ScopedRuntimeStatus>, AppError> {
     let mut statuses = tunnel_statuses(&paths.global_state_path)?
         .into_iter()
-        .filter(|status| status.state.source_kind == ConfigSourceKind::Global)
+        .filter(|status| global_state_status_is_visible(paths, status))
         .map(|status| ScopedRuntimeStatus {
             runtime_scope: RuntimeScope::Global,
             status,
@@ -790,6 +790,38 @@ fn load_scoped_runtime_statuses(
     Ok(statuses)
 }
 
+/// 既定 state に保存された状態を現在の表示対象へ含めるか判定する
+fn global_state_status_is_visible(paths: &RuntimePaths, status: &TunnelRuntimeStatus) -> bool {
+    match status.state.source_kind {
+        ConfigSourceKind::Global => true,
+        ConfigSourceKind::Local => local_state_matches_active_workspace(paths, status),
+    }
+}
+
+/// local state が現在のワークスペース設定に由来するか判定する
+fn local_state_matches_active_workspace(
+    paths: &RuntimePaths,
+    status: &TunnelRuntimeStatus,
+) -> bool {
+    let Some(local_config_path) = &paths.local_config_path else {
+        return false;
+    };
+
+    paths_refer_to_same_file(local_config_path, &status.state.source_path)
+}
+
+/// 2 つのパスが同じファイルを指すか比較する
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 /// ダッシュボード状態へ変換する
 fn build_dashboard_state(
     runtime_paths: RuntimePaths,
@@ -799,12 +831,7 @@ fn build_dashboard_state(
 ) -> DashboardState {
     let status_by_key = statuses
         .iter()
-        .map(|status| {
-            (
-                runtime_status_key(status.runtime_scope, &status.status.state.id),
-                status,
-            )
-        })
+        .map(|status| (runtime_status_config_key(status), status))
         .collect::<HashMap<_, _>>();
     let mut tunnels = config
         .tunnels
@@ -835,6 +862,14 @@ fn build_dashboard_state(
         tunnels,
         tracked_tunnels,
     }
+}
+
+/// runtime 状態を対応する設定ファイル種別のキーへ変換する
+fn runtime_status_config_key(status: &ScopedRuntimeStatus) -> String {
+    runtime_status_key(
+        runtime_scope_for_source(status.status.state.source_kind),
+        &status.status.state.id,
+    )
 }
 
 /// 解決済みパスを表示用へ変換する
@@ -1177,6 +1212,7 @@ fn trimmed_optional(value: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use fwd_deck_core::TunnelState;
     use tempfile::TempDir;
 
     use super::*;
@@ -1299,6 +1335,44 @@ mod tests {
         );
     }
 
+    /// CLI 既定 state の local 状態が現在のワークスペース表示に含まれることを検証する
+    #[test]
+    fn global_state_local_status_is_visible_for_active_workspace() {
+        let workspace = TempDir::new().expect("create workspace");
+        let local_config_path = workspace.path().join("fwd-deck.toml");
+        fs::write(&local_config_path, "").expect("write local config");
+        let paths = runtime_paths_for_local_config(local_config_path.clone());
+        let status = runtime_status(ConfigSourceKind::Local, local_config_path);
+
+        assert!(global_state_status_is_visible(&paths, &status));
+    }
+
+    /// 別ワークスペース由来の local 状態が表示対象から除外されることを検証する
+    #[test]
+    fn global_state_local_status_is_hidden_for_other_workspace() {
+        let active_workspace = TempDir::new().expect("create active workspace");
+        let other_workspace = TempDir::new().expect("create other workspace");
+        let active_config_path = active_workspace.path().join("fwd-deck.toml");
+        let other_config_path = other_workspace.path().join("fwd-deck.toml");
+        fs::write(&active_config_path, "").expect("write active config");
+        fs::write(&other_config_path, "").expect("write other config");
+        let paths = runtime_paths_for_local_config(active_config_path);
+        let status = runtime_status(ConfigSourceKind::Local, other_config_path);
+
+        assert!(!global_state_status_is_visible(&paths, &status));
+    }
+
+    /// 状態の関連付けキーが設定ファイル種別に従うことを検証する
+    #[test]
+    fn runtime_status_config_key_uses_config_source_kind() {
+        let status = ScopedRuntimeStatus {
+            runtime_scope: RuntimeScope::Global,
+            status: runtime_status(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml")),
+        };
+
+        assert_eq!(runtime_status_config_key(&status), "workspace:db");
+    }
+
     /// ワークスペース state path が app config directory 配下に生成されることを検証する
     #[test]
     fn workspace_state_path_uses_stable_lower_hex_key() {
@@ -1316,5 +1390,38 @@ mod tests {
         assert!(key.chars().all(|character| character.is_ascii_hexdigit()));
         assert!(key.chars().all(|character| !character.is_ascii_uppercase()));
         assert!(state_path.ends_with(STATE_FILE_NAME));
+    }
+
+    /// テスト用の runtime paths を生成する
+    fn runtime_paths_for_local_config(local_config_path: PathBuf) -> RuntimePaths {
+        RuntimePaths {
+            preferences: AppPreferences::default(),
+            config_paths: ConfigPaths::new(None, local_config_path.clone()),
+            local_config_path: Some(local_config_path),
+            global_config_display_path: None,
+            global_state_path: PathBuf::from("global-state.toml"),
+            workspace_state_path: None,
+        }
+    }
+
+    /// テスト用の runtime status を生成する
+    fn runtime_status(source_kind: ConfigSourceKind, source_path: PathBuf) -> TunnelRuntimeStatus {
+        TunnelRuntimeStatus {
+            state: TunnelState {
+                id: "db".to_owned(),
+                pid: 1000,
+                local_host: "127.0.0.1".to_owned(),
+                local_port: 15432,
+                remote_host: "127.0.0.1".to_owned(),
+                remote_port: 5432,
+                ssh_user: "user".to_owned(),
+                ssh_host: "bastion.example.com".to_owned(),
+                ssh_port: None,
+                source_kind,
+                source_path,
+                started_at_unix_seconds: 1_700_000_000,
+            },
+            process_state: ProcessState::Running,
+        }
     }
 }

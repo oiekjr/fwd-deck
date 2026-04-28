@@ -70,6 +70,12 @@ enum Command {
     List {
         #[arg(long = "tag", value_name = "TAG", help = "Filter tunnels by tag")]
         tags: Vec<String>,
+        #[arg(
+            long,
+            value_name = "TEXT",
+            help = "Filter tunnels by id or description"
+        )]
+        query: Option<String>,
     },
     #[command(about = "Start configured tunnels")]
     Start {
@@ -196,9 +202,9 @@ fn run() -> Result<ExitCode, CliError> {
     let state_path = cli.state.clone();
 
     match &cli.command {
-        Command::List { tags } => {
+        Command::List { tags, query } => {
             let config = load_config(&cli)?;
-            list_command(&config, tags.clone())
+            list_command(&config, tags.clone(), query.clone())
         }
         Command::Start {
             ids,
@@ -415,8 +421,13 @@ fn config_path_for_scope(
 }
 
 /// トンネル設定一覧コマンドを実行する
-fn list_command(config: &EffectiveConfig, tags: Vec<String>) -> Result<ExitCode, CliError> {
+fn list_command(
+    config: &EffectiveConfig,
+    tags: Vec<String>,
+    query: Option<String>,
+) -> Result<ExitCode, CliError> {
     let tags = normalize_cli_tags(&tags)?;
+    let query = normalize_list_query(query);
 
     if !config.has_sources() {
         println!(
@@ -426,15 +437,15 @@ fn list_command(config: &EffectiveConfig, tags: Vec<String>) -> Result<ExitCode,
         return Ok(ExitCode::SUCCESS);
     }
 
-    let tunnels = select_tunnels_for_tags(config, &tags);
+    let tunnels = select_tunnels_for_list(config, &tags, query.as_deref());
 
-    if tunnels.is_empty() && tags.is_empty() {
+    if tunnels.is_empty() && tags.is_empty() && query.is_none() {
         println!("No tunnels are configured.");
         return Ok(ExitCode::SUCCESS);
     }
 
     if tunnels.is_empty() {
-        println!("No tunnels matched tags: {}.", tags.join(", "));
+        println!("{}", no_list_matches_message(&tags, query.as_deref()));
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -858,6 +869,51 @@ fn select_tunnels_for_tags<'a>(
     }
 
     filter_tunnels_by_tags(&config.tunnels, tags)
+}
+
+/// list の絞り込み条件に応じて統合済みトンネル設定を選択する
+fn select_tunnels_for_list<'a>(
+    config: &'a EffectiveConfig,
+    tags: &[String],
+    query: Option<&str>,
+) -> Vec<&'a ResolvedTunnelConfig> {
+    select_tunnels_for_tags(config, tags)
+        .into_iter()
+        .filter(|resolved| {
+            query.is_none_or(|query| tunnel_matches_list_query(&resolved.tunnel, query))
+        })
+        .collect()
+}
+
+/// list query を比較用の表記へ正規化する
+fn normalize_list_query(query: Option<String>) -> Option<String> {
+    query
+        .map(|query| query.trim().to_ascii_lowercase())
+        .filter(|query| !query.is_empty())
+}
+
+/// トンネルが list query に一致するかを判定する
+fn tunnel_matches_list_query(tunnel: &TunnelConfig, query: &str) -> bool {
+    tunnel.id.to_ascii_lowercase().contains(query)
+        || tunnel
+            .description
+            .as_deref()
+            .is_some_and(|description| description.to_ascii_lowercase().contains(query))
+}
+
+/// list 絞り込み結果が空の場合のメッセージを生成する
+fn no_list_matches_message(tags: &[String], query: Option<&str>) -> String {
+    match (tags.is_empty(), query) {
+        (false, Some(query)) => {
+            format!(
+                "No tunnels matched tags and query: {} / {query}.",
+                tags.join(", ")
+            )
+        }
+        (false, None) => format!("No tunnels matched tags: {}.", tags.join(", ")),
+        (true, Some(query)) => format!("No tunnels matched query: {query}."),
+        (true, None) => "No tunnels are configured.".to_owned(),
+    }
 }
 
 /// 編集対象の設定スコープを対話的に選択する
@@ -1816,6 +1872,38 @@ mod tests {
         let quoted = shell_quote("/tmp/key file's name");
 
         assert_eq!(quoted, "'/tmp/key file'\\''s name'");
+    }
+
+    /// list query が ID に対して大文字小文字を区別せず一致することを検証する
+    #[test]
+    fn tunnel_matches_list_query_matches_id_case_insensitively() {
+        let tunnel = tunnel("Dev-DB", 15432);
+
+        assert!(tunnel_matches_list_query(&tunnel, "dev"));
+    }
+
+    /// list query が description に対して大文字小文字を区別せず一致することを検証する
+    #[test]
+    fn tunnel_matches_list_query_matches_description_case_insensitively() {
+        let mut tunnel = tunnel("db", 15432);
+        tunnel.description = Some("Development database".to_owned());
+
+        assert!(tunnel_matches_list_query(&tunnel, "database"));
+    }
+
+    /// list query と tag 指定が AND 条件で絞り込まれることを検証する
+    #[test]
+    fn select_tunnels_for_list_matches_tags_and_query() {
+        let mut dev_db = tunnel("dev-db", 15432);
+        dev_db.tags = vec!["dev".to_owned()];
+        let mut prod_db = tunnel("prod-db", 25432);
+        prod_db.tags = vec!["prod".to_owned()];
+        let config = effective_config_with_tunnels(vec![dev_db, prod_db]);
+
+        let tunnels = select_tunnels_for_list(&config, &["dev".to_owned()], Some("db"));
+
+        assert_eq!(tunnels.len(), 1);
+        assert_eq!(tunnels[0].tunnel.id, "dev-db");
     }
 
     /// テスト用の統合済み設定を生成する

@@ -6,7 +6,9 @@
 
 ```sh
 fwd-deck list
+fwd-deck list --query db
 fwd-deck list --tag dev
+fwd-deck list --tag dev --query db
 fwd-deck start
 fwd-deck start dev-db
 fwd-deck start dev-db --dry-run
@@ -43,6 +45,8 @@ cargo run -p fwd-deck-cli --bin fwd-deck -- validate
 `start --all` は設定済みのすべてのトンネルを開始し、`stop --all` は追跡中のすべてのトンネルを停止します。
 `start` は local endpoint が使用中の場合、取得できる範囲でそのポートを使っている LISTEN プロセスも表示します。
 `list` と `start` は `--tag` を複数指定でき、指定したタグをすべて持つトンネルだけを対象にします。
+`list --query` は、`id` と `description` に対して大文字小文字を区別しない部分一致検索を行います。
+`list` で `--tag` と `--query` を併用した場合は、両方に一致するトンネルだけを表示します。
 `stop` の対話選択には、追跡中のトンネルをまとめて停止する選択肢も表示されます。
 `recover` は、状態ファイル上で stale になっているトンネルを現在の設定に基づいて再起動します。
 `watch` は、状態ファイル上で追跡中のトンネルを監視し、stale になった場合に自動で再起動します。

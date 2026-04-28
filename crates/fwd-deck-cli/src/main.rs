@@ -7,14 +7,16 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use fwd_deck_core::{
-    ConfigPaths, EffectiveConfig, ProcessState, ResolvedTunnelConfig, StartedTunnel, StoppedTunnel,
-    TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport, default_global_config_path,
-    default_local_config_path, default_state_file_path, load_effective_config, start_tunnel,
+    ConfigEditError, ConfigPaths, ConfigSourceKind, DEFAULT_LOCAL_HOST, EffectiveConfig,
+    ProcessState, ResolvedTunnelConfig, StartedTunnel, StoppedTunnel, TunnelConfig,
+    TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport, add_tunnel_to_config_file,
+    default_global_config_path, default_local_config_path, default_state_file_path,
+    load_effective_config, read_config_file, remove_tunnel_from_config_file, start_tunnel,
     stop_tunnel, tunnel_statuses, validate_config,
 };
-use inquire::{InquireError, MultiSelect};
+use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
 use thiserror::Error;
 
 /// fwd-deck の CLI 引数を表現する
@@ -78,8 +80,45 @@ enum Command {
         #[arg(value_name = "ID", help = "Tunnel IDs to stop")]
         ids: Vec<String>,
     },
+    #[command(about = "Edit configuration files")]
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     #[command(about = "Validate configuration files")]
     Validate,
+}
+
+/// 設定編集サブコマンドを表現する
+#[derive(Debug, Clone, Subcommand)]
+enum ConfigCommand {
+    #[command(about = "Add a tunnel to a configuration file")]
+    Add {
+        #[arg(long, value_enum, help = "Configuration scope to edit")]
+        scope: Option<ConfigScopeArg>,
+    },
+    #[command(about = "Remove a tunnel from a configuration file")]
+    Remove {
+        #[arg(long, value_enum, help = "Configuration scope to edit")]
+        scope: Option<ConfigScopeArg>,
+    },
+}
+
+/// CLI で指定する設定スコープを表現する
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ConfigScopeArg {
+    Global,
+    Local,
+}
+
+impl From<ConfigScopeArg> for ConfigSourceKind {
+    /// CLI の設定スコープを中核機能の設定種別へ変換する
+    fn from(scope: ConfigScopeArg) -> Self {
+        match scope {
+            ConfigScopeArg::Global => Self::Global,
+            ConfigScopeArg::Local => Self::Local,
+        }
+    }
 }
 
 /// CLI 実行時の失敗理由を表現する
@@ -87,10 +126,14 @@ enum Command {
 enum CliError {
     #[error("Failed to get the current directory: {0}")]
     CurrentDir(std::io::Error),
+    #[error("Failed to resolve the default global configuration path because HOME is not set")]
+    MissingGlobalConfigPath,
     #[error("Failed to resolve the default state file path because HOME is not set")]
     MissingStateHome,
     #[error(transparent)]
     Config(#[from] fwd_deck_core::ConfigLoadError),
+    #[error(transparent)]
+    ConfigEdit(#[from] ConfigEditError),
     #[error(transparent)]
     Runtime(#[from] TunnelRuntimeError),
     #[error(transparent)]
@@ -137,6 +180,10 @@ fn run() -> Result<ExitCode, CliError> {
             let state_path = resolve_state_path(state_path)?;
             stop_command(&state_path, ids.clone())
         }
+        Command::Config { command } => {
+            let paths = resolve_edit_config_paths(&cli)?;
+            config_command(&paths, command.clone())
+        }
         Command::Validate => {
             let config = load_config(&cli)?;
             Ok(print_validation(&config))
@@ -168,11 +215,133 @@ fn resolve_config_paths(cli: &Cli) -> Result<ConfigPaths, CliError> {
     Ok(ConfigPaths::new(global, local))
 }
 
+/// 設定編集用の設定ファイル位置を解決する
+fn resolve_edit_config_paths(cli: &Cli) -> Result<ConfigPaths, CliError> {
+    let current_dir = env::current_dir().map_err(CliError::CurrentDir)?;
+    let local = cli
+        .config
+        .clone()
+        .unwrap_or_else(|| default_local_config_path(&current_dir));
+    let global = if cli.no_global {
+        None
+    } else {
+        cli.global_config
+            .clone()
+            .or_else(default_global_config_path)
+    };
+
+    Ok(ConfigPaths::new(global, local))
+}
+
 /// CLI 引数から状態ファイルの保存先を解決する
 fn resolve_state_path(state_path: Option<PathBuf>) -> Result<PathBuf, CliError> {
     state_path
         .or_else(default_state_file_path)
         .ok_or(CliError::MissingStateHome)
+}
+
+/// 設定編集コマンドを実行する
+fn config_command(paths: &ConfigPaths, command: ConfigCommand) -> Result<ExitCode, CliError> {
+    match command {
+        ConfigCommand::Add { scope } => config_add_command(paths, scope),
+        ConfigCommand::Remove { scope } => config_remove_command(paths, scope),
+    }
+}
+
+/// 設定ファイルへトンネルを追加する
+fn config_add_command(
+    paths: &ConfigPaths,
+    scope: Option<ConfigScopeArg>,
+) -> Result<ExitCode, CliError> {
+    let scope = resolve_config_scope(paths, scope)?;
+    let path = config_path_for_scope(paths, scope)?;
+    let tunnel = prompt_tunnel_config()?;
+
+    add_tunnel_to_config_file(&path, scope, tunnel)?;
+    println!(
+        "{}",
+        green(
+            &format!(
+                "Added tunnel to {} configuration: {}",
+                scope,
+                path.display()
+            ),
+            OutputStream::Stdout
+        )
+    );
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// 設定ファイルからトンネルを削除する
+fn config_remove_command(
+    paths: &ConfigPaths,
+    scope: Option<ConfigScopeArg>,
+) -> Result<ExitCode, CliError> {
+    let scope = resolve_config_scope(paths, scope)?;
+    let path = config_path_for_scope(paths, scope)?;
+    let Some(file) = read_config_file(&path, scope)? else {
+        eprintln!(
+            "{}",
+            red(
+                &format!("Configuration file was not found: {}", path.display()),
+                OutputStream::Stderr
+            )
+        );
+        return Ok(ExitCode::FAILURE);
+    };
+
+    if file.tunnels.is_empty() {
+        println!("No tunnels are configured in {}.", path.display());
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let choice = prompt_tunnel_to_remove(&file.tunnels)?;
+    let confirmed = Confirm::new(&format!("Remove tunnel '{}'?", choice.id))
+        .with_default(false)
+        .prompt()?;
+
+    if !confirmed {
+        println!("No tunnel was removed.");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    remove_tunnel_from_config_file(&path, scope, &choice.id)?;
+    println!(
+        "{}",
+        green(
+            &format!("Removed tunnel from {} configuration: {}", scope, choice.id),
+            OutputStream::Stdout
+        )
+    );
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// CLI 指定または対話選択から設定スコープを解決する
+fn resolve_config_scope(
+    paths: &ConfigPaths,
+    scope: Option<ConfigScopeArg>,
+) -> Result<ConfigSourceKind, CliError> {
+    if let Some(scope) = scope {
+        return Ok(scope.into());
+    }
+
+    Ok(prompt_config_scope(paths)?)
+}
+
+/// 対象スコープの設定ファイルパスを取得する
+fn config_path_for_scope(
+    paths: &ConfigPaths,
+    scope: ConfigSourceKind,
+) -> Result<PathBuf, CliError> {
+    match scope {
+        ConfigSourceKind::Global => paths
+            .global
+            .clone()
+            .ok_or(CliError::MissingGlobalConfigPath),
+        ConfigSourceKind::Local => Ok(paths.local.clone()),
+    }
 }
 
 /// 統合済みトンネル設定の一覧を表示する
@@ -423,6 +592,160 @@ fn print_validation_if_invalid(config: &EffectiveConfig) -> bool {
     false
 }
 
+/// 編集対象の設定スコープを対話的に選択する
+fn prompt_config_scope(paths: &ConfigPaths) -> Result<ConfigSourceKind, InquireError> {
+    let mut choices = Vec::new();
+
+    choices.push(ScopeChoice::new(
+        ConfigSourceKind::Local,
+        format!("local ({})", paths.local.display()),
+    ));
+
+    if let Some(global_path) = &paths.global {
+        choices.push(ScopeChoice::new(
+            ConfigSourceKind::Global,
+            format!("global ({})", global_path.display()),
+        ));
+    }
+
+    let selected = Select::new("Select configuration scope:", choices).prompt()?;
+    Ok(selected.kind)
+}
+
+/// 追加するトンネル設定を対話的に入力する
+fn prompt_tunnel_config() -> Result<TunnelConfig, CliError> {
+    let id = prompt_required_text("Tunnel id:")?;
+    let description = prompt_optional_text("Description:")?;
+    let local_host = Some(prompt_local_host()?);
+    let local_port = prompt_port("Local port:", None)?;
+    let remote_host = prompt_required_text("Remote host:")?;
+    let remote_port = prompt_port("Remote port:", None)?;
+    let ssh_user = prompt_required_text("SSH user:")?;
+    let ssh_host = prompt_required_text("SSH host:")?;
+    let ssh_port = Some(prompt_port("SSH port:", Some(22))?);
+    let identity_file = prompt_optional_text("Identity file:")?;
+
+    Ok(TunnelConfig {
+        id,
+        description,
+        local_host,
+        local_port,
+        remote_host,
+        remote_port,
+        ssh_user,
+        ssh_host,
+        ssh_port,
+        identity_file,
+    })
+}
+
+/// 削除対象のトンネルを対話的に選択する
+fn prompt_tunnel_to_remove(tunnels: &[TunnelConfig]) -> Result<RemoveChoice, InquireError> {
+    let choices = tunnels
+        .iter()
+        .map(RemoveChoice::from_tunnel)
+        .collect::<Vec<_>>();
+
+    Select::new("Select a tunnel to remove:", choices).prompt()
+}
+
+/// 空文字列を許容しない入力を受け取る
+fn prompt_required_text(label: &str) -> Result<String, CliError> {
+    loop {
+        let value = Text::new(label).prompt()?;
+        let trimmed = value.trim();
+
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_owned());
+        }
+
+        eprintln!("{}", red("Value cannot be empty.", OutputStream::Stderr));
+    }
+}
+
+/// 空文字列を未指定として扱う入力を受け取る
+fn prompt_optional_text(label: &str) -> Result<Option<String>, CliError> {
+    let value = Text::new(label).prompt()?;
+    let trimmed = value.trim();
+
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_owned()))
+    }
+}
+
+/// local_host の入力を受け取る
+fn prompt_local_host() -> Result<String, CliError> {
+    loop {
+        let value = prompt_text_with_default("Local host:", DEFAULT_LOCAL_HOST)?;
+
+        if !value.chars().any(char::is_whitespace) {
+            return Ok(value);
+        }
+
+        eprintln!(
+            "{}",
+            red(
+                "Local host cannot contain whitespace.",
+                OutputStream::Stderr
+            )
+        );
+    }
+}
+
+/// 既定値つきの入力を受け取る
+fn prompt_text_with_default(label: &str, default: &str) -> Result<String, CliError> {
+    let value = Text::new(label).with_initial_value(default).prompt()?;
+    let trimmed = value.trim();
+
+    if trimmed.is_empty() {
+        Ok(default.to_owned())
+    } else {
+        Ok(trimmed.to_owned())
+    }
+}
+
+/// ポート番号の入力を受け取る
+fn prompt_port(label: &str, default: Option<u16>) -> Result<u16, CliError> {
+    loop {
+        let value = prompt_port_text(label, default)?;
+        let trimmed = value.trim();
+        let candidate = if trimmed.is_empty() {
+            default.map(|port| port.to_string()).unwrap_or_default()
+        } else {
+            trimmed.to_owned()
+        };
+
+        if let Ok(port) = candidate.parse::<u16>()
+            && port > 0
+        {
+            return Ok(port);
+        }
+
+        eprintln!(
+            "{}",
+            red(
+                "Port must be a number between 1 and 65535.",
+                OutputStream::Stderr
+            )
+        );
+    }
+}
+
+/// ポート番号の文字列入力を受け取る
+fn prompt_port_text(label: &str, default: Option<u16>) -> Result<String, CliError> {
+    match default {
+        Some(default) => {
+            let initial_value = default.to_string();
+            Ok(Text::new(label)
+                .with_initial_value(&initial_value)
+                .prompt()?)
+        }
+        None => Ok(Text::new(label).prompt()?),
+    }
+}
+
 /// 開始対象のトンネルを対話的に選択する
 fn prompt_tunnels_to_start(config: &EffectiveConfig) -> Result<Vec<String>, InquireError> {
     let choices = config
@@ -625,11 +948,23 @@ fn print_validation(config: &EffectiveConfig) -> ExitCode {
     let report = validate_config(config);
 
     if report.is_valid() {
-        println!("{}", green("Configuration is valid.", OutputStream::Stdout));
+        if report.has_warnings() {
+            println!(
+                "{}",
+                yellow(
+                    "Configuration is valid with warnings.",
+                    OutputStream::Stdout
+                )
+            );
+            print_validation_warnings(&report, OutputStream::Stdout);
+        } else {
+            println!("{}", green("Configuration is valid.", OutputStream::Stdout));
+        }
         return ExitCode::SUCCESS;
     }
 
     print_validation_errors(&report);
+    print_validation_warnings(&report, OutputStream::Stderr);
     ExitCode::FAILURE
 }
 
@@ -650,6 +985,82 @@ fn print_validation_errors(report: &ValidationReport) {
             error.message
         );
         eprintln!("{}", red(&message, OutputStream::Stderr));
+    }
+}
+
+/// 設定検証警告を表示する
+fn print_validation_warnings(report: &ValidationReport, stream: OutputStream) {
+    if !report.has_warnings() {
+        return;
+    }
+
+    print_line(&yellow("Configuration has warnings.", stream), stream);
+
+    for warning in &report.warnings {
+        let tunnel = warning
+            .tunnel_id
+            .as_ref()
+            .map_or(String::from("-"), ToString::to_string);
+        let message = format!(
+            "- [{}] {} ({}) {}",
+            warning.source.kind,
+            tunnel,
+            warning.source.path.display(),
+            warning.message
+        );
+        print_line(&yellow(&message, stream), stream);
+    }
+}
+
+/// 設定スコープの選択肢を表現する
+#[derive(Debug, Clone)]
+struct ScopeChoice {
+    kind: ConfigSourceKind,
+    label: String,
+}
+
+impl ScopeChoice {
+    /// 設定スコープから選択肢を生成する
+    fn new(kind: ConfigSourceKind, label: String) -> Self {
+        Self { kind, label }
+    }
+}
+
+impl Display for ScopeChoice {
+    /// 選択肢の表示文字列を出力する
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.label)
+    }
+}
+
+/// 削除対象の選択肢を表現する
+#[derive(Debug, Clone)]
+struct RemoveChoice {
+    id: String,
+    label: String,
+}
+
+impl RemoveChoice {
+    /// トンネル設定から削除対象の選択肢を生成する
+    fn from_tunnel(tunnel: &TunnelConfig) -> Self {
+        Self {
+            id: tunnel.id.clone(),
+            label: format!(
+                "{}  {}:{} -> {}:{}",
+                tunnel.id,
+                tunnel.effective_local_host(),
+                tunnel.local_port,
+                tunnel.remote_host,
+                tunnel.remote_port
+            ),
+        }
+    }
+}
+
+impl Display for RemoveChoice {
+    /// 選択肢の表示文字列を出力する
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.label)
     }
 }
 
@@ -762,6 +1173,19 @@ fn green(message: &str, stream: OutputStream) -> String {
 /// 失敗時のメッセージを赤で装飾する
 fn red(message: &str, stream: OutputStream) -> String {
     colorize(message, "31", stream)
+}
+
+/// 注意時のメッセージを黄色で装飾する
+fn yellow(message: &str, stream: OutputStream) -> String {
+    colorize(message, "33", stream)
+}
+
+/// 指定された出力先へ 1 行表示する
+fn print_line(message: &str, stream: OutputStream) {
+    match stream {
+        OutputStream::Stdout => println!("{message}"),
+        OutputStream::Stderr => eprintln!("{message}"),
+    }
 }
 
 /// TTY に出力する場合だけ ANSI color を付与する

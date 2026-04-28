@@ -5,10 +5,11 @@ pub mod state;
 pub mod tunnel;
 
 pub use config::{
-    ConfigLoadError, ConfigPaths, ConfigSource, ConfigSourceKind, EffectiveConfig,
-    ResolvedTunnelConfig, TunnelConfig, ValidationError, ValidationReport,
-    default_global_config_path, default_local_config_path, load_effective_config, read_config_file,
-    validate_config,
+    ConfigEditError, ConfigLoadError, ConfigPaths, ConfigSource, ConfigSourceKind,
+    DEFAULT_LOCAL_HOST, EffectiveConfig, ResolvedTunnelConfig, TunnelConfig, ValidationError,
+    ValidationReport, ValidationWarning, add_tunnel_to_config_file, default_global_config_path,
+    default_local_config_path, load_effective_config, read_config_file,
+    remove_tunnel_from_config_file, validate_config,
 };
 pub use state::{StateFileError, TunnelState, TunnelStateFile, default_state_file_path};
 pub use tunnel::{

@@ -11,7 +11,7 @@ use thiserror::Error;
 
 const GLOBAL_CONFIG_RELATIVE_PATH: &str = ".config/fwd-deck/config.toml";
 const LOCAL_CONFIG_FILE_NAME: &str = "fwd-deck.toml";
-const DEFAULT_LOCAL_HOST: &str = "127.0.0.1";
+pub const DEFAULT_LOCAL_HOST: &str = "127.0.0.1";
 
 /// 読み込む設定ファイルの位置を表現する
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,7 +60,7 @@ impl ConfigSource {
 }
 
 /// TOML に記述するトンネル設定を表現する
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TunnelConfig {
     pub id: String,
@@ -137,7 +137,7 @@ impl EffectiveConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfigFile {
     #[serde(default)]
@@ -159,26 +159,76 @@ pub enum ConfigLoadError {
     },
 }
 
+/// 設定編集時の失敗理由を表現する
+#[derive(Debug, Error)]
+pub enum ConfigEditError {
+    #[error("Configuration file was not found: {path}")]
+    Missing { path: PathBuf },
+    #[error("Tunnel id already exists in configuration file: {id} ({path})")]
+    DuplicateId { path: PathBuf, id: String },
+    #[error("Tunnel id was not found in configuration file: {id} ({path})")]
+    NotFound { path: PathBuf, id: String },
+    #[error("Failed to read configuration file: {path}: {source}")]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("Failed to parse TOML configuration file: {path}: {source}")]
+    Parse {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
+    #[error("Failed to serialize TOML configuration file: {path}: {source}")]
+    Serialize {
+        path: PathBuf,
+        source: toml::ser::Error,
+    },
+    #[error("Failed to create configuration directory: {path}: {source}")]
+    CreateDir {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("Failed to write configuration file: {path}: {source}")]
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
 /// 設定検証の結果を表現する
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationReport {
     pub errors: Vec<ValidationError>,
+    pub warnings: Vec<ValidationWarning>,
 }
 
 impl ValidationReport {
     /// 検証エラーを含まない結果を初期化する
     pub fn valid() -> Self {
-        Self { errors: Vec::new() }
+        Self {
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        }
     }
 
-    /// 検証結果が成功かを判定する
+    /// 検証結果がエラーを含まないかを判定する
     pub fn is_valid(&self) -> bool {
         self.errors.is_empty()
+    }
+
+    /// 検証結果が警告を含むかを判定する
+    pub fn has_warnings(&self) -> bool {
+        !self.warnings.is_empty()
     }
 
     /// 検証エラーを追加する
     pub fn push(&mut self, error: ValidationError) {
         self.errors.push(error);
+    }
+
+    /// 検証警告を追加する
+    pub fn push_warning(&mut self, warning: ValidationWarning) {
+        self.warnings.push(warning);
     }
 }
 
@@ -192,6 +242,29 @@ pub struct ValidationError {
 
 impl ValidationError {
     /// 検証エラーを初期化する
+    pub fn new(
+        source: ConfigSource,
+        tunnel_id: Option<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            source,
+            tunnel_id,
+            message: message.into(),
+        }
+    }
+}
+
+/// 設定検証で検出した注意事項を表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationWarning {
+    pub source: ConfigSource,
+    pub tunnel_id: Option<String>,
+    pub message: String,
+}
+
+impl ValidationWarning {
+    /// 検証警告を初期化する
     pub fn new(
         source: ConfigSource,
         tunnel_id: Option<String>,
@@ -242,6 +315,47 @@ pub fn read_config_file(
     )))
 }
 
+/// 指定された設定ファイルへトンネル設定を追加する
+pub fn add_tunnel_to_config_file(
+    path: &Path,
+    kind: ConfigSourceKind,
+    tunnel: TunnelConfig,
+) -> Result<LoadedConfigFile, ConfigEditError> {
+    let mut file = read_config_file_for_edit(path, kind, true)?;
+
+    if file.tunnels.iter().any(|existing| existing.id == tunnel.id) {
+        return Err(ConfigEditError::DuplicateId {
+            path: path.to_path_buf(),
+            id: tunnel.id,
+        });
+    }
+
+    file.tunnels.push(tunnel);
+    write_config_file(path, &file.tunnels)?;
+
+    Ok(file)
+}
+
+/// 指定された設定ファイルからトンネル設定を削除する
+pub fn remove_tunnel_from_config_file(
+    path: &Path,
+    kind: ConfigSourceKind,
+    id: &str,
+) -> Result<LoadedConfigFile, ConfigEditError> {
+    let mut file = read_config_file_for_edit(path, kind, false)?;
+    let Some(position) = file.tunnels.iter().position(|tunnel| tunnel.id == id) else {
+        return Err(ConfigEditError::NotFound {
+            path: path.to_path_buf(),
+            id: id.to_owned(),
+        });
+    };
+
+    file.tunnels.remove(position);
+    write_config_file(path, &file.tunnels)?;
+
+    Ok(file)
+}
+
 /// グローバル設定とローカル設定を統合して読み込む
 pub fn load_effective_config(paths: &ConfigPaths) -> Result<EffectiveConfig, ConfigLoadError> {
     let sources = read_existing_config_files(paths)?;
@@ -258,6 +372,7 @@ pub fn validate_config(config: &EffectiveConfig) -> ValidationReport {
     validate_required_fields(config, &mut report);
     validate_optional_fields(config, &mut report);
     validate_ports(config, &mut report);
+    warn_privileged_local_ports(config, &mut report);
     validate_duplicate_local_ports(config, &mut report);
 
     report
@@ -335,6 +450,67 @@ fn read_existing_config_files(
     }
 
     Ok(sources)
+}
+
+/// 編集対象の設定ファイルを読み込む
+fn read_config_file_for_edit(
+    path: &Path,
+    kind: ConfigSourceKind,
+    create_if_missing: bool,
+) -> Result<LoadedConfigFile, ConfigEditError> {
+    if !path.exists() {
+        if create_if_missing {
+            return Ok(LoadedConfigFile::new(
+                ConfigSource::new(kind, path.to_path_buf()),
+                Vec::new(),
+            ));
+        }
+
+        return Err(ConfigEditError::Missing {
+            path: path.to_path_buf(),
+        });
+    }
+
+    let content = fs::read_to_string(path).map_err(|source| ConfigEditError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let raw =
+        toml::from_str::<RawConfigFile>(&content).map_err(|source| ConfigEditError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    Ok(LoadedConfigFile::new(
+        ConfigSource::new(kind, path.to_path_buf()),
+        raw.tunnels,
+    ))
+}
+
+/// 設定ファイルへトンネル一覧を書き込む
+fn write_config_file(path: &Path, tunnels: &[TunnelConfig]) -> Result<(), ConfigEditError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|source| ConfigEditError::CreateDir {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let raw = RawConfigFile {
+        tunnels: tunnels.to_vec(),
+    };
+    let content = toml::to_string_pretty(&raw).map_err(|source| ConfigEditError::Serialize {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    fs::write(path, content).map_err(|source| ConfigEditError::Write {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// 同一設定ファイル内の ID 重複を検証する
@@ -446,6 +622,19 @@ fn validate_duplicate_local_ports(config: &EffectiveConfig, report: &mut Validat
                     "local_port {} duplicates {}",
                     resolved.tunnel.local_port, existing.tunnel.id
                 ),
+            ));
+        }
+    }
+}
+
+/// 権限が必要になる可能性があるローカルポートを警告する
+fn warn_privileged_local_ports(config: &EffectiveConfig, report: &mut ValidationReport) {
+    for resolved in &config.tunnels {
+        if (1..1024).contains(&resolved.tunnel.local_port) {
+            report.push_warning(ValidationWarning::new(
+                resolved.source.clone(),
+                Some(resolved.tunnel.id.clone()),
+                "local_port below 1024 may require elevated privileges",
             ));
         }
     }
@@ -584,6 +773,76 @@ ssh_host = "local-bastion.example.com"
                 .iter()
                 .any(|error| error.message == "local_host cannot contain whitespace")
         );
+    }
+
+    /// 特権ポート相当の local_port が警告として扱われることを検証する
+    #[test]
+    fn validation_warns_privileged_local_ports() {
+        let source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml"));
+        let config = EffectiveConfig::new(
+            vec![LoadedConfigFile::new(
+                source.clone(),
+                vec![tunnel("web", 80)],
+            )],
+            vec![ResolvedTunnelConfig::new(source, tunnel("web", 80))],
+        );
+
+        let report = validate_config(&config);
+
+        assert!(report.is_valid());
+        assert!(
+            report.warnings.iter().any(|warning| warning.message
+                == "local_port below 1024 may require elevated privileges")
+        );
+    }
+
+    /// 存在しない設定ファイルへトンネルを追加できることを検証する
+    #[test]
+    fn add_tunnel_creates_missing_config_file() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel("db", 15432))
+            .expect("add tunnel");
+        let loaded = read_config_file(&path, ConfigSourceKind::Local)
+            .expect("read configuration")
+            .expect("configuration file exists");
+
+        assert_eq!(loaded.tunnels.len(), 1);
+        assert_eq!(loaded.tunnels[0].id, "db");
+    }
+
+    /// 同一設定ファイル内の ID 重複が追加時に拒否されることを検証する
+    #[test]
+    fn add_tunnel_rejects_duplicate_id() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel("db", 15432))
+            .expect("add tunnel");
+
+        let result = add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel("db", 25432));
+
+        assert!(matches!(result, Err(ConfigEditError::DuplicateId { .. })));
+    }
+
+    /// 指定 ID のトンネルが設定ファイルから削除されることを検証する
+    #[test]
+    fn remove_tunnel_removes_matching_id() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel("db", 15432))
+            .expect("add first tunnel");
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel("cache", 16379))
+            .expect("add second tunnel");
+
+        remove_tunnel_from_config_file(&path, ConfigSourceKind::Local, "db")
+            .expect("remove tunnel");
+        let loaded = read_config_file(&path, ConfigSourceKind::Local)
+            .expect("read configuration")
+            .expect("configuration file exists");
+
+        assert_eq!(loaded.tunnels.len(), 1);
+        assert_eq!(loaded.tunnels[0].id, "cache");
     }
 
     /// テスト用のトンネル設定を生成する

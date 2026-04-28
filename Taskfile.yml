@@ -72,6 +72,16 @@ tasks:
     cmds:
       - cargo run -p fwd-deck-cli --bin fwd-deck -- stop
 
+  config:add:
+    desc: 対話形式で設定を追加する
+    cmds:
+      - cargo run -p fwd-deck-cli --bin fwd-deck -- config add
+
+  config:remove:
+    desc: 対話形式で設定を削除する
+    cmds:
+      - cargo run -p fwd-deck-cli --bin fwd-deck -- config remove
+
   validate:
     desc: fwd-deck.toml で validate を実行する
     preconditions:

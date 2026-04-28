@@ -13,6 +13,10 @@ fwd-deck recover dev-db
 fwd-deck status
 fwd-deck stop
 fwd-deck stop dev-db
+fwd-deck config add
+fwd-deck config add --scope local
+fwd-deck config remove
+fwd-deck config remove --scope global
 fwd-deck validate
 ```
 
@@ -21,12 +25,14 @@ fwd-deck validate
 ```sh
 cargo run -p fwd-deck-cli --bin fwd-deck -- list
 cargo run -p fwd-deck-cli --bin fwd-deck -- status
+cargo run -p fwd-deck-cli --bin fwd-deck -- config add
 cargo run -p fwd-deck-cli --bin fwd-deck -- validate
 ```
 
 `start` と `stop` は、ID を指定しない場合に対話選択を表示します。
 `stop` の対話選択には、追跡中のトンネルをまとめて停止する選択肢も表示されます。
 `recover` は、状態ファイル上で stale になっているトンネルを現在の設定に基づいて再起動します。
+`config add` と `config remove` は、グローバル設定またはローカル設定を選択して対話形式で編集します。
 
 ## 設定ファイル
 
@@ -37,7 +43,10 @@ cargo run -p fwd-deck-cli --bin fwd-deck -- validate
 
 同じ `id` がある場合は、ローカル設定がグローバル設定を上書きします。
 `local_host` を省略した場合は `127.0.0.1` として扱います。
+`local_port` が `1024` 未満の場合、`validate` は権限が必要になる可能性を warning として表示します。
 `fwd-deck.toml` はローカル環境用の設定として git 管理から除外しています。
+`config add` は対象ファイルが存在しない場合に新規作成します。
+`config remove` は対象ファイル内のトンネルだけを削除対象として表示します。
 
 ```sh
 cp fwd-deck.example.toml fwd-deck.toml
@@ -70,14 +79,10 @@ identity_file = "~/.ssh/id_ed25519"
 mise install
 task --list
 task check
+task config:add
+task config:remove
 task list
 task recover
 task status
 task validate
-```
-
-`task` が直接見つからない環境では、mise 経由で実行できます。
-
-```sh
-mise exec -- task check
 ```

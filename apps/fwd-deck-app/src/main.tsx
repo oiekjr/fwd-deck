@@ -28,7 +28,15 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  StrictMode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { ChangeEvent, FormEvent, MouseEvent, ReactElement, ReactNode, RefObject } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
@@ -237,6 +245,11 @@ interface HighlightedTextPart {
   isMatch: boolean;
 }
 
+interface ViewportScrollSnapshot {
+  left: number;
+  top: number;
+}
+
 const initialPaths: WorkspaceSelection = {
   workspacePath: "",
   workspaceHistory: [],
@@ -313,6 +326,7 @@ function App(): ReactElement {
   const activeOperationIdRef = useRef<string | null>(null);
   const operationSequenceRef = useRef<number>(0);
   const operationToastIdRef = useRef<number>(0);
+  const resultScrollSnapshotRef = useRef<ViewportScrollSnapshot | null>(null);
 
   const stats = useMemo<DashboardStats>(() => calculateStats(dashboard), [dashboard]);
   const selectedIdList = useMemo<string[]>(() => Array.from(selectedIds), [selectedIds]);
@@ -337,8 +351,33 @@ function App(): ReactElement {
     [filters, queryInput],
   );
 
+  const captureResultScrollPosition = useCallback((): void => {
+    resultScrollSnapshotRef.current = createViewportScrollSnapshot();
+  }, []);
+
+  useLayoutEffect(() => {
+    const snapshot = resultScrollSnapshotRef.current;
+    if (snapshot === null) {
+      return;
+    }
+
+    resultScrollSnapshotRef.current = null;
+
+    if (activeView !== "dashboard") {
+      return;
+    }
+
+    restoreViewportScroll(snapshot);
+  });
+
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
+      if (filters.query === queryInput) {
+        return;
+      }
+
+      captureResultScrollPosition();
+
       setFilters((current) => {
         if (current.query === queryInput) {
           return current;
@@ -349,7 +388,7 @@ function App(): ReactElement {
     }, searchDebounceMilliseconds);
 
     return () => window.clearTimeout(timeoutId);
-  }, [queryInput]);
+  }, [captureResultScrollPosition, filters.query, queryInput]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent): void {
@@ -445,6 +484,10 @@ function App(): ReactElement {
           paths: shouldPersistPaths ? normalizeWorkspaceSelection(nextPaths) : null,
         });
 
+        if (hasActiveTunnelFilters(filters)) {
+          captureResultScrollPosition();
+        }
+
         setDashboard(loaded);
         setPaths(loaded.paths);
         setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
@@ -466,7 +509,7 @@ function App(): ReactElement {
         }
       }
     },
-    [paths],
+    [captureResultScrollPosition, filters, paths],
   );
 
   useEffect(() => {
@@ -683,6 +726,10 @@ function App(): ReactElement {
         id: tunnel.id,
       });
 
+      if (hasActiveTunnelFilters(filters)) {
+        captureResultScrollPosition();
+      }
+
       setDashboard(loaded);
       setPaths(loaded.paths);
       setSelectedIds((current) => removeSelection(current, tunnel.id));
@@ -856,6 +903,7 @@ function App(): ReactElement {
    * 一覧の絞り込み条件を反映する
    */
   function updateFilter<K extends keyof TunnelFilters>(field: K, value: TunnelFilters[K]): void {
+    captureResultScrollPosition();
     setFilters((current) => ({ ...current, [field]: value }));
   }
 
@@ -863,6 +911,7 @@ function App(): ReactElement {
    * 検索入力値を即時反映し、一覧への適用は遅延させる
    */
   function updateQueryInput(value: string): void {
+    captureResultScrollPosition();
     setQueryInput(value);
   }
 
@@ -870,6 +919,7 @@ function App(): ReactElement {
    * タグ絞り込みの選択状態を切り替える
    */
   function toggleTagFilter(tag: string): void {
+    captureResultScrollPosition();
     setFilters((current) => ({ ...current, tags: toggleTag(current.tags, tag) }));
   }
 
@@ -877,6 +927,7 @@ function App(): ReactElement {
    * 一覧の絞り込み条件を初期状態へ戻す
    */
   function resetFilters(): void {
+    captureResultScrollPosition();
     setQueryInput(initialFilters.query);
     setFilters(initialFilters);
   }
@@ -1213,6 +1264,32 @@ function useMeasuredElementHeight<T extends HTMLElement>(
   }, [isEnabled]);
 
   return [elementRef, height];
+}
+
+/**
+ * 現在のビューポートスクロール位置を記録する
+ */
+function createViewportScrollSnapshot(): ViewportScrollSnapshot {
+  return {
+    left: window.scrollX,
+    top: window.scrollY,
+  };
+}
+
+/**
+ * 記録済みのビューポートスクロール位置へ復元する
+ */
+function restoreViewportScroll(snapshot: ViewportScrollSnapshot): void {
+  window.scrollTo(snapshot.left, Math.min(snapshot.top, maximumViewportScrollTop()));
+}
+
+/**
+ * 現在のドキュメントで指定可能な最大スクロール位置を算出する
+ */
+function maximumViewportScrollTop(): number {
+  const scrollHeight = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight);
+
+  return Math.max(0, scrollHeight - window.innerHeight);
 }
 
 interface DashboardViewProps {

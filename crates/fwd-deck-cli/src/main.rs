@@ -12,12 +12,12 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use fwd_deck_core::{
     ConfigEditError, ConfigPaths, ConfigSourceKind, DEFAULT_LOCAL_HOST, EffectiveConfig,
-    ProcessState, ResolvedTunnelConfig, StartedTunnel, StoppedTunnel, TimeoutConfig, TunnelConfig,
-    TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport, add_tunnel_to_config_file,
-    build_ssh_command_args, default_global_config_path, default_local_config_path,
-    default_state_file_path, filter_tunnels_by_tags, load_effective_config, normalize_tag,
-    read_config_file, remove_tunnel_from_config_file, start_tunnel, stop_tunnel, tag_is_valid,
-    tunnel_statuses, validate_config,
+    ProcessState, ResolvedTimeoutConfig, ResolvedTunnelConfig, StartedTunnel, StoppedTunnel,
+    TimeoutConfig, TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport,
+    add_tunnel_to_config_file, build_ssh_command_args, default_global_config_path,
+    default_local_config_path, default_state_file_path, filter_tunnels_by_tags,
+    load_effective_config, normalize_tag, read_config_file, remove_tunnel_from_config_file,
+    start_tunnel, stop_tunnel, tag_is_valid, tunnel_statuses, validate_config,
 };
 use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
 use thiserror::Error;
@@ -76,6 +76,11 @@ enum Command {
             help = "Filter tunnels by id or description"
         )]
         query: Option<String>,
+    },
+    #[command(about = "Show configured tunnel details")]
+    Show {
+        #[arg(value_name = "ID", help = "Tunnel ID to show")]
+        id: String,
     },
     #[command(about = "Start configured tunnels")]
     Start {
@@ -205,6 +210,10 @@ fn run() -> Result<ExitCode, CliError> {
         Command::List { tags, query } => {
             let config = load_config(&cli)?;
             list_command(&config, tags.clone(), query.clone())
+        }
+        Command::Show { id } => {
+            let config = load_config(&cli)?;
+            show_command(&config, id)
         }
         Command::Start {
             ids,
@@ -453,6 +462,31 @@ fn list_command(
     Ok(ExitCode::SUCCESS)
 }
 
+/// トンネル詳細表示コマンドを実行する
+fn show_command(config: &EffectiveConfig, id: &str) -> Result<ExitCode, CliError> {
+    if !config.has_sources() {
+        eprintln!(
+            "{}",
+            red("No configuration files were found.", OutputStream::Stderr)
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+
+    let Some(resolved) = find_tunnel_by_id(config, id) else {
+        eprintln!(
+            "{}",
+            red(
+                &format!("No tunnel matched ID: {id}."),
+                OutputStream::Stderr
+            )
+        );
+        return Ok(ExitCode::FAILURE);
+    };
+
+    print_tunnel_details(resolved);
+    Ok(ExitCode::SUCCESS)
+}
+
 /// 統合済みトンネル設定の一覧を表示する
 fn print_list(tunnels: &[&ResolvedTunnelConfig]) {
     println!(
@@ -468,18 +502,58 @@ fn print_list(tunnels: &[&ResolvedTunnelConfig]) {
 /// トンネル設定の一覧行を表示する
 fn print_tunnel_row(resolved: &ResolvedTunnelConfig) {
     let tunnel = &resolved.tunnel;
-    let local = format!("{}:{}", tunnel.effective_local_host(), tunnel.local_port);
-    let remote = format!("{}:{}", tunnel.remote_host, tunnel.remote_port);
-    let ssh = match tunnel.ssh_port {
-        Some(port) => format!("{}@{}:{}", tunnel.ssh_user, tunnel.ssh_host, port),
-        None => format!("{}@{}", tunnel.ssh_user, tunnel.ssh_host),
-    };
+    let local = format_local_endpoint(tunnel);
+    let remote = format_remote_endpoint(tunnel);
+    let ssh = format_ssh_endpoint(tunnel);
     let tags = format_tag_list(&tunnel.tags);
 
     println!(
         "{:<24} {:<24} {:<32} {:<32} {:<24} {}",
         tunnel.id, local, remote, ssh, tags, resolved.source.kind
     );
+}
+
+/// トンネル設定の詳細を表示する
+fn print_tunnel_details(resolved: &ResolvedTunnelConfig) {
+    let tunnel = &resolved.tunnel;
+
+    println!("ID: {}", tunnel.id);
+    println!(
+        "Description: {}",
+        format_optional_value(tunnel.description.as_deref())
+    );
+    println!("Tags: {}", format_tag_list(&tunnel.tags));
+    println!("Local: {}", format_local_endpoint(tunnel));
+    println!("Remote: {}", format_remote_endpoint(tunnel));
+    println!("SSH: {}", format_ssh_endpoint(tunnel));
+    println!(
+        "Identity file: {}",
+        format_optional_value(tunnel.identity_file.as_deref())
+    );
+    println!(
+        "Source: {} ({})",
+        resolved.source.kind,
+        resolved.source.path.display()
+    );
+    print_timeout_details(resolved.timeouts);
+}
+
+/// トンネル設定の local endpoint 表示文字列を生成する
+fn format_local_endpoint(tunnel: &TunnelConfig) -> String {
+    format!("{}:{}", tunnel.effective_local_host(), tunnel.local_port)
+}
+
+/// トンネル設定の remote endpoint 表示文字列を生成する
+fn format_remote_endpoint(tunnel: &TunnelConfig) -> String {
+    format!("{}:{}", tunnel.remote_host, tunnel.remote_port)
+}
+
+/// トンネル設定の SSH 接続先表示文字列を生成する
+fn format_ssh_endpoint(tunnel: &TunnelConfig) -> String {
+    match tunnel.ssh_port {
+        Some(port) => format!("{}@{}:{}", tunnel.ssh_user, tunnel.ssh_host, port),
+        None => format!("{}@{}", tunnel.ssh_user, tunnel.ssh_host),
+    }
 }
 
 /// タグ一覧を表示用文字列へ変換する
@@ -489,6 +563,28 @@ fn format_tag_list(tags: &[String]) -> String {
     } else {
         tags.join(",")
     }
+}
+
+/// 任意入力値を表示用文字列へ変換する
+fn format_optional_value(value: Option<&str>) -> &str {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("-")
+}
+
+/// 解決済みタイムアウト設定を表示する
+fn print_timeout_details(timeouts: ResolvedTimeoutConfig) {
+    println!("Timeouts:");
+    println!("  Connect timeout: {}s", timeouts.connect_timeout_seconds);
+    println!(
+        "  Server alive interval: {}s",
+        timeouts.server_alive_interval_seconds
+    );
+    println!(
+        "  Server alive count max: {}",
+        timeouts.server_alive_count_max
+    );
+    println!("  Start grace: {}ms", timeouts.start_grace_milliseconds);
 }
 
 /// トンネル開始コマンドを実行する
@@ -1904,6 +2000,29 @@ mod tests {
 
         assert_eq!(tunnels.len(), 1);
         assert_eq!(tunnels[0].tunnel.id, "dev-db");
+    }
+
+    /// show 対象の ID が完全一致で取得されることを検証する
+    #[test]
+    fn find_tunnel_by_id_returns_exact_match() {
+        let config = effective_config_with_tunnels(vec![tunnel("dev-db", 15432)]);
+
+        let tunnel = find_tunnel_by_id(&config, "dev-db");
+
+        assert_eq!(
+            tunnel.map(|resolved| resolved.tunnel.id.as_str()),
+            Some("dev-db")
+        );
+    }
+
+    /// show 対象の ID が部分一致では取得されないことを検証する
+    #[test]
+    fn find_tunnel_by_id_does_not_return_partial_match() {
+        let config = effective_config_with_tunnels(vec![tunnel("dev-db", 15432)]);
+
+        let tunnel = find_tunnel_by_id(&config, "dev");
+
+        assert!(tunnel.is_none());
     }
 
     /// テスト用の統合済み設定を生成する

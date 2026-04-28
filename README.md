@@ -9,6 +9,7 @@ fwd-deck list
 fwd-deck list --query db
 fwd-deck list --tag dev
 fwd-deck list --tag dev --query db
+fwd-deck show dev-db
 fwd-deck start
 fwd-deck start dev-db
 fwd-deck start dev-db --dry-run
@@ -47,6 +48,7 @@ cargo run -p fwd-deck-cli --bin fwd-deck -- validate
 `list` と `start` は `--tag` を複数指定でき、指定したタグをすべて持つトンネルだけを対象にします。
 `list --query` は、`id` と `description` に対して大文字小文字を区別しない部分一致検索を行います。
 `list` で `--tag` と `--query` を併用した場合は、両方に一致するトンネルだけを表示します。
+`show` は、統合後のトンネル詳細を表示し、`description` や有効なタイムアウト設定を確認できます。
 `stop` の対話選択には、追跡中のトンネルをまとめて停止する選択肢も表示されます。
 `recover` は、状態ファイル上で stale になっているトンネルを現在の設定に基づいて再起動します。
 `watch` は、状態ファイル上で追跡中のトンネルを監視し、stale になった場合に自動で再起動します。

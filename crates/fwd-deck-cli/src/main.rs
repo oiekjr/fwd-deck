@@ -14,11 +14,12 @@ use clap_complete::Shell;
 use fwd_deck_core::{
     ConfigEditError, ConfigPaths, ConfigSourceKind, DEFAULT_LOCAL_HOST, EffectiveConfig,
     ProcessState, ResolvedTimeoutConfig, ResolvedTunnelConfig, StartedTunnel, StoppedTunnel,
-    TimeoutConfig, TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport,
-    add_tunnel_to_config_file, build_ssh_command_args, default_global_config_path,
-    default_local_config_path, default_state_file_path, filter_tunnels_by_tags,
-    load_effective_config, normalize_tag, read_config_file, remove_tunnel_from_config_file,
-    start_tunnel, stop_tunnel, tag_is_valid, tunnel_statuses, validate_config,
+    TimeoutConfig, TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, TunnelState,
+    ValidationReport, add_tunnel_to_config_file, build_ssh_command_args,
+    default_global_config_path, default_local_config_path, default_state_file_path,
+    filter_tunnels_by_tags, load_effective_config, normalize_tag, read_config_file,
+    remove_tunnel_from_config_file, start_tunnel, stop_tunnel, tag_is_valid, tunnel_statuses,
+    validate_config,
 };
 use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
 use thiserror::Error;
@@ -31,6 +32,11 @@ const LIST_REMOTE_MIN_WIDTH: usize = 32;
 const LIST_REMOTE_HOST_MAX_WIDTH: usize = 40;
 const LIST_SSH_MIN_WIDTH: usize = 32;
 const LIST_TAGS_MIN_WIDTH: usize = 24;
+const STATUS_ID_MIN_WIDTH: usize = 24;
+const STATUS_LOCAL_MIN_WIDTH: usize = 24;
+const STATUS_REMOTE_MIN_WIDTH: usize = 32;
+const STATUS_PID_MIN_WIDTH: usize = 8;
+const STATUS_STATE_MIN_WIDTH: usize = 10;
 const TRUNCATION_MARKER: &str = "...";
 
 /// fwd-deck の CLI 引数を表現する
@@ -611,11 +617,16 @@ fn truncate_display_width(value: &str, max_width: usize) -> String {
 fn pad_display_width(value: &str, width: usize) -> String {
     let display_width = display_width(value);
 
-    if display_width >= width {
+    pad_display_width_with_visible_width(value, display_width, width)
+}
+
+/// 端末上の表示幅と描画文字列を分けて左詰めする
+fn pad_display_width_with_visible_width(value: &str, visible_width: usize, width: usize) -> String {
+    if visible_width >= width {
         return value.to_owned();
     }
 
-    let padding_width = width - display_width;
+    let padding_width = width - visible_width;
     let mut padded = String::with_capacity(value.len() + padding_width);
     padded.push_str(value);
     padded.push_str(&" ".repeat(padding_width));
@@ -954,15 +965,14 @@ fn status_command(state_path: &Path) -> Result<ExitCode, CliError> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    println!(
-        "{:<24} {:<24} {:<32} {:<8} {:<10} STARTED",
-        "ID", "LOCAL", "REMOTE", "PID", "STATE"
-    );
-
     let now = current_unix_seconds();
+    let statuses = sorted_statuses_by_id(&statuses);
+    let widths = status_column_widths(&statuses);
 
-    for status in sorted_statuses_by_id(&statuses) {
-        print_status_row(status, now);
+    print_status_header(widths);
+
+    for status in statuses {
+        print_status_row(status, widths, now);
     }
 
     Ok(ExitCode::SUCCESS)
@@ -1701,18 +1711,98 @@ fn print_stopped_tunnel(stopped: &StoppedTunnel) {
     println!("{}", green(&message, OutputStream::Stdout));
 }
 
+/// 状態一覧の見出しを表示する
+fn print_status_header(widths: StatusColumnWidths) {
+    println!(
+        "{} {} {} {} {} STARTED",
+        pad_display_width("ID", widths.id),
+        pad_display_width("LOCAL", widths.local),
+        pad_display_width("REMOTE", widths.remote),
+        pad_display_width("PID", widths.pid),
+        pad_display_width("STATE", widths.state)
+    );
+}
+
 /// 状態一覧の 1 行を表示する
-fn print_status_row(status: &TunnelRuntimeStatus, now: u64) {
+fn print_status_row(status: &TunnelRuntimeStatus, widths: StatusColumnWidths, now: u64) {
     let state = &status.state;
-    let local = format!("{}:{}", state.local_host, state.local_port);
-    let remote = format!("{}:{}", state.remote_host, state.remote_port);
+    let local = format_status_local_endpoint(state);
+    let remote = format_status_remote_endpoint(state);
+    let pid = state.pid.to_string();
+    let process_state_text = process_state_plain_label(status.process_state);
     let process_state = process_state_label(status.process_state, OutputStream::Stdout);
     let started = relative_time_label(state.started_at_unix_seconds, now);
 
     println!(
-        "{:<24} {:<24} {:<32} {:<8} {:<10} {}",
-        state.id, local, remote, state.pid, process_state, started
+        "{} {} {} {} {} {}",
+        pad_display_width(&state.id, widths.id),
+        pad_display_width(&local, widths.local),
+        pad_display_width(&remote, widths.remote),
+        pad_display_width(&pid, widths.pid),
+        pad_display_width_with_visible_width(
+            &process_state,
+            display_width(process_state_text),
+            widths.state,
+        ),
+        started
     );
+}
+
+/// status 表示の列幅を表現する
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StatusColumnWidths {
+    id: usize,
+    local: usize,
+    remote: usize,
+    pid: usize,
+    state: usize,
+}
+
+impl StatusColumnWidths {
+    /// 最小表示幅を初期値として列幅を初期化する
+    fn with_minimums() -> Self {
+        Self {
+            id: STATUS_ID_MIN_WIDTH,
+            local: STATUS_LOCAL_MIN_WIDTH,
+            remote: STATUS_REMOTE_MIN_WIDTH,
+            pid: STATUS_PID_MIN_WIDTH,
+            state: STATUS_STATE_MIN_WIDTH,
+        }
+    }
+}
+
+/// status 表示対象の値から列幅を算出する
+fn status_column_widths(statuses: &[&TunnelRuntimeStatus]) -> StatusColumnWidths {
+    statuses
+        .iter()
+        .fold(StatusColumnWidths::with_minimums(), |widths, status| {
+            let state = &status.state;
+            let pid = state.pid.to_string();
+
+            StatusColumnWidths {
+                id: widths.id.max(display_width(&state.id)),
+                local: widths
+                    .local
+                    .max(display_width(&format_status_local_endpoint(state))),
+                remote: widths
+                    .remote
+                    .max(display_width(&format_status_remote_endpoint(state))),
+                pid: widths.pid.max(display_width(&pid)),
+                state: widths.state.max(display_width(process_state_plain_label(
+                    status.process_state,
+                ))),
+            }
+        })
+}
+
+/// 状態一覧表示用の local endpoint 文字列を生成する
+fn format_status_local_endpoint(state: &TunnelState) -> String {
+    format!("{}:{}", state.local_host, state.local_port)
+}
+
+/// 状態一覧表示用の remote endpoint 文字列を生成する
+fn format_status_remote_endpoint(state: &TunnelState) -> String {
+    format!("{}:{}", state.remote_host, state.remote_port)
 }
 
 /// 現在時刻を UNIX 秒で取得する
@@ -1751,8 +1841,16 @@ fn relative_time_label(started_at: u64, now: u64) -> String {
 /// プロセス状態の表示ラベルを取得する
 fn process_state_label(process_state: ProcessState, stream: OutputStream) -> String {
     match process_state {
-        ProcessState::Running => green("RUNNING", stream),
-        ProcessState::Stale => red("STALE", stream),
+        ProcessState::Running => green(process_state_plain_label(process_state), stream),
+        ProcessState::Stale => red(process_state_plain_label(process_state), stream),
+    }
+}
+
+/// プロセス状態の未装飾ラベルを取得する
+fn process_state_plain_label(process_state: ProcessState) -> &'static str {
+    match process_state {
+        ProcessState::Running => "RUNNING",
+        ProcessState::Stale => "STALE",
     }
 }
 
@@ -2177,6 +2275,31 @@ mod tests {
         let widths = list_column_widths(&tunnels, false);
 
         assert_eq!(widths.id, display_width("prod-登記情報管理システム"));
+    }
+
+    /// status 表示の列幅が最長 ID に合わせて拡張されることを検証する
+    #[test]
+    fn status_column_widths_expands_id_to_longest_value() {
+        let statuses = vec![
+            runtime_status("db", ProcessState::Running),
+            runtime_status("prod-登記情報管理システム", ProcessState::Running),
+        ];
+        let statuses = statuses.iter().collect::<Vec<_>>();
+
+        let widths = status_column_widths(&statuses);
+
+        assert_eq!(widths.id, display_width("prod-登記情報管理システム"));
+    }
+
+    /// 装飾付き文字列が可視幅に基づいて補完されることを検証する
+    #[test]
+    fn pad_display_width_with_visible_width_ignores_decoration_width() {
+        let value = "\x1b[32mRUNNING\x1b[0m";
+
+        let padded = pad_display_width_with_visible_width(value, display_width("RUNNING"), 10);
+
+        assert!(padded.starts_with(value));
+        assert!(padded.ends_with("   "));
     }
 
     /// list 表示では remote host を省略して remote port を保持することを検証する

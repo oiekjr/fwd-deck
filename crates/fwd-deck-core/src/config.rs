@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const GLOBAL_CONFIG_RELATIVE_PATH: &str = ".config/fwd-deck/config.toml";
@@ -28,7 +28,8 @@ impl ConfigPaths {
 }
 
 /// 設定ファイルの種類を表現する
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
 pub enum ConfigSourceKind {
     Global,
     Local,

@@ -16,6 +16,11 @@ tasks:
     cmds:
       - cargo fmt --all --check
 
+  help:
+    desc: CLI help を表示する
+    cmds:
+      - cargo run -p fwd-deck-cli --bin fwd-deck -- --help
+
   test:
     desc: workspace 全体のテストを実行する
     cmds:
@@ -34,11 +39,43 @@ tasks:
       - lint
 
   list:
-    desc: サンプル設定で list を実行する
+    desc: fwd-deck.toml で list を実行する
+    preconditions:
+      - sh: test -f fwd-deck.toml
+        msg: fwd-deck.toml is required. Create it from fwd-deck.example.toml.
     cmds:
-      - cargo run -p fwd-deck-cli --bin fwd-deck -- list --config fwd-deck.example.toml --no-global
+      - cargo run -p fwd-deck-cli --bin fwd-deck -- list
+
+  start:
+    desc: fwd-deck.toml で start を実行する
+    preconditions:
+      - sh: test -f fwd-deck.toml
+        msg: fwd-deck.toml is required. Create it from fwd-deck.example.toml.
+    cmds:
+      - cargo run -p fwd-deck-cli --bin fwd-deck -- start
+
+  recover:
+    desc: stale なトンネルを再起動する
+    preconditions:
+      - sh: test -f fwd-deck.toml
+        msg: fwd-deck.toml is required. Create it from fwd-deck.example.toml.
+    cmds:
+      - cargo run -p fwd-deck-cli --bin fwd-deck -- recover
+
+  status:
+    desc: status を実行する
+    cmds:
+      - cargo run -p fwd-deck-cli --bin fwd-deck -- status
+
+  stop:
+    desc: stop を実行する
+    cmds:
+      - cargo run -p fwd-deck-cli --bin fwd-deck -- stop
 
   validate:
-    desc: サンプル設定で validate を実行する
+    desc: fwd-deck.toml で validate を実行する
+    preconditions:
+      - sh: test -f fwd-deck.toml
+        msg: fwd-deck.toml is required. Create it from fwd-deck.example.toml.
     cmds:
-      - cargo run -p fwd-deck-cli --bin fwd-deck -- validate --config fwd-deck.example.toml --no-global
+      - cargo run -p fwd-deck-cli --bin fwd-deck -- validate

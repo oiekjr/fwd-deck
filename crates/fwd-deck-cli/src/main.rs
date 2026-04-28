@@ -13,8 +13,9 @@ use fwd_deck_core::{
     ProcessState, ResolvedTunnelConfig, StartedTunnel, StoppedTunnel, TunnelConfig,
     TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport, add_tunnel_to_config_file,
     default_global_config_path, default_local_config_path, default_state_file_path,
-    load_effective_config, read_config_file, remove_tunnel_from_config_file, start_tunnel,
-    stop_tunnel, tunnel_statuses, validate_config,
+    filter_tunnels_by_tags, load_effective_config, normalize_tag, read_config_file,
+    remove_tunnel_from_config_file, start_tunnel, stop_tunnel, tag_is_valid, tunnel_statuses,
+    validate_config,
 };
 use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
 use thiserror::Error;
@@ -62,11 +63,16 @@ struct Cli {
 #[derive(Debug, Clone, Subcommand)]
 enum Command {
     #[command(about = "List configured tunnels")]
-    List,
+    List {
+        #[arg(long = "tag", value_name = "TAG", help = "Filter tunnels by tag")]
+        tags: Vec<String>,
+    },
     #[command(about = "Start configured tunnels")]
     Start {
         #[arg(value_name = "ID", help = "Tunnel IDs to start")]
         ids: Vec<String>,
+        #[arg(long = "tag", value_name = "TAG", help = "Start tunnels matching tag")]
+        tags: Vec<String>,
     },
     #[command(about = "Recover stale tracked tunnels")]
     Recover {
@@ -130,6 +136,10 @@ enum CliError {
     MissingGlobalConfigPath,
     #[error("Failed to resolve the default state file path because HOME is not set")]
     MissingStateHome,
+    #[error(
+        "Invalid tag: {tag}. Tags may contain only lowercase ASCII letters, numbers, '-', '_', '.', or '/'"
+    )]
+    InvalidTag { tag: String },
     #[error(transparent)]
     Config(#[from] fwd_deck_core::ConfigLoadError),
     #[error(transparent)]
@@ -157,15 +167,14 @@ fn run() -> Result<ExitCode, CliError> {
     let state_path = cli.state.clone();
 
     match &cli.command {
-        Command::List => {
+        Command::List { tags } => {
             let config = load_config(&cli)?;
-            print_list(&config);
-            Ok(ExitCode::SUCCESS)
+            list_command(&config, tags.clone())
         }
-        Command::Start { ids } => {
+        Command::Start { ids, tags } => {
             let config = load_config(&cli)?;
             let state_path = resolve_state_path(state_path)?;
-            start_command(&config, &state_path, ids.clone())
+            start_command(&config, &state_path, ids.clone(), tags.clone())
         }
         Command::Recover { ids } => {
             let config = load_config(&cli)?;
@@ -344,27 +353,42 @@ fn config_path_for_scope(
     }
 }
 
-/// 統合済みトンネル設定の一覧を表示する
-fn print_list(config: &EffectiveConfig) {
+/// トンネル設定一覧コマンドを実行する
+fn list_command(config: &EffectiveConfig, tags: Vec<String>) -> Result<ExitCode, CliError> {
+    let tags = normalize_cli_tags(&tags)?;
+
     if !config.has_sources() {
         println!(
             "{}",
             red("No configuration files were found.", OutputStream::Stdout)
         );
-        return;
+        return Ok(ExitCode::SUCCESS);
     }
 
-    if config.tunnels.is_empty() {
+    let tunnels = select_tunnels_for_tags(config, &tags);
+
+    if tunnels.is_empty() && tags.is_empty() {
         println!("No tunnels are configured.");
-        return;
+        return Ok(ExitCode::SUCCESS);
     }
 
+    if tunnels.is_empty() {
+        println!("No tunnels matched tags: {}.", tags.join(", "));
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    print_list(&tunnels);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// 統合済みトンネル設定の一覧を表示する
+fn print_list(tunnels: &[&ResolvedTunnelConfig]) {
     println!(
-        "{:<24} {:<24} {:<32} {:<32} SOURCE",
-        "ID", "LOCAL", "REMOTE", "SSH"
+        "{:<24} {:<24} {:<32} {:<32} {:<24} SOURCE",
+        "ID", "LOCAL", "REMOTE", "SSH", "TAGS"
     );
 
-    for resolved in &config.tunnels {
+    for resolved in tunnels {
         print_tunnel_row(resolved);
     }
 }
@@ -378,11 +402,21 @@ fn print_tunnel_row(resolved: &ResolvedTunnelConfig) {
         Some(port) => format!("{}@{}:{}", tunnel.ssh_user, tunnel.ssh_host, port),
         None => format!("{}@{}", tunnel.ssh_user, tunnel.ssh_host),
     };
+    let tags = format_tag_list(&tunnel.tags);
 
     println!(
-        "{:<24} {:<24} {:<32} {:<32} {}",
-        tunnel.id, local, remote, ssh, resolved.source.kind
+        "{:<24} {:<24} {:<32} {:<32} {:<24} {}",
+        tunnel.id, local, remote, ssh, tags, resolved.source.kind
     );
+}
+
+/// タグ一覧を表示用文字列へ変換する
+fn format_tag_list(tags: &[String]) -> String {
+    if tags.is_empty() {
+        "-".to_owned()
+    } else {
+        tags.join(",")
+    }
 }
 
 /// トンネル開始コマンドを実行する
@@ -390,6 +424,7 @@ fn start_command(
     config: &EffectiveConfig,
     state_path: &Path,
     ids: Vec<String>,
+    tags: Vec<String>,
 ) -> Result<ExitCode, CliError> {
     if !config.has_sources() {
         eprintln!(
@@ -403,7 +438,38 @@ fn start_command(
         return Ok(ExitCode::FAILURE);
     }
 
-    let ids = if ids.is_empty() {
+    if !ids.is_empty() && !tags.is_empty() {
+        eprintln!(
+            "{}",
+            red(
+                "Cannot combine tunnel IDs with --tag.",
+                OutputStream::Stderr
+            )
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+
+    let tags = normalize_cli_tags(&tags)?;
+
+    let ids = if !tags.is_empty() {
+        let tunnels = select_tunnels_for_tags(config, &tags);
+
+        if tunnels.is_empty() {
+            eprintln!(
+                "{}",
+                red(
+                    &format!("No tunnels matched tags: {}.", tags.join(", ")),
+                    OutputStream::Stderr
+                )
+            );
+            return Ok(ExitCode::FAILURE);
+        }
+
+        tunnels
+            .into_iter()
+            .map(|tunnel| tunnel.tunnel.id.clone())
+            .collect()
+    } else if ids.is_empty() {
         prompt_tunnels_to_start(config)?
     } else {
         ids
@@ -592,6 +658,47 @@ fn print_validation_if_invalid(config: &EffectiveConfig) -> bool {
     false
 }
 
+/// CLI 入力タグを正規化する
+fn normalize_cli_tags(tags: &[String]) -> Result<Vec<String>, CliError> {
+    tags.iter()
+        .map(|tag| normalize_tag_input(tag))
+        .collect::<Result<Vec<_>, _>>()
+}
+
+/// 1 件のタグ入力を正規化して検証する
+fn normalize_tag_input(tag: &str) -> Result<String, CliError> {
+    let normalized = normalize_tag(tag);
+
+    if tag_is_valid(&normalized) {
+        Ok(normalized)
+    } else {
+        Err(CliError::InvalidTag {
+            tag: display_invalid_tag(tag),
+        })
+    }
+}
+
+/// 空タグを表示用の値へ変換する
+fn display_invalid_tag(tag: &str) -> String {
+    if tag.trim().is_empty() {
+        "<empty>".to_owned()
+    } else {
+        tag.to_owned()
+    }
+}
+
+/// タグ指定に応じて統合済みトンネル設定を選択する
+fn select_tunnels_for_tags<'a>(
+    config: &'a EffectiveConfig,
+    tags: &[String],
+) -> Vec<&'a ResolvedTunnelConfig> {
+    if tags.is_empty() {
+        return config.tunnels.iter().collect();
+    }
+
+    filter_tunnels_by_tags(&config.tunnels, tags)
+}
+
 /// 編集対象の設定スコープを対話的に選択する
 fn prompt_config_scope(paths: &ConfigPaths) -> Result<ConfigSourceKind, InquireError> {
     let mut choices = Vec::new();
@@ -616,6 +723,7 @@ fn prompt_config_scope(paths: &ConfigPaths) -> Result<ConfigSourceKind, InquireE
 fn prompt_tunnel_config() -> Result<TunnelConfig, CliError> {
     let id = prompt_required_text("Tunnel id:")?;
     let description = prompt_optional_text("Description:")?;
+    let tags = prompt_tags()?;
     let local_host = Some(prompt_local_host()?);
     let local_port = prompt_port("Local port:", None)?;
     let remote_host = prompt_required_text("Remote host:")?;
@@ -628,6 +736,7 @@ fn prompt_tunnel_config() -> Result<TunnelConfig, CliError> {
     Ok(TunnelConfig {
         id,
         description,
+        tags,
         local_host,
         local_port,
         remote_host,
@@ -673,6 +782,32 @@ fn prompt_optional_text(label: &str) -> Result<Option<String>, CliError> {
     } else {
         Ok(Some(trimmed.to_owned()))
     }
+}
+
+/// タグ一覧の入力を受け取る
+fn prompt_tags() -> Result<Vec<String>, CliError> {
+    loop {
+        let value = Text::new("Tags (comma-separated):").prompt()?;
+
+        match parse_tag_list(&value) {
+            Ok(tags) => return Ok(tags),
+            Err(error) => {
+                eprintln!("{}", red(&error.to_string(), OutputStream::Stderr));
+            }
+        }
+    }
+}
+
+/// カンマ区切りのタグ入力を正規化する
+fn parse_tag_list(value: &str) -> Result<Vec<String>, CliError> {
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    value
+        .split(',')
+        .map(normalize_tag_input)
+        .collect::<Result<Vec<_>, _>>()
 }
 
 /// local_host の入力を受け取る

@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 const GLOBAL_CONFIG_RELATIVE_PATH: &str = ".config/fwd-deck/config.toml";
@@ -65,6 +65,12 @@ impl ConfigSource {
 pub struct TunnelConfig {
     pub id: String,
     pub description: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_tags",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub tags: Vec<String>,
     pub local_host: Option<String>,
     pub local_port: u16,
     pub remote_host: String,
@@ -311,7 +317,7 @@ pub fn read_config_file(
 
     Ok(Some(LoadedConfigFile::new(
         ConfigSource::new(kind, path.to_path_buf()),
-        raw.tunnels,
+        normalize_tunnels(raw.tunnels),
     )))
 }
 
@@ -322,6 +328,7 @@ pub fn add_tunnel_to_config_file(
     tunnel: TunnelConfig,
 ) -> Result<LoadedConfigFile, ConfigEditError> {
     let mut file = read_config_file_for_edit(path, kind, true)?;
+    let tunnel = normalize_tunnel(tunnel);
 
     if file.tunnels.iter().any(|existing| existing.id == tunnel.id) {
         return Err(ConfigEditError::DuplicateId {
@@ -364,6 +371,45 @@ pub fn load_effective_config(paths: &ConfigPaths) -> Result<EffectiveConfig, Con
     Ok(EffectiveConfig::new(sources, tunnels))
 }
 
+/// タグを比較用の表記へ正規化する
+pub fn normalize_tag(tag: &str) -> String {
+    tag.trim().to_ascii_lowercase()
+}
+
+/// タグ一覧を比較用の表記へ正規化する
+pub fn normalize_tags(tags: &[String]) -> Vec<String> {
+    tags.iter().map(|tag| normalize_tag(tag)).collect()
+}
+
+/// タグが許可された ASCII slug かを判定する
+pub fn tag_is_valid(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag
+            .chars()
+            .all(|character| matches!(character, 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '/'))
+}
+
+/// トンネルが指定されたタグをすべて持つかを判定する
+pub fn tunnel_matches_tags(tunnel: &TunnelConfig, required_tags: &[String]) -> bool {
+    let required_tags = normalize_tags(required_tags);
+    let tunnel_tags = normalize_tags(&tunnel.tags);
+
+    required_tags
+        .iter()
+        .all(|required| tunnel_tags.iter().any(|tag| tag == required))
+}
+
+/// 指定タグをすべて持つ統合済みトンネル設定を取得する
+pub fn filter_tunnels_by_tags<'a>(
+    tunnels: &'a [ResolvedTunnelConfig],
+    required_tags: &[String],
+) -> Vec<&'a ResolvedTunnelConfig> {
+    tunnels
+        .iter()
+        .filter(|resolved| tunnel_matches_tags(&resolved.tunnel, required_tags))
+        .collect()
+}
+
 /// 設定内容の意味的な不備を検証する
 pub fn validate_config(config: &EffectiveConfig) -> ValidationReport {
     let mut report = ValidationReport::valid();
@@ -371,6 +417,7 @@ pub fn validate_config(config: &EffectiveConfig) -> ValidationReport {
     validate_duplicate_ids(config, &mut report);
     validate_required_fields(config, &mut report);
     validate_optional_fields(config, &mut report);
+    validate_tags(config, &mut report);
     validate_ports(config, &mut report);
     warn_privileged_local_ports(config, &mut report);
     validate_duplicate_local_ports(config, &mut report);
@@ -408,6 +455,23 @@ fn validate_local_host(
             Some(resolved.tunnel.id.clone()),
             "local_host cannot contain whitespace",
         ));
+    }
+}
+
+/// タグが許可された形式で記述されているかを検証する
+fn validate_tags(config: &EffectiveConfig, report: &mut ValidationReport) {
+    for resolved in &config.tunnels {
+        for tag in &resolved.tunnel.tags {
+            if !tag_is_valid(tag) {
+                report.push(ValidationError::new(
+                    resolved.source.clone(),
+                    Some(resolved.tunnel.id.clone()),
+                    format!(
+                        "tag must contain only lowercase ASCII letters, numbers, '-', '_', '.', or '/': {tag}"
+                    ),
+                ));
+            }
+        }
     }
 }
 
@@ -483,7 +547,7 @@ fn read_config_file_for_edit(
 
     Ok(LoadedConfigFile::new(
         ConfigSource::new(kind, path.to_path_buf()),
-        raw.tunnels,
+        normalize_tunnels(raw.tunnels),
     ))
 }
 
@@ -500,7 +564,7 @@ fn write_config_file(path: &Path, tunnels: &[TunnelConfig]) -> Result<(), Config
     }
 
     let raw = RawConfigFile {
-        tunnels: tunnels.to_vec(),
+        tunnels: normalize_tunnels(tunnels.to_vec()),
     };
     let content = toml::to_string_pretty(&raw).map_err(|source| ConfigEditError::Serialize {
         path: path.to_path_buf(),
@@ -511,6 +575,25 @@ fn write_config_file(path: &Path, tunnels: &[TunnelConfig]) -> Result<(), Config
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// TOML から読み込んだタグ一覧を正規化する
+fn deserialize_tags<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer).map(|tags| normalize_tags(&tags))
+}
+
+/// トンネル一覧のタグを正規化する
+fn normalize_tunnels(tunnels: Vec<TunnelConfig>) -> Vec<TunnelConfig> {
+    tunnels.into_iter().map(normalize_tunnel).collect()
+}
+
+/// トンネル設定のタグを正規化する
+fn normalize_tunnel(mut tunnel: TunnelConfig) -> TunnelConfig {
+    tunnel.tags = normalize_tags(&tunnel.tags);
+    tunnel
 }
 
 /// 同一設定ファイル内の ID 重複を検証する
@@ -688,6 +771,7 @@ ssh_host = "local-bastion.example.com"
         assert_eq!(config.tunnels[0].source.kind, ConfigSourceKind::Local);
         assert_eq!(config.tunnels[0].tunnel.local_port, 25432);
         assert_eq!(config.tunnels[0].tunnel.remote_host, "local-db.internal");
+        assert!(config.tunnels[0].tunnel.tags.is_empty());
     }
 
     /// local_host 未指定時に既定値が使われることを検証する
@@ -796,6 +880,69 @@ ssh_host = "local-bastion.example.com"
         );
     }
 
+    /// タグ付き設定が TOML として保存し、同じ内容で読み戻せることを検証する
+    #[test]
+    fn tagged_tunnel_round_trips_as_toml() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        let mut tunnel = tunnel("db", 15432);
+        tunnel.tags = vec!["Dev".to_owned(), "project-a".to_owned()];
+
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel)
+            .expect("add tagged tunnel");
+        let loaded = read_config_file(&path, ConfigSourceKind::Local)
+            .expect("read configuration")
+            .expect("configuration file exists");
+
+        assert_eq!(
+            loaded.tunnels[0].tags,
+            vec!["dev".to_owned(), "project-a".to_owned()]
+        );
+    }
+
+    /// タグなし設定では保存時に tags を出力しないことを検証する
+    #[test]
+    fn empty_tags_are_omitted_when_serializing() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel("db", 15432))
+            .expect("add tunnel");
+        let content = fs::read_to_string(path).expect("read configuration");
+
+        assert!(!content.contains("tags"));
+    }
+
+    /// タグの正規化と検証ルールを検証する
+    #[test]
+    fn tags_are_normalized_and_validated() {
+        assert_eq!(normalize_tag(" Dev "), "dev");
+        assert!(tag_is_valid("project-a"));
+        assert!(tag_is_valid("client/foo"));
+        assert!(!tag_is_valid(""));
+        assert!(!tag_is_valid("project a"));
+        assert!(!tag_is_valid("案件"));
+    }
+
+    /// タグ指定が AND 条件でトンネルを絞り込むことを検証する
+    #[test]
+    fn filter_tunnels_by_tags_matches_all_tags() {
+        let source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml"));
+        let mut dev_db = tunnel("dev-db", 15432);
+        dev_db.tags = vec!["dev".to_owned(), "project-a".to_owned()];
+        let mut prod_db = tunnel("prod-db", 25432);
+        prod_db.tags = vec!["prod".to_owned(), "project-a".to_owned()];
+        let tunnels = vec![
+            ResolvedTunnelConfig::new(source.clone(), dev_db),
+            ResolvedTunnelConfig::new(source, prod_db),
+        ];
+
+        let matched = filter_tunnels_by_tags(&tunnels, &["dev".to_owned(), "project-a".to_owned()]);
+
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].tunnel.id, "dev-db");
+    }
+
     /// 存在しない設定ファイルへトンネルを追加できることを検証する
     #[test]
     fn add_tunnel_creates_missing_config_file() {
@@ -850,6 +997,7 @@ ssh_host = "local-bastion.example.com"
         TunnelConfig {
             id: id.to_owned(),
             description: None,
+            tags: Vec::new(),
             local_host: None,
             local_port,
             remote_host: "db.internal".to_owned(),

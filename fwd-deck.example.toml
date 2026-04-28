@@ -1,6 +1,7 @@
 [[tunnels]]
 id = "dev-db"
 description = "Development database"
+tags = ["dev", "project-a"]
 local_host = "127.0.0.1"
 local_port = 15432
 remote_host = "127.0.0.1"

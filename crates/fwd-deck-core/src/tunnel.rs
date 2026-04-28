@@ -335,6 +335,7 @@ mod tests {
             TunnelConfig {
                 id: "db".to_owned(),
                 description: None,
+                tags: Vec::new(),
                 local_host: Some("127.0.0.1".to_owned()),
                 local_port: 15432,
                 remote_host: "db.internal".to_owned(),

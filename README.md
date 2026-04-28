@@ -6,8 +6,10 @@
 
 ```sh
 fwd-deck list
+fwd-deck list --tag dev
 fwd-deck start
 fwd-deck start dev-db
+fwd-deck start --tag dev --tag project-a
 fwd-deck recover
 fwd-deck recover dev-db
 fwd-deck status
@@ -30,6 +32,7 @@ cargo run -p fwd-deck-cli --bin fwd-deck -- validate
 ```
 
 `start` と `stop` は、ID を指定しない場合に対話選択を表示します。
+`list` と `start` は `--tag` を複数指定でき、指定したタグをすべて持つトンネルだけを対象にします。
 `stop` の対話選択には、追跡中のトンネルをまとめて停止する選択肢も表示されます。
 `recover` は、状態ファイル上で stale になっているトンネルを現在の設定に基づいて再起動します。
 `config add` と `config remove` は、グローバル設定またはローカル設定を選択して対話形式で編集します。
@@ -43,6 +46,7 @@ cargo run -p fwd-deck-cli --bin fwd-deck -- validate
 
 同じ `id` がある場合は、ローカル設定がグローバル設定を上書きします。
 `local_host` を省略した場合は `127.0.0.1` として扱います。
+`tags` は小文字 ASCII の `a-z`, `0-9`, `-`, `_`, `.`, `/` を使えます。
 `local_port` が `1024` 未満の場合、`validate` は権限が必要になる可能性を warning として表示します。
 `fwd-deck.toml` はローカル環境用の設定として git 管理から除外しています。
 `config add` は対象ファイルが存在しない場合に新規作成します。
@@ -56,6 +60,7 @@ cp fwd-deck.example.toml fwd-deck.toml
 [[tunnels]]
 id = "dev-db"
 description = "Development database"
+tags = ["dev", "project-a"]
 local_host = "127.0.0.1"
 local_port = 15432
 remote_host = "127.0.0.1"

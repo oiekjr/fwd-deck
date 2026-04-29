@@ -1,0 +1,252 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TAP_REPOSITORY: oiekjr/homebrew-tap
+
+jobs:
+  release:
+    name: Publish unsigned release and Homebrew tap
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup mise
+        uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Install frontend dependencies
+        working-directory: apps/fwd-deck-app
+        run: npm ci
+
+      - name: Resolve release version
+        id: release
+        run: |
+          set -euo pipefail
+
+          tag_name="${GITHUB_REF_NAME}"
+          version="${tag_name#v}"
+          if [ "$tag_name" = "$version" ]; then
+            echo "Release tags must start with v, for example v0.1.0." >&2
+            exit 1
+          fi
+
+          cli_version="$(cargo pkgid -p fwd-deck-cli | sed -E 's/.*@//')"
+          app_version="$(cargo pkgid -p fwd-deck-app | sed -E 's/.*@//')"
+          package_version="$(node -p "require('./apps/fwd-deck-app/package.json').version")"
+          tauri_version="$(node -p "require('./apps/fwd-deck-app/src-tauri/tauri.conf.json').version")"
+
+          if [ "$version" != "$cli_version" ] || [ "$version" != "$app_version" ] || [ "$version" != "$package_version" ] || [ "$version" != "$tauri_version" ]; then
+            echo "The release tag must match package versions." >&2
+            echo "tag=$version cli=$cli_version app=$app_version package=$package_version tauri=$tauri_version" >&2
+            exit 1
+          fi
+
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset_name=fwd-deck-app_${version}_universal.dmg" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          gh release create "$TAG_NAME" \
+            --title "$TAG_NAME" \
+            --notes "fwd-deck ${VERSION}"
+
+      - name: Verify tap token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN is required to update the Homebrew tap." >&2
+            exit 1
+          fi
+
+      - name: Build unsigned DMG
+        working-directory: apps/fwd-deck-app
+        env:
+          CI: true
+        run: npm run tauri build -- --target universal-apple-darwin --bundles app,dmg
+
+      - name: Collect release assets
+        id: assets
+        env:
+          ASSET_NAME: ${{ steps.release.outputs.asset_name }}
+        run: |
+          set -euo pipefail
+
+          search_roots=()
+          for root in "$GITHUB_WORKSPACE/target" "$GITHUB_WORKSPACE/apps/fwd-deck-app/src-tauri/target"; do
+            if [ -d "$root" ]; then
+              search_roots+=("$root")
+            fi
+          done
+
+          if [ "${#search_roots[@]}" -eq 0 ]; then
+            echo "Tauri target directories were not found." >&2
+            exit 1
+          fi
+
+          dmg_path="$(find "${search_roots[@]}" -path '*/bundle/dmg/*.dmg' -type f | head -n 1)"
+          app_path="$(find "${search_roots[@]}" -path '*/bundle/macos/*.app' -type d | head -n 1)"
+
+          if [ -z "$dmg_path" ]; then
+            echo "DMG artifact was not found." >&2
+            exit 1
+          fi
+
+          if [ -z "$app_path" ]; then
+            echo "App bundle artifact was not found." >&2
+            exit 1
+          fi
+
+          asset_path="$RUNNER_TEMP/$ASSET_NAME"
+          checksum_path="$asset_path.sha256"
+          cp "$dmg_path" "$asset_path"
+          shasum -a 256 "$asset_path" | awk '{ print $1 }' > "$checksum_path"
+
+          echo "asset_path=$asset_path" >> "$GITHUB_OUTPUT"
+          echo "checksum_path=$checksum_path" >> "$GITHUB_OUTPUT"
+          echo "dmg_sha256=$(cat "$checksum_path")" >> "$GITHUB_OUTPUT"
+          echo "app_bundle_name=$(basename "$app_path")" >> "$GITHUB_OUTPUT"
+
+      - name: Compute source archive checksum
+        id: source
+        env:
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+
+          source_url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG_NAME}.tar.gz"
+          source_archive="$RUNNER_TEMP/fwd-deck-${TAG_NAME}.tar.gz"
+          curl -fsSL "$source_url" -o "$source_archive"
+          echo "source_sha256=$(shasum -a 256 "$source_archive" | awk '{ print $1 }')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release assets
+        env:
+          ASSET_PATH: ${{ steps.assets.outputs.asset_path }}
+          CHECKSUM_PATH: ${{ steps.assets.outputs.checksum_path }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+
+          gh release upload "$TAG_NAME" "$ASSET_PATH" "$CHECKSUM_PATH" --clobber
+
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAP_REPOSITORY }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update Homebrew formula and cask
+        working-directory: homebrew-tap
+        env:
+          APP_BUNDLE_NAME: ${{ steps.assets.outputs.app_bundle_name }}
+          DMG_SHA256: ${{ steps.assets.outputs.dmg_sha256 }}
+          SOURCE_SHA256: ${{ steps.source.outputs.source_sha256 }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p Formula Casks
+
+          cat > Formula/fwd-deck.rb <<RUBY
+          class FwdDeck < Formula
+            desc "Manage SSH local port forwarding profiles"
+            homepage "https://github.com/oiekjr/fwd-deck"
+            version "$VERSION"
+            url "https://github.com/oiekjr/fwd-deck/archive/refs/tags/v#{version}.tar.gz"
+            sha256 "$SOURCE_SHA256"
+            license "MIT"
+
+            depends_on "rust" => :build
+
+            def install
+              system "cargo", "install", "--locked", "--path", "crates/fwd-deck-cli", "--root", prefix
+            end
+
+            test do
+              assert_match "Usage:", shell_output("#{bin}/fwd-deck --help")
+            end
+          end
+          RUBY
+
+          cat > Casks/fwd-deck-app.rb <<RUBY
+          cask "fwd-deck-app" do
+            version "$VERSION"
+            sha256 "$DMG_SHA256"
+
+            url "https://github.com/oiekjr/fwd-deck/releases/download/v#{version}/fwd-deck-app_#{version}_universal.dmg",
+                verified: "github.com/oiekjr/fwd-deck/"
+            name "Fwd Deck"
+            desc "GUI for fwd-deck local SSH port forwarding profiles"
+            homepage "https://github.com/oiekjr/fwd-deck"
+
+            app "$APP_BUNDLE_NAME", target: "Fwd Deck.app"
+
+            zap trash: [
+              "~/Library/Application Support/dev.oiekjr.fwddeck",
+              "~/Library/Preferences/dev.oiekjr.fwddeck.plist",
+              "~/Library/Saved Application State/dev.oiekjr.fwddeck.savedState",
+            ]
+          end
+          RUBY
+
+          ruby -c Formula/fwd-deck.rb
+          ruby -c Casks/fwd-deck-app.rb
+
+      - name: Commit Homebrew tap update
+        working-directory: homebrew-tap
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          git status --short
+          if [ -z "$(git status --porcelain -- Formula/fwd-deck.rb Casks/fwd-deck-app.rb)" ]; then
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/fwd-deck.rb Casks/fwd-deck-app.rb
+          git commit -m "fwd-deck $VERSION"
+          git push

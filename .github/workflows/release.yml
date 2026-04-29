@@ -56,8 +56,8 @@ jobs:
             exit 1
           fi
 
-          cli_version="$(cargo pkgid -p fwd-deck-cli | sed -E 's/.*@//')"
-          app_version="$(cargo pkgid -p fwd-deck-app | sed -E 's/.*@//')"
+          cli_version="$(cargo pkgid -p fwd-deck-cli | sed -E 's/.*[#@]//')"
+          app_version="$(cargo pkgid -p fwd-deck-app | sed -E 's/.*[#@]//')"
           package_version="$(node -p "require('./apps/fwd-deck-app/package.json').version")"
           tauri_version="$(node -p "require('./apps/fwd-deck-app/src-tauri/tauri.conf.json').version")"
 

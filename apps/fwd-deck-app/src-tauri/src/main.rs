@@ -13,7 +13,8 @@ use fwd_deck_core::{
     TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport,
     add_tunnel_to_config_file, default_global_config_path, default_local_config_path,
     default_state_file_path, load_effective_config, remove_tunnel_from_config_file,
-    start_tunnels_with_progress, stop_tunnel, tag_is_valid, tunnel_statuses, validate_config,
+    start_tunnels_with_progress, stop_tunnel, tag_is_valid, tunnel_statuses,
+    update_tunnel_in_config_file, validate_config,
 };
 #[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
@@ -93,6 +94,7 @@ fn main() {
             start_tunnels,
             stop_tunnels,
             add_tunnel_entry,
+            update_tunnel_entry,
             remove_tunnel_entry,
             remove_workspace_history_entry,
             refresh_tray_menu
@@ -1483,9 +1485,17 @@ struct TunnelView {
     id: String,
     description: Option<String>,
     tags: Vec<String>,
+    local_host: String,
+    local_port: u16,
     local: String,
+    remote_host: String,
+    remote_port: u16,
     remote: String,
+    ssh_user: String,
+    ssh_host: String,
+    ssh_port: Option<u16>,
     ssh: String,
+    identity_file: Option<String>,
     source: String,
     source_path: String,
     timeouts: TimeoutView,
@@ -1849,6 +1859,21 @@ fn add_tunnel_entry(
     command_result(result)
 }
 
+/// 設定ファイル内の既存トンネルを更新する
+#[tauri::command]
+fn update_tunnel_entry(
+    app: tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    scope: ConfigScopeInput,
+    id: String,
+    tunnel: TunnelInput,
+) -> Result<DashboardState, String> {
+    let result = update_tunnel_entry_inner(&app, paths, scope, &id, tunnel);
+    let _ = rebuild_tray_menu(&app);
+
+    command_result(result)
+}
+
 /// 設定ファイルからトンネルを削除する
 #[tauri::command]
 fn remove_tunnel_entry(
@@ -1987,6 +2012,26 @@ fn add_tunnel_entry_inner(
     let kind = ConfigSourceKind::from(scope);
     let path = config_path_for_scope(&runtime_paths, kind)?;
     add_tunnel_to_config_file(&path, kind, tunnel)?;
+    load_dashboard_inner(app, paths)
+}
+
+/// トンネル更新処理を実行する
+fn update_tunnel_entry_inner(
+    app: &tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    scope: ConfigScopeInput,
+    id: &str,
+    tunnel: TunnelInput,
+) -> Result<DashboardState, AppError> {
+    let runtime_paths = resolve_runtime_paths(app, paths.clone())?;
+    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let tunnel = tunnel.into_tunnel_config();
+
+    validate_updated_tunnel(&config, id, &tunnel)?;
+
+    let kind = ConfigSourceKind::from(scope);
+    let path = config_path_for_scope(&runtime_paths, kind)?;
+    update_tunnel_in_config_file(&path, kind, id, tunnel)?;
     load_dashboard_inner(app, paths)
 }
 
@@ -2663,9 +2708,17 @@ fn tunnel_view(
         id: tunnel.id.clone(),
         description: tunnel.description.clone(),
         tags: tunnel.tags.clone(),
+        local_host: tunnel.effective_local_host().to_owned(),
+        local_port: tunnel.local_port,
         local: format_local_endpoint(tunnel),
+        remote_host: tunnel.remote_host.clone(),
+        remote_port: tunnel.remote_port,
         remote: format_remote_endpoint(tunnel),
+        ssh_user: tunnel.ssh_user.clone(),
+        ssh_host: tunnel.ssh_host.clone(),
+        ssh_port: tunnel.ssh_port,
         ssh: format_ssh_endpoint(tunnel),
+        identity_file: tunnel.identity_file.clone(),
         source: resolved.source.kind.to_string(),
         source_path: display_path(&resolved.source.path),
         timeouts: timeout_view(resolved.timeouts),
@@ -2739,29 +2792,7 @@ fn ensure_valid_config(config: &EffectiveConfig) -> Result<(), AppError> {
 
 /// 追加対象トンネルの意味的な不備を検証する
 fn validate_new_tunnel(config: &EffectiveConfig, tunnel: &TunnelConfig) -> Result<(), AppError> {
-    ensure_required("id", &tunnel.id)?;
-    ensure_required("local_host", tunnel.effective_local_host())?;
-    ensure_required("remote_host", &tunnel.remote_host)?;
-    ensure_required("ssh_user", &tunnel.ssh_user)?;
-    ensure_required("ssh_host", &tunnel.ssh_host)?;
-
-    if tunnel
-        .effective_local_host()
-        .chars()
-        .any(char::is_whitespace)
-    {
-        return Err(AppError::InvalidInput(
-            "local_host に空白文字は使用できません".to_owned(),
-        ));
-    }
-
-    for tag in &tunnel.tags {
-        if !tag_is_valid(tag) {
-            return Err(AppError::InvalidInput(format!(
-                "tag は小文字 ASCII、数字、'-'、'_'、'.'、'/' のみ使用できます: {tag}"
-            )));
-        }
-    }
+    validate_tunnel_fields(tunnel)?;
 
     let mut existing_id = None;
     let mut existing_local_port = None;
@@ -2793,6 +2824,82 @@ fn validate_new_tunnel(config: &EffectiveConfig, tunnel: &TunnelConfig) -> Resul
             "local_port は既存トンネルと重複しています: {} ({})",
             tunnel.local_port, existing.tunnel.id
         )));
+    }
+
+    Ok(())
+}
+
+/// 更新対象トンネルの意味的な不備を検証する
+fn validate_updated_tunnel(
+    config: &EffectiveConfig,
+    current_id: &str,
+    tunnel: &TunnelConfig,
+) -> Result<(), AppError> {
+    validate_tunnel_fields(tunnel)?;
+
+    let mut existing_id = None;
+    let mut existing_local_port = None;
+
+    for resolved in &config.tunnels {
+        if resolved.tunnel.id == current_id {
+            continue;
+        }
+
+        if existing_id.is_none() && resolved.tunnel.id == tunnel.id {
+            existing_id = Some(resolved);
+        }
+
+        if existing_local_port.is_none() && resolved.tunnel.local_port == tunnel.local_port {
+            existing_local_port = Some(resolved);
+        }
+
+        if existing_id.is_some() && existing_local_port.is_some() {
+            break;
+        }
+    }
+
+    if let Some(existing) = existing_id {
+        return Err(AppError::InvalidInput(format!(
+            "同じ ID のトンネルが既に存在します: {} ({})",
+            existing.tunnel.id,
+            display_path(&existing.source.path)
+        )));
+    }
+
+    if let Some(existing) = existing_local_port {
+        return Err(AppError::InvalidInput(format!(
+            "local_port は既存トンネルと重複しています: {} ({})",
+            tunnel.local_port, existing.tunnel.id
+        )));
+    }
+
+    Ok(())
+}
+
+/// トンネル入力値の単体制約を検証する
+fn validate_tunnel_fields(tunnel: &TunnelConfig) -> Result<(), AppError> {
+    ensure_required("id", &tunnel.id)?;
+    ensure_required("local_host", tunnel.effective_local_host())?;
+    ensure_required("remote_host", &tunnel.remote_host)?;
+    ensure_required("ssh_user", &tunnel.ssh_user)?;
+    ensure_required("ssh_host", &tunnel.ssh_host)?;
+
+    if tunnel
+        .effective_local_host()
+        .chars()
+        .any(char::is_whitespace)
+    {
+        return Err(AppError::InvalidInput(
+            "local_host に空白文字は使用できません".to_owned(),
+        ));
+    }
+
+    for tag in &tunnel.tags {
+        if !tag_is_valid(tag) {
+            return Err(AppError::InvalidInput(format!(
+                "tag は小文字 ASCII、数字、'-'、'_'、'.'、'/' のみ使用できます: {tag}"
+            )));
+        }
     }
 
     Ok(())

@@ -489,6 +489,40 @@ pub fn remove_tunnel_from_config_file(
     Ok(file)
 }
 
+/// 指定された設定ファイル内のトンネル設定を更新する
+pub fn update_tunnel_in_config_file(
+    path: &Path,
+    kind: ConfigSourceKind,
+    id: &str,
+    tunnel: TunnelConfig,
+) -> Result<LoadedConfigFile, ConfigEditError> {
+    let mut file = read_config_file_for_edit(path, kind, false)?;
+    let tunnel = normalize_tunnel(tunnel);
+    let Some(position) = file.tunnels.iter().position(|existing| existing.id == id) else {
+        return Err(ConfigEditError::NotFound {
+            path: path.to_path_buf(),
+            id: id.to_owned(),
+        });
+    };
+
+    if file
+        .tunnels
+        .iter()
+        .enumerate()
+        .any(|(index, existing)| index != position && existing.id == tunnel.id)
+    {
+        return Err(ConfigEditError::DuplicateId {
+            path: path.to_path_buf(),
+            id: tunnel.id,
+        });
+    }
+
+    file.tunnels[position] = tunnel;
+    write_config_file(path, &file)?;
+
+    Ok(file)
+}
+
 /// グローバル設定とローカル設定を統合して読み込む
 pub fn load_effective_config(paths: &ConfigPaths) -> Result<EffectiveConfig, ConfigLoadError> {
     let sources = read_existing_config_files(paths)?;
@@ -1356,6 +1390,53 @@ ssh_host = "bastion.example.com"
 
         assert_eq!(loaded.tunnels.len(), 1);
         assert_eq!(loaded.tunnels[0].id, "cache");
+    }
+
+    /// 指定 ID のトンネルが設定ファイル内で更新されることを検証する
+    #[test]
+    fn update_tunnel_replaces_matching_id() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel("db", 15432))
+            .expect("add first tunnel");
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel("cache", 16379))
+            .expect("add second tunnel");
+
+        let mut updated = tunnel("dev-db", 25432);
+        updated.description = Some("Development database".to_owned());
+        update_tunnel_in_config_file(&path, ConfigSourceKind::Local, "db", updated)
+            .expect("update tunnel");
+        let loaded = read_config_file(&path, ConfigSourceKind::Local)
+            .expect("read configuration")
+            .expect("configuration file exists");
+
+        assert_eq!(loaded.tunnels.len(), 2);
+        assert_eq!(loaded.tunnels[0].id, "dev-db");
+        assert_eq!(
+            loaded.tunnels[0].description.as_deref(),
+            Some("Development database")
+        );
+        assert_eq!(loaded.tunnels[1].id, "cache");
+    }
+
+    /// 更新後 ID が同一設定ファイル内で重複する場合に拒否されることを検証する
+    #[test]
+    fn update_tunnel_rejects_duplicate_id() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel("db", 15432))
+            .expect("add first tunnel");
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel("cache", 16379))
+            .expect("add second tunnel");
+
+        let result = update_tunnel_in_config_file(
+            &path,
+            ConfigSourceKind::Local,
+            "db",
+            tunnel("cache", 25432),
+        );
+
+        assert!(matches!(result, Err(ConfigEditError::DuplicateId { .. })));
     }
 
     /// テスト用のトンネル設定を生成する

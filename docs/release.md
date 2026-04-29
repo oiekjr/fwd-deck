@@ -7,6 +7,19 @@
 初回だけ、Homebrew tapリポジトリと GitHub Actions secret を手動で準備します。  
 この作業が終わると、以後の release tag push で formula と cask を自動更新できます。  
 
+### Prepare Public Repository
+
+Homebrew tap から通常の `brew install` で配布するため、本体リポジトリ `oiekjr/fwd-deck` は public にします。  
+release workflow は GitHub tag archive の SHA256 を算出し、formula と cask は GitHub Releases の asset を参照します。  
+本体リポジトリが private のままだと、これらの URL が Homebrew から取得できません。  
+
+public 化前に、少なくとも次を確認します。  
+
+1. repo直下に `LICENSE` がある
+2. tracked file に secret、token、credential、個人用設定が含まれていない
+3. `fwd-deck.toml` などのローカル設定ファイルが git 管理されていない
+4. GitHub Releases で公開される DMG が unsigned app であることを README と release手順に明記している
+
 ### Create Tap Repository
 
 GitHub で publicリポジトリ `oiekjr/homebrew-tap` を作成します。  

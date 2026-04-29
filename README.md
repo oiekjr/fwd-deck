@@ -55,3 +55,8 @@ apps/fwd-deck-app      Tauri app and React frontend
 crates/fwd-deck-cli    CLI entrypoint and user interaction
 crates/fwd-deck-core   Configuration, state, and tunnel runtime logic
 ```
+
+## License
+
+MIT License で公開しています。  
+詳細は [LICENSE](LICENSE) を参照してください。  

@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Main window access for fwd-deck.","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open"]}}
+{"default":{"identifier":"default","description":"Main window access for Fwd Deck.","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open"]}}

@@ -20,7 +20,7 @@ use objc2::MainThreadMarker;
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{NSApp, NSImage};
 #[cfg(target_os = "macos")]
-use objc2_foundation::NSData;
+use objc2_foundation::{NSData, NSProcessInfo, NSString};
 use serde::{Deserialize, Serialize};
 use tauri::{
     Emitter, Manager,
@@ -60,7 +60,8 @@ const TRAY_MENU_INVALID_CONFIG: &str = "tray-invalid-config";
 const TRAY_TUNNEL_ITEM_PREFIX: &str = "tray-tunnel-";
 const TRAY_WORKSPACE_ITEM_PREFIX: &str = "tray-workspace-";
 const TRAY_OPERATION_ID: &str = "tray";
-const QUIT_DIALOG_TITLE: &str = "fwd-deck を終了";
+const APP_DISPLAY_NAME: &str = "Fwd Deck";
+const QUIT_DIALOG_TITLE: &str = "Fwd Deck を終了";
 const QUIT_DIALOG_STOP_LABEL: &str = "停止して終了";
 const QUIT_DIALOG_KEEP_LABEL: &str = "停止せず終了";
 const QUIT_DIALOG_CANCEL_LABEL: &str = "キャンセル";
@@ -69,6 +70,8 @@ const QUIT_STALE_CLEANUP_ERROR_TITLE: &str = "stale 状態を削除できませ�
 
 /// Tauri アプリを起動する
 fn main() {
+    set_runtime_application_name();
+
     let quit_state = QuitConfirmationStateHandle::default();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -93,12 +96,22 @@ fn main() {
             refresh_tray_menu
         ])
         .build(tauri::generate_context!())
-        .expect("error while running fwd-deck application");
+        .expect("error while running Fwd Deck application");
 
     app.run(move |app, event| {
         handle_quit_confirmation_event(app, event, quit_state.clone());
     });
 }
+
+/// 開発実行時の macOS 表示名を設定する
+#[cfg(target_os = "macos")]
+fn set_runtime_application_name() {
+    NSProcessInfo::processInfo().setProcessName(&NSString::from_str(APP_DISPLAY_NAME));
+}
+
+/// 開発実行時の macOS 表示名を設定する
+#[cfg(not(target_os = "macos"))]
+fn set_runtime_application_name() {}
 
 /// start / stop 操作の同時実行を防ぐ状態を保持する
 #[derive(Debug, Default)]
@@ -325,7 +338,7 @@ fn initialize_tray(app: &tauri::AppHandle) -> Result<(), AppError> {
         .menu(&menu)
         .icon(tray_icon_image)
         .icon_as_template(true)
-        .tooltip("fwd-deck")
+        .tooltip(APP_DISPLAY_NAME)
         .show_menu_on_left_click(true)
         .on_menu_event(handle_tray_menu_event)
         .on_tray_icon_event(handle_tray_icon_event);
@@ -625,7 +638,7 @@ fn build_tray_menu(
     let mut actions = TrayMenuActions::default();
 
     let menu = Menu::new(app)?;
-    let show = MenuItem::with_id(app, TRAY_MENU_SHOW, "Open fwd-deck", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, TRAY_MENU_SHOW, "Open Fwd Deck", true, None::<&str>)?;
     let settings = MenuItem::with_id(
         app,
         TRAY_MENU_SETTINGS,

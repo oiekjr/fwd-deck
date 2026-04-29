@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "fwd-deck",
+  "productName": "Fwd Deck",
   "mainBinaryName": "fwd-deck",
   "version": "0.1.0",
   "identifier": "dev.oiekjr.fwddeck",
@@ -13,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "fwd-deck",
+        "title": "Fwd Deck",
         "width": 1180,
         "height": 760,
         "minWidth": 980,

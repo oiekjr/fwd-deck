@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window access for fwd-deck.",
+  "description": "Main window access for Fwd Deck.",
   "windows": ["main"],
   "permissions": ["core:default", "dialog:allow-open"]
 }

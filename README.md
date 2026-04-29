@@ -296,7 +296,7 @@ task test
 task lint
 ```
 
-macOS アプリは `apps/fwd-deck-app` にあります。
+macOS アプリ Fwd Deck は `apps/fwd-deck-app` にあります。
 Tauri の Rust command 層は `fwd-deck-core` を直接利用し、フロントエンドは React / Vite / TypeScript で構成しています。
 
 ```sh

@@ -1284,7 +1284,7 @@ function AppHeader({
       <div className="grid gap-4 px-5 py-4 xl:grid-cols-[minmax(20rem,1fr)_auto] xl:items-center">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-bold uppercase tracking-wide text-primary">fwd-deck</span>
+            <span className="text-xs font-bold tracking-wide text-primary">Fwd Deck</span>
             <span className="badge badge-ghost badge-sm">desktop console</span>
           </div>
           <div className="mt-2 flex flex-col gap-3 lg:flex-row lg:items-end">

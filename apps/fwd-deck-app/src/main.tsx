@@ -972,20 +972,6 @@ function App(): ReactElement {
   }
 
   /**
-   * Dock アイコン非表示設定を即時保存する
-   */
-  async function toggleDockIconPreference(shouldHide: boolean): Promise<void> {
-    if (shouldHide === paths.hideDockIconWhenWindowHidden) {
-      return;
-    }
-
-    await applyToolbarPathSelection(
-      { ...paths, hideDockIconWhenWindowHidden: shouldHide },
-      "Dock 表示設定を保存しました",
-    );
-  }
-
-  /**
    * 設定モーダルを現在の適用済み設定で開く
    */
   function openSettings(): void {
@@ -1172,7 +1158,6 @@ function App(): ReactElement {
           onOpenSettings={openSettings}
           onBrowseWorkspace={() => void browseWorkspaceFromToolbar()}
           onSelectWorkspace={(workspacePath) => void switchWorkspaceFromToolbar(workspacePath)}
-          onToggleDockIcon={(shouldHide) => void toggleDockIconPreference(shouldHide)}
           onRefresh={() => void refreshDashboard()}
         />
 
@@ -1260,7 +1245,6 @@ interface AppHeaderProps {
   onOpenSettings: () => void;
   onBrowseWorkspace: () => void;
   onSelectWorkspace: (workspacePath: string) => void;
-  onToggleDockIcon: (shouldHide: boolean) => void;
   onRefresh: () => void;
 }
 
@@ -1276,7 +1260,6 @@ function AppHeader({
   onOpenSettings,
   onBrowseWorkspace,
   onSelectWorkspace,
-  onToggleDockIcon,
   onRefresh,
 }: AppHeaderProps): ReactElement {
   return (
@@ -1336,16 +1319,6 @@ function AppHeader({
               Settings
             </button>
           </div>
-          <label className="flex w-full items-center justify-between gap-3 rounded-md border border-base-300 bg-base-200/50 px-3 py-2 xl:w-auto xl:min-w-72">
-            <span className="text-sm font-semibold">Hide Dock icon</span>
-            <input
-              type="checkbox"
-              className="toggle toggle-primary toggle-sm"
-              checked={paths.hideDockIconWhenWindowHidden}
-              onChange={(event) => onToggleDockIcon(event.target.checked)}
-              disabled={isBusy}
-            />
-          </label>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-[repeat(3,minmax(6.5rem,1fr))_auto] xl:w-auto">
             <StatusMetric label="Configured" value={stats.configured} icon={<Gauge size={17} />} />
             <StatusMetric

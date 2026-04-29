@@ -1,3 +1,19 @@
+import {
+  Alert,
+  Button as HeroButton,
+  Card,
+  Checkbox,
+  Chip,
+  Dropdown,
+  Input as HeroInput,
+  Label as HeroLabel,
+  Modal,
+  ProgressBar,
+  Switch,
+  Table,
+  TextField as HeroTextField,
+  Tooltip,
+} from "./components/ui/shadcn-compat";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { homeDir, join } from "@tauri-apps/api/path";
@@ -38,7 +54,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { ChangeEvent, FormEvent, MouseEvent, ReactElement, ReactNode, RefObject } from "react";
+import type { ChangeEvent, FormEvent, ReactElement, ReactNode, RefObject } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -57,6 +73,19 @@ type ScopeFilter = "all" | ConfigScope;
 type AppView = "dashboard" | "add";
 
 type TunnelDisplayMode = "card" | "slim";
+
+type HeroButtonVariant =
+  | "danger"
+  | "danger-soft"
+  | "ghost"
+  | "outline"
+  | "primary"
+  | "secondary"
+  | "tertiary";
+
+type HeroButtonSize = "lg" | "md" | "sm";
+
+type AlertStatus = "accent" | "danger" | "success" | "warning";
 
 type AppCommand =
   | "load_dashboard"
@@ -354,6 +383,8 @@ function App(): ReactElement {
   const [deleteTarget, setDeleteTarget] = useState<TunnelView | null>(null);
   const [editTarget, setEditTarget] = useState<TunnelView | null>(null);
   const [editForm, setEditForm] = useState<TunnelFormState>(initialForm);
+  const [formFeedback, setFormFeedback] = useState<AppMessage | null>(null);
+  const [editFormFeedback, setEditFormFeedback] = useState<AppMessage | null>(null);
   const [message, setMessage] = useState<AppMessage | null>(null);
   const [operationToast, setOperationToast] = useState<OperationToastMessage | null>(null);
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
@@ -789,9 +820,9 @@ function App(): ReactElement {
     event.preventDefault();
 
     if (form.scope === "local" && paths.workspacePath.trim().length === 0) {
-      showOperationToast({
+      setFormFeedback({
         kind: "error",
-        summary: "local 設定に追加するにはワークスペースを選択してください",
+        text: "local 設定に追加するにはワークスペースを選択してください",
       });
       return;
     }
@@ -800,10 +831,11 @@ function App(): ReactElement {
     try {
       tunnel = formToTunnelInput(form);
     } catch (error) {
-      showOperationToast({ kind: "error", summary: stringifyError(error) });
+      setFormFeedback({ kind: "error", text: stringifyError(error) });
       return;
     }
 
+    setFormFeedback(null);
     setIsBusy(true);
 
     try {
@@ -816,10 +848,11 @@ function App(): ReactElement {
       setDashboard(loaded);
       setPaths(loaded.paths);
       setForm({ ...initialForm, scope: form.scope });
+      setFormFeedback(null);
       showOperationToast({ kind: "success", summary: `${tunnel.id} を設定に追加しました` });
       setActiveView("dashboard");
     } catch (error) {
-      showOperationToast({ kind: "error", summary: stringifyError(error) });
+      setFormFeedback({ kind: "error", text: stringifyError(error) });
     } finally {
       setIsBusy(false);
     }
@@ -839,10 +872,11 @@ function App(): ReactElement {
     try {
       tunnel = formToTunnelInput(editForm);
     } catch (error) {
-      showOperationToast({ kind: "error", summary: stringifyError(error) });
+      setEditFormFeedback({ kind: "error", text: stringifyError(error) });
       return;
     }
 
+    setEditFormFeedback(null);
     setIsBusy(true);
 
     try {
@@ -861,9 +895,10 @@ function App(): ReactElement {
       setPaths(loaded.paths);
       setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
       setEditTarget(null);
+      setEditFormFeedback(null);
       showOperationToast({ kind: "success", summary: `${tunnel.id} を設定に反映しました` });
     } catch (error) {
-      showOperationToast({ kind: "error", summary: stringifyError(error) });
+      setEditFormFeedback({ kind: "error", text: stringifyError(error) });
     } finally {
       setIsBusy(false);
     }
@@ -1166,6 +1201,7 @@ function App(): ReactElement {
    * 追加フォームの変更を反映する
    */
   function updateForm(field: keyof TunnelFormState, value: string): void {
+    setFormFeedback(null);
     setForm((current) => ({ ...current, [field]: value }));
   }
 
@@ -1173,6 +1209,7 @@ function App(): ReactElement {
    * 編集フォームの変更を反映する
    */
   function updateEditForm(field: keyof TunnelFormState, value: string): void {
+    setEditFormFeedback(null);
     setEditForm((current) => ({ ...current, [field]: value }));
   }
 
@@ -1182,6 +1219,7 @@ function App(): ReactElement {
   function openEditTunnel(tunnel: TunnelView): void {
     setEditTarget(tunnel);
     setEditForm(formFromTunnel(tunnel));
+    setEditFormFeedback(null);
   }
 
   /**
@@ -1239,8 +1277,8 @@ function App(): ReactElement {
   }
 
   return (
-    <main className="app-shell min-h-screen text-base-content">
-      <div className="mx-auto flex w-full max-w-[90rem] flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
+    <main className="min-h-screen bg-muted/45 text-foreground">
+      <div className="flex min-h-screen flex-col">
         <AppHeader
           stats={stats}
           paths={paths}
@@ -1253,52 +1291,55 @@ function App(): ReactElement {
           onRefresh={() => void refreshDashboard()}
         />
 
-        <MessagePanel message={message} />
+        <div className="mx-auto flex w-full max-w-[96rem] flex-1 flex-col gap-3 px-3 py-3 sm:px-4 lg:px-5">
+          <MessagePanel message={message} />
 
-        {activeView === "dashboard" ? (
-          <DashboardView
-            dashboard={dashboard}
-            hasCompletedInitialLoad={hasCompletedInitialLoad}
-            filteredTunnels={filteredTunnels}
-            hasActiveFilters={hasActiveFilters}
-            selectedIds={selectedIds}
-            selectedCount={selectedIdList.length}
-            selectedVisibleCount={selectedVisibleCount}
-            availableTags={availableTags}
-            operationProgress={operationProgress}
-            isBusy={isBusy}
-            queryInput={queryInput}
-            filters={filters}
-            displayMode={tunnelDisplayMode}
-            onQueryInputChange={updateQueryInput}
-            onFilterChange={updateFilter}
-            onToggleTag={toggleTagFilter}
-            onResetFilters={resetFilters}
-            onDisplayModeChange={setTunnelDisplayMode}
-            onClearSelection={() => setSelectedIds(new Set())}
-            onSelectVisible={selectVisibleTunnels}
-            onDeselectVisible={deselectVisibleTunnels}
-            onToggleSelection={toggleSelection}
-            onStartSelected={() => void startSelected(selectedIdList)}
-            onStopSelected={() => void stopSelected(selectedIdList)}
-            onStartTunnel={(id) => void startSelected([id])}
-            onStopTunnel={(id) => void stopSelected([id])}
-            onStopTracked={(target) => void stopTracked(target)}
-            onEditTunnel={openEditTunnel}
-            onRemoveTunnel={setDeleteTarget}
-            onAddTunnel={() => setActiveView("add")}
-          />
-        ) : activeView === "add" ? (
-          <AddTunnelView
-            form={form}
-            canUseLocal={paths.workspacePath.trim().length > 0}
-            isBusy={isBusy}
-            onChange={updateForm}
-            onSubmit={(event) => void submitTunnel(event)}
-            onOpenSettings={openSettings}
-            onBrowseIdentityFile={() => void browseIdentityFile()}
-          />
-        ) : null}
+          {activeView === "dashboard" ? (
+            <DashboardView
+              dashboard={dashboard}
+              hasCompletedInitialLoad={hasCompletedInitialLoad}
+              filteredTunnels={filteredTunnels}
+              hasActiveFilters={hasActiveFilters}
+              selectedIds={selectedIds}
+              selectedCount={selectedIdList.length}
+              selectedVisibleCount={selectedVisibleCount}
+              availableTags={availableTags}
+              operationProgress={operationProgress}
+              isBusy={isBusy}
+              queryInput={queryInput}
+              filters={filters}
+              displayMode={tunnelDisplayMode}
+              onQueryInputChange={updateQueryInput}
+              onFilterChange={updateFilter}
+              onToggleTag={toggleTagFilter}
+              onResetFilters={resetFilters}
+              onDisplayModeChange={setTunnelDisplayMode}
+              onClearSelection={() => setSelectedIds(new Set())}
+              onSelectVisible={selectVisibleTunnels}
+              onDeselectVisible={deselectVisibleTunnels}
+              onToggleSelection={toggleSelection}
+              onStartSelected={() => void startSelected(selectedIdList)}
+              onStopSelected={() => void stopSelected(selectedIdList)}
+              onStartTunnel={(id) => void startSelected([id])}
+              onStopTunnel={(id) => void stopSelected([id])}
+              onStopTracked={(target) => void stopTracked(target)}
+              onEditTunnel={openEditTunnel}
+              onRemoveTunnel={setDeleteTarget}
+              onAddTunnel={() => setActiveView("add")}
+            />
+          ) : activeView === "add" ? (
+            <AddTunnelView
+              form={form}
+              feedback={formFeedback}
+              canUseLocal={paths.workspacePath.trim().length > 0}
+              isBusy={isBusy}
+              onChange={updateForm}
+              onSubmit={(event) => void submitTunnel(event)}
+              onOpenSettings={openSettings}
+              onBrowseIdentityFile={() => void browseIdentityFile()}
+            />
+          ) : null}
+        </div>
       </div>
       <SettingsModal
         isOpen={settingsDraft !== null}
@@ -1321,9 +1362,13 @@ function App(): ReactElement {
       <EditTunnelModal
         tunnel={editTarget}
         form={editForm}
+        feedback={editFormFeedback}
         isBusy={isBusy}
         onChange={updateEditForm}
-        onCancel={() => setEditTarget(null)}
+        onCancel={() => {
+          setEditTarget(null);
+          setEditFormFeedback(null);
+        }}
         onSubmit={(event) => void submitEditedTunnel(event)}
         onBrowseIdentityFile={() => void browseEditIdentityFile()}
       />
@@ -1365,84 +1410,90 @@ function AppHeader({
   onRefresh,
 }: AppHeaderProps): ReactElement {
   return (
-    <header className="overflow-hidden rounded-lg border border-base-300 bg-base-100 shadow-sm">
-      <div className="grid gap-4 px-5 py-4 xl:grid-cols-[minmax(20rem,1fr)_auto] xl:items-center">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-bold tracking-wide text-primary">Fwd Deck</span>
-            <span className="badge badge-ghost badge-sm">desktop console</span>
-          </div>
-          <div className="mt-2 flex flex-col gap-3 lg:flex-row lg:items-end">
+    <header className="sticky top-0 z-30 border-b border-border bg-card/90 backdrop-blur supports-[backdrop-filter]:bg-card/80">
+      <div className="mx-auto grid w-full max-w-[96rem] gap-2 px-3 py-2 sm:px-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center lg:px-5">
+        <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-center">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
+              <Server size={17} />
+            </span>
             <div className="min-w-0">
-              <h1 className="truncate text-2xl leading-tight font-bold">Port Forwarding Deck</h1>
-              <p className="mt-1 text-sm text-base-content/60">
-                SSH tunnel operations for local development
-              </p>
+              <div className="truncate text-sm leading-5 font-semibold">Fwd Deck</div>
+              <div className="truncate text-[0.7rem] leading-4 text-muted-foreground">
+                Port Forwarding Deck
+              </div>
             </div>
-            <WorkspacePill
-              paths={paths}
-              isBusy={isBusy}
-              onOpenSettings={onOpenSettings}
-              onBrowseWorkspace={onBrowseWorkspace}
-              onSelectWorkspace={onSelectWorkspace}
-            />
           </div>
+          <WorkspacePill
+            paths={paths}
+            isBusy={isBusy}
+            onOpenSettings={onOpenSettings}
+            onBrowseWorkspace={onBrowseWorkspace}
+            onSelectWorkspace={onSelectWorkspace}
+          />
         </div>
-        <div className="flex flex-col gap-3 xl:items-end">
-          <div className="view-switcher segmented-control join w-full self-start xl:w-auto xl:self-end">
-            <button
+
+        <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-center md:justify-end">
+          <nav className="grid w-full grid-cols-2 gap-0.5 rounded-lg border border-border bg-muted p-0.5 md:w-72">
+            <HeroButton
               type="button"
-              className={`btn btn-sm join-item flex-1 xl:flex-none ${
-                activeView === "dashboard" ? "btn-primary" : "btn-outline"
-              }`}
-              onClick={() => onViewChange("dashboard")}
+              variant={activeView === "dashboard" ? "primary" : "ghost"}
+              size="sm"
+              fullWidth
+              onPress={() => onViewChange("dashboard")}
+              className="min-w-0 justify-center"
             >
               <ListFilter size={15} />
               Dashboard
-            </button>
-            <button
+            </HeroButton>
+            <HeroButton
               type="button"
-              className={`btn btn-sm join-item flex-1 xl:flex-none ${
-                activeView === "add" ? "btn-primary" : "btn-outline"
-              }`}
-              onClick={() => onViewChange("add")}
+              variant={activeView === "add" ? "primary" : "ghost"}
+              size="sm"
+              fullWidth
+              onPress={() => onViewChange("add")}
+              className="min-w-0 justify-center"
             >
               <CirclePlus size={15} />
               Add tunnel
-            </button>
-            <button
-              type="button"
-              className="btn btn-outline btn-sm join-item flex-1 xl:flex-none"
-              onClick={onOpenSettings}
-              aria-label="Settings"
-              title="Settings (Cmd/Ctrl + ,)"
-            >
-              <Settings2 size={15} />
-              Settings
-            </button>
-          </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-[repeat(3,minmax(6.5rem,1fr))_auto] xl:w-auto">
-            <StatusMetric label="Configured" value={stats.configured} icon={<Gauge size={17} />} />
+            </HeroButton>
+          </nav>
+
+          <div className="grid grid-cols-[repeat(3,minmax(0,1fr))_auto_auto] gap-1 md:flex md:items-center">
+            <StatusMetric label="Configured" value={stats.configured} icon={<Gauge size={15} />} />
             <StatusMetric
               label="Running"
               value={stats.running}
               tone="success"
-              icon={<Activity size={17} />}
+              icon={<Activity size={15} />}
             />
             <StatusMetric
               label="Stale"
               value={stats.stale}
               tone="warning"
-              icon={<Clock3 size={17} />}
+              icon={<Clock3 size={15} />}
             />
-            <IconButton
-              label="再読み込み"
-              className="btn btn-square btn-ghost h-full min-h-16 w-full border border-base-300 sm:w-16"
-              onClick={onRefresh}
-              disabled={isBusy}
+            <HeroButton
+              type="button"
+              variant="outline"
+              size="sm"
+              isIconOnly
+              onPress={onOpenSettings}
+              aria-label="Settings"
             >
-              {isBusy ? <Loader2 className="animate-spin" size={18} /> : <RefreshCw size={18} />}
-            </IconButton>
+              <Settings2 size={15} />
+            </HeroButton>
+            <HeroButton
+              type="button"
+              variant="outline"
+              size="sm"
+              isIconOnly
+              onPress={onRefresh}
+              isDisabled={isBusy}
+              aria-label="再読み込み"
+            >
+              {isBusy ? <Loader2 className="animate-spin" size={15} /> : <RefreshCw size={15} />}
+            </HeroButton>
           </div>
         </div>
       </div>
@@ -1468,138 +1519,91 @@ function WorkspacePill({
   onBrowseWorkspace,
   onSelectWorkspace,
 }: WorkspacePillProps): ReactElement {
-  const [isWorkspaceMenuOpen, setIsWorkspaceMenuOpen] = useState<boolean>(false);
-  const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const workspacePath = paths.workspacePath.trim();
   const hasWorkspace = workspacePath.length > 0;
   const recentWorkspaces = paths.workspaceHistory.filter(
     (historyPath) => historyPath.trim() !== "",
   );
 
-  useEffect(() => {
-    if (!isWorkspaceMenuOpen) {
-      return;
-    }
-
-    function handlePointerDown(event: PointerEvent): void {
-      const target = event.target;
-      if (!(target instanceof Node)) {
-        return;
-      }
-
-      if (workspaceMenuRef.current?.contains(target)) {
-        return;
-      }
-
-      setIsWorkspaceMenuOpen(false);
-    }
-
-    function handleKeyDown(event: KeyboardEvent): void {
-      if (event.key === "Escape") {
-        setIsWorkspaceMenuOpen(false);
-      }
-    }
-
-    document.addEventListener("pointerdown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
-
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [isWorkspaceMenuOpen]);
-
   return (
     <div
-      className={`grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-2 rounded-md border px-3 py-2 lg:w-[30rem] ${
-        hasWorkspace ? "border-base-300 bg-base-200/50" : "border-warning/40 bg-warning/10"
+      className={`grid h-8 min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-1.5 rounded-lg border px-2 shadow-sm md:w-[24rem] ${
+        hasWorkspace ? "border-border bg-card/90" : "border-warning/25 bg-card"
       }`}
     >
       <span
-        className={`rounded-md p-2 ${
-          hasWorkspace ? "bg-primary/10 text-primary" : "bg-warning/15 text-warning"
+        className={`flex size-5 items-center justify-center rounded-sm ${
+          hasWorkspace ? "text-foreground/70" : "text-warning"
         }`}
       >
-        <FolderOpen size={17} />
+        <FolderOpen size={14} />
       </span>
       <div className="min-w-0">
-        <div className="text-[0.65rem] font-bold uppercase tracking-wide text-base-content/50">
-          Workspace
-        </div>
+        <div className="sr-only">Workspace</div>
         <div
-          className={`mt-0.5 truncate font-mono text-xs ${
-            hasWorkspace ? "text-base-content/85" : "text-warning"
-          }`}
+          className={`truncate font-mono text-xs ${hasWorkspace ? "text-foreground/85" : "text-warning"}`}
           title={workspacePath || "Not selected"}
         >
           {workspacePath || "Not selected"}
         </div>
       </div>
-      <div
-        ref={workspaceMenuRef}
-        className={`dropdown dropdown-end ${isWorkspaceMenuOpen ? "dropdown-open" : ""}`}
-      >
-        <button
+      <Dropdown>
+        <Dropdown.Trigger
           type="button"
-          className="btn btn-square btn-ghost btn-sm"
-          disabled={isBusy}
-          aria-expanded={isWorkspaceMenuOpen}
-          aria-haspopup="menu"
+          className="size-7 rounded-sm"
+          isDisabled={isBusy}
           aria-label="ワークスペースを切り替え"
-          title="Switch workspace"
-          onClick={() => setIsWorkspaceMenuOpen((current) => !current)}
         >
           <ChevronDown size={15} />
-        </button>
-        <ul
-          tabIndex={0}
-          role="menu"
-          className="menu dropdown-content z-20 mt-2 w-[min(24rem,calc(100vw-2rem))] rounded-md border border-base-300 bg-base-100 p-2 shadow-lg"
-        >
-          <li>
-            <button
-              type="button"
-              onClick={() => {
-                setIsWorkspaceMenuOpen(false);
+        </Dropdown.Trigger>
+        <Dropdown.Popover placement="bottom end" className="w-[min(24rem,calc(100vw-2rem))]">
+          <Dropdown.Menu
+            onAction={(key) => {
+              if (key === "__browse") {
                 onBrowseWorkspace();
-              }}
-              disabled={isBusy}
-            >
+                return;
+              }
+
+              onSelectWorkspace(String(key));
+            }}
+          >
+            <Dropdown.Item id="__browse" textValue="Browse workspace">
               <FolderOpen size={14} />
-              Browse workspace...
-            </button>
-          </li>
-          {recentWorkspaces.length > 0 ? (
-            recentWorkspaces.map((historyPath) => (
-              <li key={historyPath}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsWorkspaceMenuOpen(false);
-                    onSelectWorkspace(historyPath);
-                  }}
-                  disabled={isBusy || historyPath === workspacePath}
-                  title={historyPath}
+              <HeroLabel>Browse workspace...</HeroLabel>
+            </Dropdown.Item>
+            {recentWorkspaces.length > 0 ? (
+              recentWorkspaces.map((historyPath) => (
+                <Dropdown.Item
+                  id={historyPath}
+                  key={historyPath}
+                  isDisabled={historyPath === workspacePath}
+                  textValue={historyPath}
                 >
-                  <span className="truncate font-mono text-xs">{historyPath}</span>
-                </button>
-              </li>
-            ))
-          ) : (
-            <li className="menu-disabled">
-              <span>No recent workspaces</span>
-            </li>
-          )}
-        </ul>
-      </div>
-      <IconButton
-        label="ワークスペース設定"
-        className="btn btn-square btn-ghost btn-sm"
-        onClick={onOpenSettings}
-        disabled={isBusy}
+                  <HeroLabel className="max-w-full truncate font-mono text-xs">
+                    {historyPath}
+                  </HeroLabel>
+                </Dropdown.Item>
+              ))
+            ) : (
+              <Dropdown.Item id="__empty" isDisabled textValue="No recent workspaces">
+                <HeroLabel>No recent workspaces</HeroLabel>
+              </Dropdown.Item>
+            )}
+          </Dropdown.Menu>
+        </Dropdown.Popover>
+      </Dropdown>
+      <HeroButton
+        type="button"
+        variant="ghost"
+        size="sm"
+        isIconOnly
+        className="size-7 rounded-sm"
+        onPress={onOpenSettings}
+        isDisabled={isBusy}
+        aria-label="ワークスペース設定"
       >
         <Settings2 size={15} />
-      </IconButton>
+      </HeroButton>
     </div>
   );
 }
@@ -1618,22 +1622,23 @@ function StatusMetric({ label, value, icon, tone }: StatusMetricProps): ReactEle
   const textColor = tone === "success" ? "text-success" : tone === "warning" ? "text-warning" : "";
 
   return (
-    <div className="min-w-0 rounded-md border border-base-300 bg-base-200/50 px-3 py-2">
-      <div className="flex items-center gap-2 text-xs font-semibold text-base-content/60">
+    <div className="flex h-8 min-w-0 items-center gap-1.5 rounded-lg border border-border bg-card/90 px-2 text-xs shadow-sm">
+      <div className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
         <span className={textColor}>{icon}</span>
         <span className="truncate">{label}</span>
       </div>
-      <div className={`mt-1 text-2xl leading-none font-bold ${textColor}`}>{value}</div>
+      <div className={`shrink-0 font-semibold tabular-nums ${textColor}`}>{value}</div>
     </div>
   );
 }
 
 interface IconButtonProps {
   label: string;
-  className: string;
+  variant?: HeroButtonVariant;
+  size?: HeroButtonSize;
   disabled?: boolean;
   children: ReactNode;
-  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+  onPress: () => void;
 }
 
 /**
@@ -1641,23 +1646,62 @@ interface IconButtonProps {
  */
 function IconButton({
   label,
-  className,
+  variant = "ghost",
+  size = "sm",
   disabled = false,
   children,
-  onClick,
+  onPress,
 }: IconButtonProps): ReactElement {
   return (
-    <div className="tooltip tooltip-left" data-tip={label}>
-      <button
-        className={className}
+    <Tooltip>
+      <HeroButton
         type="button"
-        onClick={onClick}
-        disabled={disabled}
+        variant={variant}
+        size={size}
+        isIconOnly
+        onPress={onPress}
+        isDisabled={disabled}
         aria-label={label}
       >
         {children}
-      </button>
-    </div>
+      </HeroButton>
+      <Tooltip.Content placement="left" showArrow>
+        {label}
+      </Tooltip.Content>
+    </Tooltip>
+  );
+}
+
+interface SelectionCheckboxProps {
+  label: string;
+  isSelected: boolean;
+  isDisabled?: boolean;
+  onChange: () => void;
+  className?: string;
+}
+
+/**
+ * 一覧選択用のチェックボックスを表示する
+ */
+function SelectionCheckbox({
+  label,
+  isSelected,
+  isDisabled = false,
+  onChange,
+  className,
+}: SelectionCheckboxProps): ReactElement {
+  return (
+    <Checkbox
+      aria-label={label}
+      className={className}
+      isDisabled={isDisabled}
+      isSelected={isSelected}
+      onChange={onChange}
+    >
+      <Checkbox.Control>
+        <Checkbox.Indicator />
+      </Checkbox.Control>
+    </Checkbox>
   );
 }
 
@@ -1803,7 +1847,7 @@ function DashboardView({
   const bottomPaddingPixels = dashboardBottomPaddingPixels(trackedPanelHeight, selectionBarHeight);
 
   return (
-    <section className="flex min-w-0 flex-col gap-4" style={{ paddingBottom: bottomPaddingPixels }}>
+    <section className="flex min-w-0 flex-col gap-3" style={{ paddingBottom: bottomPaddingPixels }}>
       <ValidationPanel dashboard={dashboard} />
       <TunnelOperationsPanel
         totalCount={dashboard?.tunnels.length ?? 0}
@@ -1865,6 +1909,7 @@ function DashboardView({
 
 interface AddTunnelViewProps {
   form: TunnelFormState;
+  feedback: AppMessage | null;
   canUseLocal: boolean;
   isBusy: boolean;
   onChange: (field: keyof TunnelFormState, value: string) => void;
@@ -1878,6 +1923,7 @@ interface AddTunnelViewProps {
  */
 function AddTunnelView({
   form,
+  feedback,
   canUseLocal,
   isBusy,
   onChange,
@@ -1886,9 +1932,10 @@ function AddTunnelView({
   onBrowseIdentityFile,
 }: AddTunnelViewProps): ReactElement {
   return (
-    <section className="mx-auto flex w-full max-w-6xl flex-col gap-4">
+    <section className="mx-auto flex w-full max-w-6xl flex-col gap-3">
       <TunnelForm
         form={form}
+        feedback={feedback}
         canUseLocal={canUseLocal}
         isBusy={isBusy}
         onChange={onChange}
@@ -1933,68 +1980,68 @@ function SettingsModal({
   }
 
   return (
-    <div
-      className="modal modal-open"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="settings-title"
+    <Modal
+      isOpen={isOpen}
+      onOpenChange={(open) => {
+        if (!open && !isBusy) {
+          onCancel();
+        }
+      }}
     >
-      <div className="modal-box max-h-[calc(100vh-2rem)] w-11/12 max-w-5xl overflow-hidden p-0">
-        <div className="flex items-start justify-between gap-4 border-b border-base-300 px-5 py-4">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <Settings2 className="text-primary" size={18} />
-              <h2 id="settings-title" className="text-lg font-bold">
-                Settings
-              </h2>
+      <Modal.Backdrop variant="blur" isDismissable={!isBusy}>
+        <Modal.Container placement="center" scroll="inside" size="lg" className="px-4 py-4 sm:px-6">
+          <Modal.Dialog className="w-full max-w-5xl overflow-hidden p-0">
+            <div className="flex items-center justify-between gap-4 border-b border-border px-5 py-4">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="text-foreground/70">
+                  <Settings2 size={18} />
+                </span>
+                <h2 className="text-base font-semibold">Settings</h2>
+              </div>
+              <HeroButton
+                type="button"
+                slot="close"
+                variant="ghost"
+                size="sm"
+                isIconOnly
+                isDisabled={isBusy}
+                aria-label="設定を閉じる"
+              >
+                <X size={17} />
+              </HeroButton>
             </div>
-          </div>
-          <IconButton
-            label="設定を閉じる"
-            className="btn btn-square btn-ghost btn-sm"
-            onClick={onCancel}
-            disabled={isBusy}
-          >
-            <X size={17} />
-          </IconButton>
-        </div>
 
-        <div className="max-h-[calc(100vh-13rem)] overflow-y-auto px-5 py-4">
-          <PathPanel
-            paths={paths}
-            isBusy={isBusy}
-            onChange={onChange}
-            onBrowseWorkspace={onBrowseWorkspace}
-            onBrowseGlobalConfig={onBrowseGlobalConfig}
-            onSelectWorkspace={onSelectWorkspace}
-            onRemoveWorkspace={onRemoveWorkspace}
-          />
-        </div>
+            <div className="max-h-[calc(100vh-13rem)] overflow-y-auto bg-muted/25 px-5 py-4">
+              <PathPanel
+                paths={paths}
+                isBusy={isBusy}
+                onChange={onChange}
+                onBrowseWorkspace={onBrowseWorkspace}
+                onBrowseGlobalConfig={onBrowseGlobalConfig}
+                onSelectWorkspace={onSelectWorkspace}
+                onRemoveWorkspace={onRemoveWorkspace}
+              />
+            </div>
 
-        <div className="flex justify-end gap-2 border-t border-base-300 px-5 py-4">
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            onClick={onCancel}
-            disabled={isBusy}
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary btn-sm"
-            onClick={onApply}
-            disabled={isBusy}
-          >
-            {isBusy ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
-            Apply changes
-          </button>
-        </div>
-      </div>
-      <button className="modal-backdrop" type="button" onClick={onCancel} disabled={isBusy}>
-        close
-      </button>
-    </div>
+            <div className="flex justify-end gap-2 border-t border-border px-5 py-4">
+              <HeroButton type="button" slot="close" variant="ghost" size="sm" isDisabled={isBusy}>
+                Cancel
+              </HeroButton>
+              <HeroButton
+                type="button"
+                variant="primary"
+                size="sm"
+                onPress={onApply}
+                isDisabled={isBusy}
+              >
+                {isBusy ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+                Apply changes
+              </HeroButton>
+            </div>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+    </Modal>
   );
 }
 
@@ -2021,10 +2068,10 @@ function PathPanel({
   onRemoveWorkspace,
 }: PathPanelProps): ReactElement {
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-      <section className="flex flex-col gap-3 rounded-lg border border-base-300 bg-base-200/30 p-4">
+    <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+      <Card variant="secondary" className="flex flex-col gap-3 p-4">
         <div className="flex items-center gap-2">
-          <FolderOpen className="text-primary" size={17} />
+          <FolderOpen className="text-foreground/70" size={17} />
           <h3 className="text-sm font-bold">Workspace</h3>
         </div>
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
@@ -2033,57 +2080,58 @@ function PathPanel({
             value={paths.workspacePath}
             onChange={(value) => onChange("workspacePath", value)}
           />
-          <button
+          <HeroButton
             type="button"
-            className="btn btn-outline btn-sm mb-0"
-            onClick={onBrowseWorkspace}
-            disabled={isBusy}
+            variant="outline"
+            size="sm"
+            className="mb-0"
+            onPress={onBrowseWorkspace}
+            isDisabled={isBusy}
           >
             <FolderOpen size={15} />
             Browse
-          </button>
+          </HeroButton>
         </div>
         {paths.workspaceHistory.length > 0 ? (
-          <div className="rounded-md border border-base-300 bg-base-100 px-3 py-2">
-            <div className="mb-2 text-xs font-bold uppercase tracking-wide text-base-content/50">
-              Recent workspaces
-            </div>
+          <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
+            <div className="mb-2 text-xs font-medium text-muted-foreground">Recent workspaces</div>
             <div className="flex max-h-36 flex-col gap-1 overflow-y-auto">
               {paths.workspaceHistory.map((workspacePath) => (
                 <div
                   key={workspacePath}
                   className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1"
                 >
-                  <button
+                  <HeroButton
                     type="button"
-                    className="btn btn-ghost btn-xs min-h-8 min-w-0 justify-start font-mono text-xs"
-                    onClick={() => onSelectWorkspace(workspacePath)}
-                    disabled={isBusy}
-                    title={workspacePath}
+                    variant="ghost"
+                    size="sm"
+                    className="min-h-8 min-w-0 justify-start font-mono text-xs"
+                    onPress={() => onSelectWorkspace(workspacePath)}
+                    isDisabled={isBusy}
                   >
                     <span className="truncate">{workspacePath}</span>
-                  </button>
-                  <IconButton
-                    label="履歴から削除"
-                    className="btn btn-square btn-ghost btn-xs text-error"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onRemoveWorkspace(workspacePath);
-                    }}
-                    disabled={isBusy}
+                  </HeroButton>
+                  <HeroButton
+                    type="button"
+                    variant="danger-soft"
+                    size="sm"
+                    isIconOnly
+                    onPress={() => onRemoveWorkspace(workspacePath)}
+                    isDisabled={isBusy}
+                    aria-label="履歴から削除"
                   >
                     <Trash2 size={14} />
-                  </IconButton>
+                  </HeroButton>
                 </div>
               ))}
             </div>
           </div>
         ) : null}
-      </section>
+      </Card>
 
-      <section className="flex flex-col gap-3 rounded-lg border border-base-300 bg-base-200/30 p-4">
+      <Card variant="secondary" className="flex flex-col gap-3 p-4">
         <div className="flex items-center gap-2">
-          <Settings2 className="text-primary" size={17} />
+          <Settings2 className="text-foreground/70" size={17} />
           <h3 className="text-sm font-bold">Configuration files</h3>
         </div>
         <PathValue label="Local config" value={paths.localConfigPath} />
@@ -2094,68 +2142,82 @@ function PathPanel({
             onChange={(value) => onChange("globalConfigPath", value)}
             disabled={!paths.useGlobal}
           />
-          <button
+          <HeroButton
             type="button"
-            className="btn btn-outline btn-sm mb-0"
-            onClick={onBrowseGlobalConfig}
-            disabled={isBusy || !paths.useGlobal}
+            variant="outline"
+            size="sm"
+            className="mb-0"
+            onPress={onBrowseGlobalConfig}
+            isDisabled={isBusy || !paths.useGlobal}
           >
             <FolderOpen size={15} />
             Browse
-          </button>
+          </HeroButton>
         </div>
-        <div className="rounded-md border border-base-300 bg-base-100 px-3 py-2">
-          <label className="flex cursor-pointer items-center justify-between gap-3">
-            <span className="text-sm font-semibold">Use global config</span>
-            <input
-              type="checkbox"
-              className="toggle toggle-primary toggle-sm"
-              checked={paths.useGlobal}
-              onChange={(event) => onChange("useGlobal", event.target.checked)}
-            />
-          </label>
+        <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
+          <Switch
+            size="sm"
+            isSelected={paths.useGlobal}
+            onChange={(selected) => onChange("useGlobal", selected)}
+            className="w-full justify-between"
+          >
+            <Switch.Content>
+              <span className="text-sm font-semibold">Use global config</span>
+            </Switch.Content>
+            <Switch.Control>
+              <Switch.Thumb />
+            </Switch.Control>
+          </Switch>
         </div>
-      </section>
+      </Card>
 
-      <section className="flex flex-col gap-3 rounded-lg border border-base-300 bg-base-200/30 p-4 lg:col-span-2">
+      <Card variant="secondary" className="flex flex-col gap-3 p-4 lg:col-span-2">
         <div className="flex items-center gap-2">
-          <Settings2 className="text-primary" size={17} />
+          <Settings2 className="text-foreground/70" size={17} />
           <h3 className="text-sm font-bold">Application</h3>
         </div>
-        <div className="rounded-md border border-base-300 bg-base-100 px-3 py-2">
-          <label className="flex cursor-pointer items-center justify-between gap-3">
-            <span className="text-sm font-semibold">Hide Dock icon while window is hidden</span>
-            <input
-              type="checkbox"
-              className="toggle toggle-primary toggle-sm"
-              checked={paths.hideDockIconWhenWindowHidden}
-              onChange={(event) => onChange("hideDockIconWhenWindowHidden", event.target.checked)}
-            />
-          </label>
+        <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
+          <Switch
+            size="sm"
+            isSelected={paths.hideDockIconWhenWindowHidden}
+            onChange={(selected) => onChange("hideDockIconWhenWindowHidden", selected)}
+            className="w-full justify-between"
+          >
+            <Switch.Content>
+              <span className="text-sm font-semibold">Hide Dock icon while window is hidden</span>
+            </Switch.Content>
+            <Switch.Control>
+              <Switch.Thumb />
+            </Switch.Control>
+          </Switch>
         </div>
-        <div className="rounded-md border border-base-300 bg-base-100 px-3 py-2">
-          <label className="flex cursor-pointer items-center justify-between gap-3">
-            <span className="text-sm font-semibold">Auto-stop tunnels on quit</span>
-            <input
-              type="checkbox"
-              className="toggle toggle-primary toggle-sm"
-              checked={paths.autoStopTunnelsOnQuit}
-              onChange={(event) => onChange("autoStopTunnelsOnQuit", event.target.checked)}
-            />
-          </label>
+        <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
+          <Switch
+            size="sm"
+            isSelected={paths.autoStopTunnelsOnQuit}
+            onChange={(selected) => onChange("autoStopTunnelsOnQuit", selected)}
+            className="w-full justify-between"
+          >
+            <Switch.Content>
+              <span className="text-sm font-semibold">Auto-stop tunnels on quit</span>
+            </Switch.Content>
+            <Switch.Control>
+              <Switch.Thumb />
+            </Switch.Control>
+          </Switch>
         </div>
-      </section>
+      </Card>
 
-      <section className="flex flex-col gap-3 rounded-lg border border-base-300 bg-base-200/30 p-4 lg:col-span-2">
+      <Card variant="secondary" className="flex flex-col gap-3 p-4 lg:col-span-2">
         <div className="flex items-center gap-2">
-          <Activity className="text-primary" size={17} />
+          <Activity className="text-foreground/70" size={17} />
           <h3 className="text-sm font-bold">Runtime state</h3>
         </div>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           <PathValue label="Global state" value={paths.globalStatePath} />
           <PathValue label="Workspace state" value={paths.workspaceStatePath} />
         </div>
-      </section>
+      </Card>
     </div>
   );
 }
@@ -2170,9 +2232,9 @@ interface PathValueProps {
  */
 function PathValue({ label, value }: PathValueProps): ReactElement {
   return (
-    <div className="rounded-md border border-base-300 bg-base-200/40 px-3 py-2">
-      <div className="text-xs font-semibold text-base-content/60">{label}</div>
-      <div className="mt-1 min-h-5 truncate font-mono text-xs text-base-content/85" title={value}>
+    <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
+      <div className="text-xs font-semibold text-foreground/60">{label}</div>
+      <div className="mt-1 min-h-5 truncate font-mono text-xs text-foreground/85" title={value}>
         {value || "Not selected"}
       </div>
     </div>
@@ -2233,13 +2295,14 @@ interface AlertMessageProps {
  */
 function AlertMessage({ kind, children }: AlertMessageProps): ReactElement {
   return (
-    <div
-      className={`flex items-center gap-3 rounded-lg border px-4 py-3 text-sm text-base-content shadow-sm ${alertToneClassName(kind)}`}
+    <Alert
+      status={alertStatus(kind)}
+      className="rounded-md"
       role={kind === "error" ? "alert" : "status"}
     >
-      <span className="shrink-0">{alertIcon(kind, 18)}</span>
-      <div className="min-w-0 flex-1">{children}</div>
-    </div>
+      <Alert.Indicator>{alertIcon(kind, 18)}</Alert.Indicator>
+      <Alert.Content>{children}</Alert.Content>
+    </Alert>
   );
 }
 
@@ -2295,94 +2358,101 @@ function TunnelOperationsPanel({
   const visibleTags = orderTagsBySelection(availableTags, filters.tags);
 
   return (
-    <section className="rounded-lg border border-base-300 bg-base-100 shadow-sm">
-      <div className="flex min-w-0 flex-col gap-4 p-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+    <section className="rounded-xl border border-border bg-card shadow-sm">
+      <div className="flex min-w-0 flex-col gap-3">
+        <div className="flex flex-col gap-2 border-b border-border px-3 py-2.5 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <ListFilter className="text-primary" size={18} />
-              <h2 className="text-base leading-6 font-bold">Tunnels</h2>
-              <span className="badge badge-neutral badge-sm">
+              <ListFilter className="text-foreground/70" size={16} />
+              <h2 className="text-sm leading-5 font-semibold">Tunnels</h2>
+              <Chip size="sm" variant="secondary">
                 {visibleCount} / {totalCount}
-              </span>
+              </Chip>
             </div>
-            <p className="mt-1 text-sm text-base-content/60">
-              Filter by status, scope, tag, and endpoint before selecting tunnels
-            </p>
           </div>
           <div className="flex flex-col gap-2 self-start sm:flex-row sm:items-center lg:self-auto">
             <TunnelDisplayModeControl
               displayMode={displayMode}
               onDisplayModeChange={onDisplayModeChange}
             />
-            <button
+            <HeroButton
               type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={onResetFilters}
-              disabled={!hasActiveFilters}
+              variant="ghost"
+              size="sm"
+              onPress={onResetFilters}
+              isDisabled={!hasActiveFilters}
             >
               Reset filters
-            </button>
+            </HeroButton>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(16rem,1fr)_auto_auto] lg:items-center">
-          <div className="relative">
-            <Search
-              className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-base-content/40"
-              size={16}
-            />
-            <input
-              className="input input-bordered input-sm w-full pr-9 pl-9"
-              value={queryInput}
-              onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                onQueryInputChange(event.target.value)
-              }
-              placeholder="Search ID, tag, endpoint"
-              aria-label="Search tunnels"
-            />
-            {queryInput.length > 0 ? (
-              <button
-                type="button"
-                className="btn btn-square btn-ghost btn-xs absolute top-1/2 right-1 -translate-y-1/2"
-                onClick={() => onQueryInputChange("")}
-                aria-label="検索条件を消去"
-                title="検索条件を消去"
-              >
-                <X size={14} />
-              </button>
-            ) : null}
-          </div>
+        <div className="grid grid-cols-1 gap-2 px-3 pb-3 lg:grid-cols-[minmax(16rem,1fr)_auto_auto] lg:items-center">
+          <HeroTextField className="w-full" variant="secondary">
+            <HeroLabel className="sr-only">Search tunnels</HeroLabel>
+            <div className="relative">
+              <Search
+                className="pointer-events-none absolute top-1/2 left-3 z-10 -translate-y-1/2 text-foreground/40"
+                size={16}
+              />
+              <HeroInput
+                fullWidth
+                className="h-9 w-full pr-9 pl-9"
+                variant="secondary"
+                value={queryInput}
+                onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                  onQueryInputChange(event.target.value)
+                }
+                placeholder="Search ID, tag, endpoint"
+                aria-label="Search tunnels"
+              />
+              {queryInput.length > 0 ? (
+                <HeroButton
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  isIconOnly
+                  className="absolute top-1/2 right-1 z-10 -translate-y-1/2"
+                  onPress={() => onQueryInputChange("")}
+                  aria-label="検索条件を消去"
+                >
+                  <X size={14} />
+                </HeroButton>
+              ) : null}
+            </div>
+          </HeroTextField>
 
-          <div className="segmented-control join">
+          <div className="grid grid-cols-4 gap-0.5 rounded-lg border border-border bg-muted p-0.5">
             {statusFilterOptions.map((option) => (
-              <button
+              <HeroButton
                 key={option.value}
                 type="button"
-                className={`btn btn-sm join-item ${
-                  filters.status === option.value ? "btn-neutral" : "btn-outline"
-                }`}
-                onClick={() => onFilterChange("status", option.value)}
+                variant={filters.status === option.value ? "primary" : "ghost"}
+                size="sm"
+                fullWidth
+                onPress={() => onFilterChange("status", option.value)}
                 aria-pressed={filters.status === option.value}
+                className="min-w-0 justify-center"
               >
                 {option.label}
-              </button>
+              </HeroButton>
             ))}
           </div>
 
-          <div className="segmented-control join">
+          <div className="grid grid-cols-3 gap-0.5 rounded-lg border border-border bg-muted p-0.5">
             {scopeFilterOptions.map((option) => (
-              <button
+              <HeroButton
                 key={option.value}
                 type="button"
-                className={`btn btn-sm join-item ${
-                  filters.scope === option.value ? "btn-neutral" : "btn-outline"
-                }`}
-                onClick={() => onFilterChange("scope", option.value)}
+                variant={filters.scope === option.value ? "primary" : "ghost"}
+                size="sm"
+                fullWidth
+                onPress={() => onFilterChange("scope", option.value)}
                 aria-pressed={filters.scope === option.value}
+                className="min-w-0 justify-center"
               >
                 {option.label}
-              </button>
+              </HeroButton>
             ))}
           </div>
         </div>
@@ -2396,24 +2466,22 @@ function TunnelOperationsPanel({
         />
 
         {availableTags.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-2 border-t border-base-300 pt-3">
-            <span className="text-xs font-bold uppercase tracking-wide text-base-content/50">
-              Tags
-            </span>
+          <div className="flex flex-wrap items-center gap-1.5 border-t border-border px-3 py-2">
+            <span className="text-xs font-medium text-muted-foreground">Tags</span>
             {visibleTags.map((tag) => {
               const selected = filters.tags.includes(tag);
               return (
-                <button
+                <HeroButton
                   key={tag}
                   type="button"
-                  className={`btn btn-xs rounded-full ${
-                    selected ? "btn-primary" : "btn-outline tag-outline"
-                  }`}
-                  onClick={() => onToggleTag(tag)}
+                  variant={selected ? "primary" : "outline"}
+                  size="sm"
+                  onPress={() => onToggleTag(tag)}
                   aria-pressed={selected}
+                  className="min-h-7 rounded-full px-3"
                 >
                   {tag}
-                </button>
+                </HeroButton>
               );
             })}
           </div>
@@ -2436,29 +2504,34 @@ function TunnelDisplayModeControl({
   onDisplayModeChange,
 }: TunnelDisplayModeControlProps): ReactElement {
   return (
-    <div className="segmented-control join w-full sm:w-auto" aria-label="トンネル一覧の表示形式">
-      <button
+    <div
+      className="grid w-full grid-cols-2 gap-0.5 rounded-lg border border-border bg-muted p-0.5 sm:w-auto"
+      aria-label="トンネル一覧の表示形式"
+    >
+      <HeroButton
         type="button"
-        className={`btn btn-sm join-item flex-1 sm:flex-none ${
-          displayMode === "slim" ? "btn-neutral" : "btn-outline"
-        }`}
-        onClick={() => onDisplayModeChange("slim")}
+        variant={displayMode === "slim" ? "primary" : "ghost"}
+        size="sm"
+        fullWidth
+        onPress={() => onDisplayModeChange("slim")}
         aria-pressed={displayMode === "slim"}
+        className="min-w-0 justify-center"
       >
         <Rows3 size={14} />
         Slim
-      </button>
-      <button
+      </HeroButton>
+      <HeroButton
         type="button"
-        className={`btn btn-sm join-item flex-1 sm:flex-none ${
-          displayMode === "card" ? "btn-neutral" : "btn-outline"
-        }`}
-        onClick={() => onDisplayModeChange("card")}
+        variant={displayMode === "card" ? "primary" : "ghost"}
+        size="sm"
+        fullWidth
+        onPress={() => onDisplayModeChange("card")}
         aria-pressed={displayMode === "card"}
+        className="min-w-0 justify-center"
       >
         <LayoutGrid size={14} />
         Cards
-      </button>
+      </HeroButton>
     </div>
   );
 }
@@ -2491,8 +2564,8 @@ function ActiveFilterChips({
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-md border border-base-300 bg-base-200/35 px-3 py-2">
-      <span className="text-xs font-bold uppercase tracking-wide text-base-content/50">Active</span>
+    <div className="mx-3 flex flex-wrap items-center gap-1.5 rounded-lg border border-border bg-muted/50 px-2 py-1.5">
+      <span className="text-xs font-medium text-muted-foreground">Active</span>
       {query.length > 0 ? (
         <FilterChip label={`query: ${query}`} onRemove={() => onQueryInputChange("")} />
       ) : null}
@@ -2525,16 +2598,17 @@ interface FilterChipProps {
  */
 function FilterChip({ label, onRemove }: FilterChipProps): ReactElement {
   return (
-    <button
+    <HeroButton
       type="button"
-      className="btn btn-outline btn-xs max-w-full rounded-full border-base-300 bg-base-100"
-      onClick={onRemove}
-      title={`${label} を解除`}
+      variant="outline"
+      size="sm"
+      className="max-w-full rounded-full"
+      onPress={onRemove}
       aria-label={`${label} を解除`}
     >
       <span className="max-w-52 truncate">{label}</span>
       <X size={12} />
-    </button>
+    </HeroButton>
   );
 }
 
@@ -2591,77 +2665,83 @@ function SelectionActionBar({
     >
       <div
         ref={panelRef}
-        className="pointer-events-auto mx-auto flex max-h-[min(18rem,calc(100vh-2rem))] w-full max-w-[90rem] flex-col gap-3 overflow-auto rounded-lg border border-primary/30 bg-base-100/95 px-4 py-3 shadow-2xl backdrop-blur xl:flex-row xl:items-center xl:justify-between"
+        className="pointer-events-auto mx-auto flex max-h-[min(16rem,calc(100vh-2rem))] w-full max-w-[96rem] flex-col gap-2 overflow-auto rounded-xl border border-border bg-card/95 px-3 py-2 shadow-2xl backdrop-blur xl:flex-row xl:items-center xl:justify-between"
       >
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <CheckCircle2 className="text-primary" size={18} />
+            <CheckCircle2 className="text-foreground/70" size={16} />
             <h2 className="text-sm leading-6 font-bold">Bulk actions</h2>
-            <span className="badge badge-primary badge-sm">{selectedCount} total selected</span>
-            <span className="badge badge-ghost badge-sm">{selectedInViewLabel}</span>
+            <Chip color="accent" size="sm" variant="primary">
+              {selectedCount} total selected
+            </Chip>
+            <Chip size="sm" variant="secondary">
+              {selectedInViewLabel}
+            </Chip>
             {hiddenSelectedCount > 0 ? (
-              <span className="badge badge-warning badge-sm">
+              <Chip color="warning" size="sm" variant="soft">
                 {hiddenSelectedCount} hidden by filters included
-              </span>
+              </Chip>
             ) : null}
           </div>
-          <p className="mt-1 text-xs text-base-content/60">
-            Start and Stop operate on every selected tunnel, including hidden selections.
-          </p>
         </div>
 
         <div className="flex flex-col gap-2 xl:flex-row xl:items-center xl:justify-end">
           <SelectionOperationProgress progress={operationProgress} />
 
           <div className="grid grid-cols-2 gap-2 xl:grid-cols-[repeat(2,max-content)]">
-            <button
+            <HeroButton
               type="button"
-              className="btn btn-primary btn-sm"
-              onClick={onStart}
-              disabled={isBusy || selectedCount === 0}
+              variant="primary"
+              size="sm"
+              onPress={onStart}
+              isDisabled={isBusy || selectedCount === 0}
             >
               <Play size={16} />
               Start selected
-            </button>
-            <button
+            </HeroButton>
+            <HeroButton
               type="button"
-              className="btn btn-error btn-sm"
-              onClick={onStop}
-              disabled={isBusy || selectedCount === 0}
+              variant="danger"
+              size="sm"
+              onPress={onStop}
+              isDisabled={isBusy || selectedCount === 0}
             >
               <CircleStop size={16} />
               Stop selected
-            </button>
+            </HeroButton>
           </div>
 
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 xl:grid-cols-[repeat(3,max-content)]">
-            <button
+            <HeroButton
               type="button"
-              className="btn btn-outline btn-sm"
-              onClick={onSelectVisible}
-              disabled={isBusy || visibleCount === 0 || selectedVisibleCount === visibleCount}
+              variant="outline"
+              size="sm"
+              onPress={onSelectVisible}
+              isDisabled={isBusy || visibleCount === 0 || selectedVisibleCount === visibleCount}
             >
               <CheckCircle2 size={16} />
               Select all visible
-            </button>
-            <button
+            </HeroButton>
+            <HeroButton
               type="button"
-              className="btn btn-outline btn-sm"
-              onClick={onDeselectVisible}
-              disabled={isBusy || selectedVisibleCount === 0}
+              variant="outline"
+              size="sm"
+              onPress={onDeselectVisible}
+              isDisabled={isBusy || selectedVisibleCount === 0}
             >
               <Minus size={16} />
               Deselect visible
-            </button>
-            <button
+            </HeroButton>
+            <HeroButton
               type="button"
-              className="btn btn-outline btn-sm"
-              onClick={onClear}
-              disabled={isBusy || selectedCount === 0}
+              variant="outline"
+              size="sm"
+              onPress={onClear}
+              isDisabled={isBusy || selectedCount === 0}
             >
               <X size={16} />
               Clear all
-            </button>
+            </HeroButton>
           </div>
         </div>
       </div>
@@ -2738,17 +2818,23 @@ function SelectionOperationProgress({
   const label = operationProgressLabel(progress);
 
   return (
-    <div className="min-w-0 rounded-md border border-info/30 bg-info/10 px-3 py-2 xl:w-64">
+    <div className="min-w-0 rounded-lg border border-border bg-muted/50 px-3 py-2 xl:w-64">
       <div className="flex min-w-0 items-center gap-2">
-        <Loader2 className="shrink-0 animate-spin text-info" size={16} />
-        <span className="truncate text-xs font-semibold text-base-content">{label}</span>
+        <Loader2 className="shrink-0 animate-spin text-primary" size={16} />
+        <span className="truncate text-xs font-semibold text-foreground">{label}</span>
       </div>
-      <progress
-        className="progress progress-info mt-2 h-1.5 w-full"
-        value={progress.completedCount}
-        max={progress.totalCount}
+      <ProgressBar
         aria-label={label}
-      />
+        className="mt-2 w-full"
+        color="accent"
+        maxValue={progress.totalCount}
+        size="sm"
+        value={progress.completedCount}
+      >
+        <ProgressBar.Track>
+          <ProgressBar.Fill />
+        </ProgressBar.Track>
+      </ProgressBar>
     </div>
   );
 }
@@ -2783,29 +2869,32 @@ interface OperationToastProps {
  */
 function OperationToast({ toast, onDismiss }: OperationToastProps): ReactElement {
   return (
-    <div
-      className={`pointer-events-auto flex max-h-[min(22rem,calc(100vh-2rem))] w-full overflow-hidden rounded-lg border px-4 py-3 text-sm text-base-content shadow-lg ${alertToneClassName(toast.kind)}`}
+    <Alert
+      status={alertStatus(toast.kind)}
+      className="pointer-events-auto max-h-[min(22rem,calc(100vh-2rem))] w-full overflow-hidden shadow-lg"
       role={toast.kind === "error" ? "alert" : "status"}
     >
-      <span className="mt-0.5 shrink-0">{alertIcon(toast.kind, 20)}</span>
-      <div className="min-w-0 flex-1 px-3">
+      <Alert.Indicator>{alertIcon(toast.kind, 20)}</Alert.Indicator>
+      <Alert.Content className="min-w-0 flex-1">
         <p className="[overflow-wrap:anywhere] leading-6 font-semibold">{toast.summary}</p>
         {toast.detail ? (
-          <p className="mt-1 max-h-52 overflow-auto [overflow-wrap:anywhere] leading-6 whitespace-pre-wrap text-base-content/80">
+          <p className="mt-1 max-h-52 overflow-auto [overflow-wrap:anywhere] leading-6 whitespace-pre-wrap text-foreground/80">
             {toast.detail}
           </p>
         ) : null}
-      </div>
-      <button
+      </Alert.Content>
+      <HeroButton
         type="button"
-        className="btn btn-ghost btn-square btn-xs -mt-1 -mr-2 shrink-0"
-        onClick={onDismiss}
+        variant="ghost"
+        size="sm"
+        isIconOnly
+        className="-mt-1 -mr-2 shrink-0"
+        onPress={onDismiss}
         aria-label="通知を閉じる"
-        title="通知を閉じる"
       >
         <X size={14} />
-      </button>
-    </div>
+      </HeroButton>
+    </Alert>
   );
 }
 
@@ -2864,10 +2953,10 @@ function TunnelDeck({
       <EmptyState
         title="No configured tunnels"
         action={
-          <button className="btn btn-primary btn-sm" type="button" onClick={onAddTunnel}>
+          <HeroButton type="button" variant="primary" size="sm" onPress={onAddTunnel}>
             <CirclePlus size={16} />
             Add tunnel
-          </button>
+          </HeroButton>
         }
       >
         Add tunnel から新しい接続を追加できます。
@@ -2880,10 +2969,10 @@ function TunnelDeck({
       <EmptyState
         title="No matching tunnels"
         action={
-          <button className="btn btn-outline btn-sm" type="button" onClick={onResetFilters}>
+          <HeroButton type="button" variant="outline" size="sm" onPress={onResetFilters}>
             <X size={16} />
             Reset filters
-          </button>
+          </HeroButton>
         }
       >
         検索条件またはフィルターを変更してください。
@@ -2954,39 +3043,39 @@ function TunnelSlimList({
   onRemove,
 }: TunnelSlimListProps): ReactElement {
   return (
-    <section className="overflow-hidden rounded-lg border border-base-300 bg-base-100 shadow-sm">
-      <div className="overflow-x-auto">
-        <table className="table table-sm tunnel-slim-table min-w-[68rem]">
-          <thead>
-            <tr>
-              <th className="w-12">Select</th>
-              <th>ID</th>
-              <th>Status</th>
-              <th>Local</th>
-              <th>Remote</th>
-              <th>SSH</th>
-              <th>Source</th>
-              <th className="text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {tunnels.map((tunnel) => (
-              <TunnelSlimRow
-                key={tunnel.id}
-                tunnel={tunnel}
-                query={query}
-                checked={selectedIds.has(tunnel.id)}
-                isBusy={isBusy}
-                onToggle={onToggle}
-                onStart={onStart}
-                onStop={onStop}
-                onEdit={onEdit}
-                onRemove={onRemove}
-              />
-            ))}
-          </tbody>
-        </table>
-      </div>
+    <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+      <Table variant="secondary">
+        <Table.ScrollContainer>
+          <Table.Content aria-label="Configured tunnels" className="min-w-[64rem]">
+            <Table.Header>
+              <Table.Column className="w-12">Select</Table.Column>
+              <Table.Column isRowHeader>ID</Table.Column>
+              <Table.Column>Status</Table.Column>
+              <Table.Column>Local</Table.Column>
+              <Table.Column>Remote</Table.Column>
+              <Table.Column>SSH</Table.Column>
+              <Table.Column>Source</Table.Column>
+              <Table.Column className="text-right">Actions</Table.Column>
+            </Table.Header>
+            <Table.Body>
+              {tunnels.map((tunnel) => (
+                <TunnelSlimRow
+                  key={tunnel.id}
+                  tunnel={tunnel}
+                  query={query}
+                  checked={selectedIds.has(tunnel.id)}
+                  isBusy={isBusy}
+                  onToggle={onToggle}
+                  onStart={onStart}
+                  onStop={onStop}
+                  onEdit={onEdit}
+                  onRemove={onRemove}
+                />
+              ))}
+            </Table.Body>
+          </Table.Content>
+        </Table.ScrollContainer>
+      </Table>
     </section>
   );
 }
@@ -3022,75 +3111,81 @@ function TunnelSlimRow({
   const highlightQuery = query.trim();
 
   return (
-    <tr className={checked ? "tunnel-slim-row-selected" : undefined}>
-      <td>
-        <input
-          type="checkbox"
-          className="checkbox checkbox-primary checkbox-sm"
-          checked={checked}
+    <Table.Row className={checked ? "bg-primary/5" : undefined} id={tunnel.id}>
+      <Table.Cell>
+        <SelectionCheckbox
+          label={`${tunnel.id} を選択`}
+          isSelected={checked}
           onChange={() => onToggle(tunnel.id)}
-          aria-label={`${tunnel.id} を選択`}
         />
-      </td>
-      <th scope="row" className="max-w-56">
+      </Table.Cell>
+      <Table.Cell className="max-w-56">
         <div className="truncate text-sm font-bold" title={tunnel.id}>
           <HighlightedText text={tunnel.id} query={highlightQuery} />
         </div>
-      </th>
-      <td>
+      </Table.Cell>
+      <Table.Cell>
         <StatusBadge status={status} />
-      </td>
-      <td className="max-w-44 truncate font-mono text-xs" title={tunnel.local}>
-        <HighlightedText text={tunnel.local} query={highlightQuery} />
-      </td>
-      <td className="max-w-44 truncate font-mono text-xs" title={tunnel.remote}>
-        <HighlightedText text={tunnel.remote} query={highlightQuery} />
-      </td>
-      <td className="max-w-52 truncate font-mono text-xs" title={tunnel.ssh}>
-        <HighlightedText text={tunnel.ssh} query={highlightQuery} />
-      </td>
-      <td className="font-semibold text-base-content/70">
+      </Table.Cell>
+      <Table.Cell className="max-w-44 truncate font-mono text-xs">
+        <span title={tunnel.local}>
+          <HighlightedText text={tunnel.local} query={highlightQuery} />
+        </span>
+      </Table.Cell>
+      <Table.Cell className="max-w-44 truncate font-mono text-xs">
+        <span title={tunnel.remote}>
+          <HighlightedText text={tunnel.remote} query={highlightQuery} />
+        </span>
+      </Table.Cell>
+      <Table.Cell className="max-w-52 truncate font-mono text-xs">
+        <span title={tunnel.ssh}>
+          <HighlightedText text={tunnel.ssh} query={highlightQuery} />
+        </span>
+      </Table.Cell>
+      <Table.Cell className="font-semibold text-foreground/70">
         <HighlightedText text={tunnel.source} query={highlightQuery} />
-      </td>
-      <td>
+      </Table.Cell>
+      <Table.Cell>
         <div className="flex min-w-max items-center justify-end gap-1">
-          <button
+          <HeroButton
             type="button"
-            className={`btn btn-xs ${running ? "btn-ghost" : "btn-primary"}`}
-            onClick={() => onStart(tunnel.id)}
-            disabled={isBusy || running}
+            variant={running ? "ghost" : "primary"}
+            size="sm"
+            onPress={() => onStart(tunnel.id)}
+            isDisabled={isBusy || running}
           >
             <Play size={13} />
             Start
-          </button>
-          <button
+          </HeroButton>
+          <HeroButton
             type="button"
-            className={`btn btn-xs ${running ? "btn-error" : "btn-outline"}`}
-            onClick={() => onStop(tunnel.id)}
-            disabled={isBusy || tunnel.status === null}
+            variant={running ? "danger" : "outline"}
+            size="sm"
+            onPress={() => onStop(tunnel.id)}
+            isDisabled={isBusy || tunnel.status === null}
           >
             <CircleStop size={13} />
             Stop
-          </button>
+          </HeroButton>
           <IconButton
             label="設定を編集"
-            className="btn btn-square btn-ghost btn-xs"
-            onClick={() => onEdit(tunnel)}
+            variant="ghost"
+            onPress={() => onEdit(tunnel)}
             disabled={isBusy}
           >
             <Pencil size={14} />
           </IconButton>
           <IconButton
             label="設定から削除"
-            className="btn btn-square btn-ghost btn-xs text-error"
-            onClick={() => onRemove(tunnel)}
+            variant="danger-soft"
+            onPress={() => onRemove(tunnel)}
             disabled={isBusy}
           >
             <Trash2 size={14} />
           </IconButton>
         </div>
-      </td>
-    </tr>
+      </Table.Cell>
+    </Table.Row>
   );
 }
 
@@ -3105,13 +3200,13 @@ interface EmptyStateProps {
  */
 function EmptyState({ title, children, action }: EmptyStateProps): ReactElement {
   return (
-    <section className="rounded-lg border border-dashed border-base-300 bg-base-100/75 shadow-sm">
+    <section className="rounded-xl border border-dashed border-border bg-card/70 shadow-sm">
       <div className="flex min-h-40 flex-col items-center justify-center gap-2 px-5 py-8 text-center">
-        <div className="rounded-full bg-base-200 p-3 text-base-content/50">
+        <div className="rounded-lg bg-muted p-3 text-foreground/50">
           <ListFilter size={22} />
         </div>
         <h2 className="text-base font-bold">{title}</h2>
-        <p className="max-w-md text-sm text-base-content/60">{children}</p>
+        <p className="max-w-md text-sm text-foreground/60">{children}</p>
         {action ? <div className="mt-2">{action}</div> : null}
       </div>
     </section>
@@ -3147,37 +3242,43 @@ function TunnelCard({
   const running = tunnel.status?.state === "running";
   const status = tunnel.status?.state ?? "idle";
   const highlightQuery = query.trim();
+  const statusBorderClassName =
+    status === "running"
+      ? "border-l-success"
+      : status === "stale"
+        ? "border-l-warning"
+        : "border-l-default";
 
   return (
-    <article
-      className={`tunnel-card tunnel-card-${status} flex h-full flex-col rounded-lg border shadow-sm transition ${
-        checked
-          ? "tunnel-card-selected border-base-300"
-          : "border-base-300 bg-base-100 hover:border-base-content/20"
+    <Card
+      variant="secondary"
+      className={`flex h-full flex-col border-l-4 transition ${statusBorderClassName} ${
+        checked ? "bg-primary/5" : "bg-card"
       }`}
     >
-      <div className="flex h-full flex-col gap-4 p-5">
+      <div className="flex h-full flex-col gap-3 p-4">
         <div className="flex items-start justify-between gap-3">
-          <label className="flex min-w-0 cursor-pointer items-start gap-3">
-            <input
-              type="checkbox"
-              className="checkbox checkbox-primary checkbox-sm mt-1"
-              checked={checked}
-              onChange={() => onToggle(tunnel.id)}
-            />
-            <span className="min-w-0">
+          <Checkbox
+            className="min-w-0 flex-1 items-start gap-3"
+            isSelected={checked}
+            onChange={() => onToggle(tunnel.id)}
+          >
+            <Checkbox.Control className="mt-1">
+              <Checkbox.Indicator />
+            </Checkbox.Control>
+            <Checkbox.Content className="min-w-0">
               <span className="block truncate text-base leading-6 font-bold">
                 <HighlightedText text={tunnel.id} query={highlightQuery} />
               </span>
-              <span className="mt-0.5 block truncate text-xs text-base-content/50">
+              <span className="mt-0.5 block truncate text-xs text-foreground/50">
                 <HighlightedText text={tunnel.sourcePath} query={highlightQuery} />
               </span>
-            </span>
-          </label>
+            </Checkbox.Content>
+          </Checkbox>
           <StatusBadge status={status} />
         </div>
 
-        <p className="min-h-10 text-sm leading-5 text-base-content/60">
+        <p className="min-h-10 text-sm leading-5 text-foreground/60">
           <HighlightedText text={tunnel.description ?? "No description"} query={highlightQuery} />
         </p>
 
@@ -3192,43 +3293,45 @@ function TunnelCard({
         </div>
 
         <div className="mt-auto flex items-center justify-end gap-2 pt-1">
-          <button
+          <HeroButton
             type="button"
-            className={`btn btn-sm ${running ? "btn-ghost" : "btn-primary"}`}
-            onClick={() => onStart(tunnel.id)}
-            disabled={isBusy || running}
+            variant={running ? "ghost" : "primary"}
+            size="sm"
+            onPress={() => onStart(tunnel.id)}
+            isDisabled={isBusy || running}
           >
             <Play size={15} />
             Start
-          </button>
-          <button
+          </HeroButton>
+          <HeroButton
             type="button"
-            className={`btn btn-sm ${running ? "btn-error" : "btn-outline"}`}
-            onClick={() => onStop(tunnel.id)}
-            disabled={isBusy || tunnel.status === null}
+            variant={running ? "danger" : "outline"}
+            size="sm"
+            onPress={() => onStop(tunnel.id)}
+            isDisabled={isBusy || tunnel.status === null}
           >
             <CircleStop size={15} />
             Stop
-          </button>
+          </HeroButton>
           <IconButton
             label="設定を編集"
-            className="btn btn-square btn-ghost btn-sm"
-            onClick={() => onEdit(tunnel)}
+            variant="ghost"
+            onPress={() => onEdit(tunnel)}
             disabled={isBusy}
           >
             <Pencil size={16} />
           </IconButton>
           <IconButton
             label="設定から削除"
-            className="btn btn-square btn-ghost btn-sm text-error"
-            onClick={() => onRemove(tunnel)}
+            variant="danger-soft"
+            onPress={() => onRemove(tunnel)}
             disabled={isBusy}
           >
             <Trash2 size={16} />
           </IconButton>
         </div>
       </div>
-    </article>
+    </Card>
   );
 }
 
@@ -3243,9 +3346,9 @@ interface MetaItemProps {
  */
 function MetaItem({ label, value, query = "" }: MetaItemProps): ReactElement {
   return (
-    <div className="min-w-0 rounded-md border border-base-300 bg-base-200/40 px-3 py-2">
-      <div className="font-semibold text-base-content/50">{label}</div>
-      <div className="mt-1 truncate font-mono text-base-content/80" title={value}>
+    <div className="min-w-0 rounded-lg border border-border bg-muted/35 px-2.5 py-2">
+      <div className="font-semibold text-foreground/50">{label}</div>
+      <div className="mt-1 truncate font-mono text-foreground/80" title={value}>
         <HighlightedText text={value} query={query} />
       </div>
     </div>
@@ -3257,17 +3360,16 @@ interface StatusBadgeProps {
 }
 
 /**
- * トンネル状態の badge を表示する
+ * トンネル状態のチップを表示する
  */
 function StatusBadge({ status }: StatusBadgeProps): ReactElement {
-  const className =
-    status === "running"
-      ? "badge badge-success badge-sm"
-      : status === "stale"
-        ? "badge status-badge-stale badge-sm font-semibold"
-        : "badge badge-ghost badge-sm";
+  const color = status === "running" ? "success" : status === "stale" ? "warning" : "default";
 
-  return <span className={className}>{status}</span>;
+  return (
+    <Chip color={color} size="sm" variant={status === "idle" ? "secondary" : "soft"}>
+      {status}
+    </Chip>
+  );
 }
 
 interface TagListProps {
@@ -3280,15 +3382,15 @@ interface TagListProps {
  */
 function TagList({ tags, query }: TagListProps): ReactElement {
   if (tags.length === 0) {
-    return <div className="min-h-6 text-xs leading-6 text-base-content/50">No tags</div>;
+    return <div className="min-h-6 text-xs leading-6 text-foreground/50">No tags</div>;
   }
 
   return (
     <div className="flex min-h-6 flex-wrap items-center gap-1">
       {tags.map((tag) => (
-        <span className="badge badge-primary badge-outline badge-sm tag-outline" key={tag}>
+        <Chip color="accent" key={tag} size="sm" variant="soft">
           <HighlightedText text={tag} query={query} />
-        </span>
+        </Chip>
       ))}
     </div>
   );
@@ -3304,7 +3406,7 @@ interface EndpointListProps {
  */
 function EndpointList({ tunnel, query }: EndpointListProps): ReactElement {
   return (
-    <div className="rounded-lg border border-base-300 bg-base-200/40 p-3">
+    <div className="rounded-lg border border-border bg-muted/35 p-2.5">
       <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] xl:items-center">
         <EndpointNode
           icon={<Server size={15} />}
@@ -3338,12 +3440,12 @@ interface EndpointNodeProps {
  */
 function EndpointNode({ icon, label, value, query = "" }: EndpointNodeProps): ReactElement {
   return (
-    <div className="min-w-0 rounded-md border border-base-300 bg-base-100 px-3 py-2">
-      <div className="flex items-center gap-2 text-xs font-semibold text-base-content/55">
+    <div className="min-w-0 rounded-lg border border-border bg-card px-2.5 py-2">
+      <div className="flex items-center gap-2 text-xs font-semibold text-foreground/55">
         <span>{icon}</span>
         <span>{label}</span>
       </div>
-      <div className="mt-1 truncate font-mono text-xs text-base-content/90" title={value}>
+      <div className="mt-1 truncate font-mono text-xs text-foreground/90" title={value}>
         <HighlightedText text={value} query={query} />
       </div>
     </div>
@@ -3371,7 +3473,7 @@ function HighlightedText({ text, query }: HighlightedTextProps): ReactElement {
         part.isMatch ? (
           <mark
             key={`${part.text}:${index}`}
-            className="rounded bg-warning/25 px-0.5 text-base-content"
+            className="rounded bg-warning/25 px-0.5 text-foreground"
           >
             {part.text}
           </mark>
@@ -3395,11 +3497,8 @@ function RouteConnector({ horizontalAt = "xl" }: RouteConnectorProps): ReactElem
   const horizontalClassName = horizontalAt === "lg" ? "hidden lg:block" : "hidden xl:block";
 
   return (
-    <div
-      className="flex items-center justify-center text-base-content/35 xl:w-5"
-      aria-hidden="true"
-    >
-      <div className={`h-3 border-l border-base-content/20 ${verticalClassName}`} />
+    <div className="flex items-center justify-center text-foreground/35 xl:w-5" aria-hidden="true">
+      <div className={`h-3 border-l border-foreground/20 ${verticalClassName}`} />
       <ArrowRight className={horizontalClassName} size={15} />
     </div>
   );
@@ -3433,72 +3532,77 @@ function TrackedPanel({
     <section className="pointer-events-none fixed right-4 bottom-4 left-4 z-40">
       <div
         ref={panelRef}
-        className="pointer-events-auto mx-auto w-full max-w-[90rem] overflow-hidden rounded-lg border border-primary/30 bg-base-100/95 shadow-2xl backdrop-blur"
+        className="pointer-events-auto mx-auto w-full max-w-[96rem] overflow-hidden rounded-xl border border-border bg-card/95 shadow-2xl backdrop-blur"
       >
-        <button
+        <HeroButton
           type="button"
-          className="flex w-full items-center justify-between gap-3 bg-primary/5 px-4 py-3 text-left"
-          onClick={onToggleCollapsed}
+          variant="ghost"
+          fullWidth
+          className="h-auto justify-between gap-3 rounded-none bg-muted/35 px-3 py-2 text-left"
+          onPress={onToggleCollapsed}
           aria-expanded={!isCollapsed}
         >
           <span className="flex min-w-0 items-center gap-2">
-            <span className="rounded-md bg-primary/10 p-1.5 text-primary">
-              <Activity className="shrink-0" size={18} />
+            <span className="rounded-md bg-muted p-1.5 text-foreground/70">
+              <Activity className="shrink-0" size={16} />
             </span>
-            <span className="truncate text-sm font-bold sm:text-base">Tracked runtime</span>
-            <span className="badge badge-primary badge-outline badge-sm">
+            <span className="truncate text-sm font-semibold">Tracked runtime</span>
+            <Chip color="accent" size="sm" variant="soft">
               {dashboard.trackedTunnels.length}
-            </span>
+            </Chip>
           </span>
-          <span className="flex shrink-0 items-center gap-2 text-xs text-base-content/60">
+          <span className="flex shrink-0 items-center gap-2 text-xs text-foreground/60">
             {isCollapsed ? "Show" : "Hide"}
             {isCollapsed ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
           </span>
-        </button>
+        </HeroButton>
 
         {!isCollapsed ? (
-          <div className="max-h-44 overflow-auto border-t border-primary/10 bg-base-100/55">
-            <table className="table table-xs table-pin-rows">
-              <thead>
-                <tr>
-                  <th className="bg-base-200/80 text-xs text-base-content/55">ID</th>
-                  <th className="bg-base-200/80 text-xs text-base-content/55">Endpoint</th>
-                  <th className="bg-base-200/80 text-xs text-base-content/55">Status</th>
-                  <th className="bg-base-200/80"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {dashboard.trackedTunnels.map((tracked) => (
-                  <tr key={tracked.runtimeKey}>
-                    <td className="font-bold">
-                      <div>{tracked.id}</div>
-                      <div className="text-[0.65rem] font-normal text-base-content/50">
-                        {tracked.runtimeScope}
-                      </div>
-                    </td>
-                    <td className="max-w-md truncate font-mono text-xs">
-                      {tracked.local} {" -> "} {tracked.remote}
-                    </td>
-                    <td>
-                      <StatusBadge status={tracked.status.state} />
-                    </td>
-                    <td className="text-right">
-                      <button
-                        type="button"
-                        className="btn btn-outline btn-xs"
-                        onClick={() =>
-                          onStop({ id: tracked.id, runtimeScope: tracked.runtimeScope })
-                        }
-                        disabled={isBusy}
-                      >
-                        <CircleStop size={13} />
-                        Stop
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="max-h-44 overflow-auto border-t border-border bg-card">
+            <Table variant="secondary">
+              <Table.ScrollContainer>
+                <Table.Content aria-label="Tracked runtime tunnels">
+                  <Table.Header>
+                    <Table.Column isRowHeader>ID</Table.Column>
+                    <Table.Column>Endpoint</Table.Column>
+                    <Table.Column>Status</Table.Column>
+                    <Table.Column className="text-right">Actions</Table.Column>
+                  </Table.Header>
+                  <Table.Body>
+                    {dashboard.trackedTunnels.map((tracked) => (
+                      <Table.Row id={tracked.runtimeKey} key={tracked.runtimeKey}>
+                        <Table.Cell className="font-bold">
+                          <div>{tracked.id}</div>
+                          <div className="text-[0.65rem] font-normal text-foreground/50">
+                            {tracked.runtimeScope}
+                          </div>
+                        </Table.Cell>
+                        <Table.Cell className="max-w-md truncate font-mono text-xs">
+                          {tracked.local} {" -> "} {tracked.remote}
+                        </Table.Cell>
+                        <Table.Cell>
+                          <StatusBadge status={tracked.status.state} />
+                        </Table.Cell>
+                        <Table.Cell className="text-right">
+                          <HeroButton
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onPress={() =>
+                              onStop({ id: tracked.id, runtimeScope: tracked.runtimeScope })
+                            }
+                            isDisabled={isBusy}
+                          >
+                            <CircleStop size={13} />
+                            Stop
+                          </HeroButton>
+                        </Table.Cell>
+                      </Table.Row>
+                    ))}
+                  </Table.Body>
+                </Table.Content>
+              </Table.ScrollContainer>
+            </Table>
           </div>
         ) : null}
       </div>
@@ -3508,6 +3612,7 @@ function TrackedPanel({
 
 interface TunnelFormProps {
   form: TunnelFormState;
+  feedback: AppMessage | null;
   canUseLocal: boolean;
   isBusy: boolean;
   onChange: (field: keyof TunnelFormState, value: string) => void;
@@ -3516,11 +3621,31 @@ interface TunnelFormProps {
   onBrowseIdentityFile: () => void;
 }
 
+interface FormFeedbackProps {
+  feedback: AppMessage | null;
+}
+
+/**
+ * フォーム送信に紐づくフィードバックを表示する
+ */
+function FormFeedback({ feedback }: FormFeedbackProps): ReactElement | null {
+  if (feedback === null) {
+    return null;
+  }
+
+  return (
+    <div className="xl:col-span-3">
+      <AlertMessage kind={feedback.kind}>{feedback.text}</AlertMessage>
+    </div>
+  );
+}
+
 /**
  * 設定追加フォームを表示する
  */
 function TunnelForm({
   form,
+  feedback,
   canUseLocal,
   isBusy,
   onChange,
@@ -3532,62 +3657,64 @@ function TunnelForm({
 
   return (
     <form
-      className="overflow-hidden rounded-lg border border-base-300 bg-base-100 shadow-sm"
+      className="overflow-hidden rounded-xl border border-border bg-card shadow-sm"
       onSubmit={onSubmit}
     >
-      <div className="flex flex-col gap-4 border-b border-base-300 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 border-b border-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-2">
-          <CirclePlus className="text-primary" size={18} />
-          <h2 className="text-base font-bold">Add tunnel</h2>
+          <CirclePlus className="text-foreground/70" size={16} />
+          <h2 className="text-sm font-semibold">Add tunnel</h2>
         </div>
 
-        <div className="join w-full rounded-md bg-base-200/60 p-1 sm:w-72">
-          <button
+        <div className="grid w-full grid-cols-2 gap-0.5 rounded-lg border border-border bg-muted p-0.5 sm:w-72">
+          <HeroButton
             type="button"
-            className={`btn btn-sm join-item flex-1 ${
-              form.scope === "local" ? "btn-primary" : "btn-ghost"
-            }`}
-            onClick={() => onChange("scope", "local")}
-            disabled={localUnavailable}
+            variant={form.scope === "local" ? "primary" : "ghost"}
+            size="sm"
+            fullWidth
+            onPress={() => onChange("scope", "local")}
+            isDisabled={localUnavailable}
+            className="justify-center"
           >
             Local
-          </button>
-          <button
+          </HeroButton>
+          <HeroButton
             type="button"
-            className={`btn btn-sm join-item flex-1 ${
-              form.scope === "global" ? "btn-primary" : "btn-ghost"
-            }`}
-            onClick={() => onChange("scope", "global")}
+            variant={form.scope === "global" ? "primary" : "ghost"}
+            size="sm"
+            fullWidth
+            onPress={() => onChange("scope", "global")}
+            className="justify-center"
           >
             Global
-          </button>
+          </HeroButton>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-5 p-5 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 bg-muted/25 p-4 xl:grid-cols-3">
         {localUnavailable && form.scope === "local" ? (
           <div className="xl:col-span-3">
             <AlertMessage kind="warning">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <span>local 設定に追加するには Settings でワークスペースを選択してください。</span>
-                <button
+                <HeroButton
                   type="button"
-                  className="btn btn-outline btn-xs"
-                  onClick={onOpenSettings}
-                  disabled={isBusy}
+                  variant="outline"
+                  size="sm"
+                  onPress={onOpenSettings}
+                  isDisabled={isBusy}
                 >
                   <Settings2 size={13} />
                   Settings
-                </button>
+                </HeroButton>
               </div>
             </AlertMessage>
           </div>
         ) : null}
+        <FormFeedback feedback={feedback} />
         <TunnelDraftSummary form={form} />
         <section className="flex flex-col gap-3">
-          <h3 className="text-xs font-bold uppercase tracking-wide text-base-content/50">
-            Identity
-          </h3>
+          <h3 className="text-xs font-medium text-muted-foreground">Identity</h3>
           <TextField
             label="ID"
             value={form.id}
@@ -3607,10 +3734,8 @@ function TunnelForm({
           />
         </section>
 
-        <section className="flex flex-col gap-3 border-t border-base-300 pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-5">
-          <h3 className="text-xs font-bold uppercase tracking-wide text-base-content/50">
-            Routing
-          </h3>
+        <section className="flex flex-col gap-3 border-t border-border pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-4">
+          <h3 className="text-xs font-medium text-muted-foreground">Routing</h3>
           <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
             <TextField
               label="Local host"
@@ -3643,8 +3768,8 @@ function TunnelForm({
           </div>
         </section>
 
-        <section className="flex flex-col gap-3 border-t border-base-300 pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-5">
-          <h3 className="text-xs font-bold uppercase tracking-wide text-base-content/50">SSH</h3>
+        <section className="flex flex-col gap-3 border-t border-border pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-4">
+          <h3 className="text-xs font-medium text-muted-foreground">SSH</h3>
           <TextField
             label="SSH user"
             value={form.sshUser}
@@ -3672,28 +3797,31 @@ function TunnelForm({
               onChange={(value) => onChange("identityFile", value)}
               placeholder="~/.ssh/id_ed25519"
             />
-            <button
+            <HeroButton
               type="button"
-              className="btn btn-outline btn-sm mb-0"
-              onClick={onBrowseIdentityFile}
-              disabled={isBusy}
+              variant="outline"
+              size="sm"
+              className="mb-0"
+              onPress={onBrowseIdentityFile}
+              isDisabled={isBusy}
             >
               <FolderOpen size={15} />
               Browse
-            </button>
+            </HeroButton>
           </div>
         </section>
       </div>
 
-      <div className="flex justify-end border-t border-base-300 px-5 py-4">
-        <button
-          className="btn btn-primary btn-sm"
+      <div className="flex justify-end border-t border-border px-4 py-3">
+        <HeroButton
           type="submit"
-          disabled={isBusy || (localUnavailable && form.scope === "local")}
+          variant="primary"
+          size="sm"
+          isDisabled={isBusy || (localUnavailable && form.scope === "local")}
         >
           <CirclePlus size={16} />
           Add tunnel
-        </button>
+        </HeroButton>
       </div>
     </form>
   );
@@ -3708,16 +3836,16 @@ interface TunnelDraftSummaryProps {
  */
 function TunnelDraftSummary({ form }: TunnelDraftSummaryProps): ReactElement {
   return (
-    <section className="rounded-lg border border-primary/20 bg-primary/5 p-4 xl:col-span-3">
+    <section className="rounded-lg border border-border bg-card p-3 xl:col-span-3">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-bold uppercase tracking-wide text-primary">
-              Draft route
-            </span>
-            <span className="badge badge-primary badge-outline badge-sm">{form.scope}</span>
+            <span className="text-xs font-medium text-muted-foreground">Draft route</span>
+            <Chip size="sm" variant="soft">
+              {form.scope}
+            </Chip>
           </div>
-          <h3 className="mt-1 truncate text-base font-bold">
+          <h3 className="mt-1 truncate text-sm font-semibold">
             {form.id.trim() || "Untitled tunnel"}
           </h3>
         </div>
@@ -3768,12 +3896,17 @@ function TextField({
   disabled = false,
 }: TextFieldProps): ReactElement {
   return (
-    <label className="form-control w-full">
-      <div className="label py-1">
-        <span className="label-text text-xs font-semibold">{label}</span>
-      </div>
-      <input
-        className="input input-bordered input-sm w-full text-sm"
+    <HeroTextField
+      className="w-full gap-1"
+      isDisabled={disabled}
+      isRequired={required}
+      variant="secondary"
+    >
+      <HeroLabel className="text-xs font-semibold text-foreground/70">{label}</HeroLabel>
+      <HeroInput
+        className="h-9 w-full"
+        fullWidth
+        variant="secondary"
         value={value}
         onChange={(event: ChangeEvent<HTMLInputElement>) => onChange(event.target.value)}
         placeholder={placeholder}
@@ -3781,7 +3914,7 @@ function TextField({
         required={required}
         disabled={disabled}
       />
-    </label>
+    </HeroTextField>
   );
 }
 
@@ -3795,6 +3928,7 @@ interface ConfirmRemoveModalProps {
 interface EditTunnelModalProps {
   tunnel: TunnelView | null;
   form: TunnelFormState;
+  feedback: AppMessage | null;
   isBusy: boolean;
   onChange: (field: keyof TunnelFormState, value: string) => void;
   onCancel: () => void;
@@ -3808,6 +3942,7 @@ interface EditTunnelModalProps {
 function EditTunnelModal({
   tunnel,
   form,
+  feedback,
   isBusy,
   onChange,
   onCancel,
@@ -3819,138 +3954,157 @@ function EditTunnelModal({
   }
 
   return (
-    <div className="modal modal-open" role="dialog" aria-modal="true">
-      <form className="modal-box w-11/12 max-w-5xl p-0" onSubmit={onSubmit}>
-        <div className="flex flex-col gap-3 border-b border-base-300 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <Pencil className="text-primary" size={18} />
-              <h3 className="text-base font-bold">Edit tunnel</h3>
-              <span className="badge badge-primary badge-outline badge-sm">{tunnel.source}</span>
-            </div>
-            <p className="mt-1 truncate font-mono text-xs text-base-content/55">
-              {tunnel.sourcePath}
-            </p>
-          </div>
-        </div>
+    <Modal
+      isOpen
+      onOpenChange={(open) => {
+        if (!open && !isBusy) {
+          onCancel();
+        }
+      }}
+    >
+      <Modal.Backdrop variant="blur" isDismissable={!isBusy}>
+        <Modal.Container placement="center" scroll="inside" size="lg" className="px-4 py-4 sm:px-6">
+          <Modal.Dialog className="w-full max-w-5xl overflow-hidden p-0">
+            <form onSubmit={onSubmit}>
+              <div className="flex flex-col gap-3 border-b border-border px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <Pencil className="text-foreground/70" size={18} />
+                    <h3 className="text-base font-semibold">Edit tunnel</h3>
+                    <Chip color="accent" size="sm" variant="soft">
+                      {tunnel.source}
+                    </Chip>
+                  </div>
+                  <p className="mt-1 truncate font-mono text-xs text-foreground/55">
+                    {tunnel.sourcePath}
+                  </p>
+                </div>
+              </div>
 
-        <div className="grid grid-cols-1 gap-5 p-5 xl:grid-cols-3">
-          <TunnelDraftSummary form={form} />
-          <section className="flex flex-col gap-3">
-            <h4 className="text-xs font-bold uppercase tracking-wide text-base-content/50">
-              Identity
-            </h4>
-            <TextField
-              label="ID"
-              value={form.id}
-              onChange={(value) => onChange("id", value)}
-              required
-            />
-            <TextField
-              label="Description"
-              value={form.description}
-              onChange={(value) => onChange("description", value)}
-            />
-            <TextField
-              label="Tags"
-              value={form.tags}
-              onChange={(value) => onChange("tags", value)}
-              placeholder="dev,project-a"
-            />
-          </section>
+              <div className="max-h-[calc(100vh-13rem)] overflow-y-auto bg-muted/25 p-4">
+                <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+                  <FormFeedback feedback={feedback} />
+                  <TunnelDraftSummary form={form} />
+                  <section className="flex flex-col gap-3">
+                    <h4 className="text-xs font-medium text-muted-foreground">Identity</h4>
+                    <TextField
+                      label="ID"
+                      value={form.id}
+                      onChange={(value) => onChange("id", value)}
+                      required
+                    />
+                    <TextField
+                      label="Description"
+                      value={form.description}
+                      onChange={(value) => onChange("description", value)}
+                    />
+                    <TextField
+                      label="Tags"
+                      value={form.tags}
+                      onChange={(value) => onChange("tags", value)}
+                      placeholder="dev,project-a"
+                    />
+                  </section>
 
-          <section className="flex flex-col gap-3 border-t border-base-300 pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-5">
-            <h4 className="text-xs font-bold uppercase tracking-wide text-base-content/50">
-              Routing
-            </h4>
-            <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
-              <TextField
-                label="Local host"
-                value={form.localHost}
-                onChange={(value) => onChange("localHost", value)}
-                required
-              />
-              <TextField
-                label="Local port"
-                value={form.localPort}
-                onChange={(value) => onChange("localPort", value)}
-                inputMode="numeric"
-                required
-              />
-            </div>
-            <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
-              <TextField
-                label="Remote host"
-                value={form.remoteHost}
-                onChange={(value) => onChange("remoteHost", value)}
-                required
-              />
-              <TextField
-                label="Remote port"
-                value={form.remotePort}
-                onChange={(value) => onChange("remotePort", value)}
-                inputMode="numeric"
-                required
-              />
-            </div>
-          </section>
+                  <section className="flex flex-col gap-3 border-t border-border pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-4">
+                    <h4 className="text-xs font-medium text-muted-foreground">Routing</h4>
+                    <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+                      <TextField
+                        label="Local host"
+                        value={form.localHost}
+                        onChange={(value) => onChange("localHost", value)}
+                        required
+                      />
+                      <TextField
+                        label="Local port"
+                        value={form.localPort}
+                        onChange={(value) => onChange("localPort", value)}
+                        inputMode="numeric"
+                        required
+                      />
+                    </div>
+                    <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+                      <TextField
+                        label="Remote host"
+                        value={form.remoteHost}
+                        onChange={(value) => onChange("remoteHost", value)}
+                        required
+                      />
+                      <TextField
+                        label="Remote port"
+                        value={form.remotePort}
+                        onChange={(value) => onChange("remotePort", value)}
+                        inputMode="numeric"
+                        required
+                      />
+                    </div>
+                  </section>
 
-          <section className="flex flex-col gap-3 border-t border-base-300 pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-5">
-            <h4 className="text-xs font-bold uppercase tracking-wide text-base-content/50">SSH</h4>
-            <TextField
-              label="SSH user"
-              value={form.sshUser}
-              onChange={(value) => onChange("sshUser", value)}
-              required
-            />
-            <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
-              <TextField
-                label="SSH host"
-                value={form.sshHost}
-                onChange={(value) => onChange("sshHost", value)}
-                required
-              />
-              <TextField
-                label="SSH port"
-                value={form.sshPort}
-                onChange={(value) => onChange("sshPort", value)}
-                inputMode="numeric"
-              />
-            </div>
-            <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
-              <TextField
-                label="Identity file"
-                value={form.identityFile}
-                onChange={(value) => onChange("identityFile", value)}
-                placeholder="~/.ssh/id_ed25519"
-              />
-              <button
-                type="button"
-                className="btn btn-outline btn-sm mb-0"
-                onClick={onBrowseIdentityFile}
-                disabled={isBusy}
-              >
-                <FolderOpen size={15} />
-                Browse
-              </button>
-            </div>
-          </section>
-        </div>
+                  <section className="flex flex-col gap-3 border-t border-border pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-4">
+                    <h4 className="text-xs font-medium text-muted-foreground">SSH</h4>
+                    <TextField
+                      label="SSH user"
+                      value={form.sshUser}
+                      onChange={(value) => onChange("sshUser", value)}
+                      required
+                    />
+                    <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+                      <TextField
+                        label="SSH host"
+                        value={form.sshHost}
+                        onChange={(value) => onChange("sshHost", value)}
+                        required
+                      />
+                      <TextField
+                        label="SSH port"
+                        value={form.sshPort}
+                        onChange={(value) => onChange("sshPort", value)}
+                        inputMode="numeric"
+                      />
+                    </div>
+                    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
+                      <TextField
+                        label="Identity file"
+                        value={form.identityFile}
+                        onChange={(value) => onChange("identityFile", value)}
+                        placeholder="~/.ssh/id_ed25519"
+                      />
+                      <HeroButton
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="mb-0"
+                        onPress={onBrowseIdentityFile}
+                        isDisabled={isBusy}
+                      >
+                        <FolderOpen size={15} />
+                        Browse
+                      </HeroButton>
+                    </div>
+                  </section>
+                </div>
+              </div>
 
-        <div className="modal-action border-t border-base-300 px-5 py-4">
-          <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={isBusy}>
-            Cancel
-          </button>
-          <button type="submit" className="btn btn-primary" disabled={isBusy}>
-            <Pencil size={16} />
-            Save
-          </button>
-        </div>
-      </form>
-      <button className="modal-backdrop" type="button" onClick={onCancel} disabled={isBusy}>
-        close
-      </button>
-    </div>
+              <div className="flex justify-end gap-2 border-t border-border px-5 py-4">
+                <HeroButton
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onPress={onCancel}
+                  isDisabled={isBusy}
+                >
+                  Cancel
+                </HeroButton>
+                <HeroButton type="submit" variant="primary" size="sm" isDisabled={isBusy}>
+                  <Pencil size={16} />
+                  Save
+                </HeroButton>
+              </div>
+            </form>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+    </Modal>
   );
 }
 
@@ -3968,30 +4122,44 @@ function ConfirmRemoveModal({
   }
 
   return (
-    <div className="modal modal-open" role="dialog" aria-modal="true">
-      <div className="modal-box">
-        <h3 className="text-lg font-bold">Remove tunnel</h3>
-        <p className="py-4">
-          {tunnel.id} を {tunnel.source} 設定から削除します。この操作は設定ファイルを書き換えます。
-        </p>
-        <div className="modal-action">
-          <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={isBusy}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="btn btn-error"
-            onClick={() => onConfirm(tunnel)}
-            disabled={isBusy}
-          >
-            Remove
-          </button>
-        </div>
-      </div>
-      <button className="modal-backdrop" type="button" onClick={onCancel} disabled={isBusy}>
-        close
-      </button>
-    </div>
+    <Modal
+      isOpen
+      onOpenChange={(open) => {
+        if (!open && !isBusy) {
+          onCancel();
+        }
+      }}
+    >
+      <Modal.Backdrop variant="blur" isDismissable={!isBusy}>
+        <Modal.Container placement="center" size="sm">
+          <Modal.Dialog className="w-full max-w-md overflow-hidden p-0">
+            <div className="border-b border-border px-5 py-4">
+              <h3 className="text-base font-semibold">Remove tunnel</h3>
+            </div>
+            <div className="px-5 py-4">
+              <p className="text-sm leading-6 text-foreground/70">
+                {tunnel.id} を {tunnel.source}{" "}
+                設定から削除します。この操作は設定ファイルを書き換えます。
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border px-5 py-4">
+              <HeroButton type="button" slot="close" variant="ghost" size="sm" isDisabled={isBusy}>
+                Cancel
+              </HeroButton>
+              <HeroButton
+                type="button"
+                variant="danger"
+                size="sm"
+                onPress={() => onConfirm(tunnel)}
+                isDisabled={isBusy}
+              >
+                Remove
+              </HeroButton>
+            </div>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+    </Modal>
   );
 }
 
@@ -4514,22 +4682,22 @@ function waitForNextPaint(): Promise<void> {
 }
 
 /**
- * 通知種別に対応する配色クラスを取得する
+ * 通知種別を shadcn/ui 互換の状態値へ変換する
  */
-function alertToneClassName(kind: AlertMessageProps["kind"]): string {
+function alertStatus(kind: AlertMessageProps["kind"]): AlertStatus {
   if (kind === "success") {
-    return "border-[#86efac] bg-[#ecfdf3]";
+    return "success";
   }
 
   if (kind === "warning") {
-    return "border-[#f59e0b] bg-[#fff7dc]";
+    return "warning";
   }
 
   if (kind === "error") {
-    return "border-[#fca5a5] bg-[#fef2f2]";
+    return "danger";
   }
 
-  return "border-[#93c5fd] bg-[#eff6ff]";
+  return "accent";
 }
 
 /**
@@ -4538,12 +4706,12 @@ function alertToneClassName(kind: AlertMessageProps["kind"]): string {
 function alertIcon(kind: AlertMessageProps["kind"], size: number): ReactElement {
   const iconClassName =
     kind === "success"
-      ? "text-[#047857]"
+      ? "text-success"
       : kind === "warning"
-        ? "text-[#b45309]"
+        ? "text-warning"
         : kind === "error"
-          ? "text-[#b91c1c]"
-          : "text-[#1d4ed8]";
+          ? "text-danger"
+          : "text-primary";
 
   if (kind === "success") {
     return <CheckCircle2 className={iconClassName} size={size} />;

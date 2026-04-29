@@ -1366,11 +1366,46 @@ function WorkspacePill({
   onBrowseWorkspace,
   onSelectWorkspace,
 }: WorkspacePillProps): ReactElement {
+  const [isWorkspaceMenuOpen, setIsWorkspaceMenuOpen] = useState<boolean>(false);
+  const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const workspacePath = paths.workspacePath.trim();
   const hasWorkspace = workspacePath.length > 0;
   const recentWorkspaces = paths.workspaceHistory.filter(
     (historyPath) => historyPath.trim() !== "",
   );
+
+  useEffect(() => {
+    if (!isWorkspaceMenuOpen) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent): void {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+
+      if (workspaceMenuRef.current?.contains(target)) {
+        return;
+      }
+
+      setIsWorkspaceMenuOpen(false);
+    }
+
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (event.key === "Escape") {
+        setIsWorkspaceMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isWorkspaceMenuOpen]);
 
   return (
     <div
@@ -1398,22 +1433,36 @@ function WorkspacePill({
           {workspacePath || "Not selected"}
         </div>
       </div>
-      <div className="dropdown dropdown-end">
+      <div
+        ref={workspaceMenuRef}
+        className={`dropdown dropdown-end ${isWorkspaceMenuOpen ? "dropdown-open" : ""}`}
+      >
         <button
           type="button"
           className="btn btn-square btn-ghost btn-sm"
           disabled={isBusy}
+          aria-expanded={isWorkspaceMenuOpen}
+          aria-haspopup="menu"
           aria-label="ワークスペースを切り替え"
           title="Switch workspace"
+          onClick={() => setIsWorkspaceMenuOpen((current) => !current)}
         >
           <ChevronDown size={15} />
         </button>
         <ul
           tabIndex={0}
+          role="menu"
           className="menu dropdown-content z-20 mt-2 w-[min(24rem,calc(100vw-2rem))] rounded-md border border-base-300 bg-base-100 p-2 shadow-lg"
         >
           <li>
-            <button type="button" onClick={onBrowseWorkspace} disabled={isBusy}>
+            <button
+              type="button"
+              onClick={() => {
+                setIsWorkspaceMenuOpen(false);
+                onBrowseWorkspace();
+              }}
+              disabled={isBusy}
+            >
               <FolderOpen size={14} />
               Browse workspace...
             </button>
@@ -1423,7 +1472,10 @@ function WorkspacePill({
               <li key={historyPath}>
                 <button
                   type="button"
-                  onClick={() => onSelectWorkspace(historyPath)}
+                  onClick={() => {
+                    setIsWorkspaceMenuOpen(false);
+                    onSelectWorkspace(historyPath);
+                  }}
                   disabled={isBusy || historyPath === workspacePath}
                   title={historyPath}
                 >

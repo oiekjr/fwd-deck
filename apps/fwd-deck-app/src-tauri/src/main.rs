@@ -24,6 +24,7 @@ use objc2_foundation::NSData;
 use serde::{Deserialize, Serialize};
 use tauri::{
     Emitter, Manager,
+    image::Image,
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
 };
@@ -44,6 +45,8 @@ const OPEN_SETTINGS_EVENT: &str = "open-settings";
 const MAIN_WINDOW_LABEL: &str = "main";
 const APP_MENU_SETTINGS: &str = "app-settings";
 const TRAY_ID: &str = "main-tray";
+const TRAY_ICON_IDLE_BYTES: &[u8] = include_bytes!("../icons/tray-idle-template.png");
+const TRAY_ICON_ACTIVE_BYTES: &[u8] = include_bytes!("../icons/tray-active-template.png");
 const TRAY_MENU_SHOW: &str = "tray-show";
 const TRAY_MENU_HIDE: &str = "tray-hide";
 const TRAY_MENU_SETTINGS: &str = "tray-settings";
@@ -195,6 +198,13 @@ struct TrayMenuActions {
     workspace_actions: HashMap<String, TrayWorkspaceAction>,
 }
 
+/// トレイアイコンへ反映する接続状態を表現する
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayIconKind {
+    Idle,
+    Active,
+}
+
 /// トレイから実行するワークスペース操作を表現する
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TrayWorkspaceAction {
@@ -286,17 +296,16 @@ fn set_runtime_dock_icon() {}
 
 /// トレイアイコンと初期メニューを作成する
 fn initialize_tray(app: &tauri::AppHandle) -> Result<(), AppError> {
-    let (menu, actions) = build_tray_menu(app)?;
-    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
+    let (menu, actions, icon_kind) = build_tray_menu(app)?;
+    let tray_icon_image = tray_icon_image(icon_kind)?;
+    let builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
+        .icon(tray_icon_image)
+        .icon_as_template(true)
         .tooltip("fwd-deck")
         .show_menu_on_left_click(true)
         .on_menu_event(handle_tray_menu_event)
         .on_tray_icon_event(handle_tray_icon_event);
-
-    if let Some(icon) = app.default_window_icon().cloned() {
-        builder = builder.icon(icon);
-    }
 
     let tray_icon = builder.build(app)?;
     let tray_state = app.state::<TrayState>();
@@ -566,11 +575,14 @@ fn refresh_tray_menu(app: tauri::AppHandle) -> Result<(), String> {
 
 /// トレイメニューを現在の設定と状態で再構築する
 fn rebuild_tray_menu(app: &tauri::AppHandle) -> Result<(), AppError> {
-    let (menu, actions) = build_tray_menu(app)?;
+    let (menu, actions, icon_kind) = build_tray_menu(app)?;
+    let tray_icon_image = tray_icon_image(icon_kind)?;
     app.state::<TrayState>().set_actions(actions);
 
     if let Some(icon) = app.state::<TrayState>().icon() {
         icon.set_menu(Some(menu))?;
+        icon.set_icon(Some(tray_icon_image))?;
+        icon.set_icon_as_template(true)?;
     }
 
     Ok(())
@@ -579,13 +591,14 @@ fn rebuild_tray_menu(app: &tauri::AppHandle) -> Result<(), AppError> {
 /// トレイメニューと動的項目の対応表を生成する
 fn build_tray_menu(
     app: &tauri::AppHandle,
-) -> Result<(Menu<tauri::Wry>, TrayMenuActions), AppError> {
+) -> Result<(Menu<tauri::Wry>, TrayMenuActions, TrayIconKind), AppError> {
     let runtime_paths = resolve_runtime_paths(app, None)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
     let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
     let validation = validate_config(&config);
     let tunnel_items = tray_tunnel_menu_items(&config, &statuses, &validation);
     let workspace_items = tray_workspace_menu_items(&runtime_paths.preferences);
+    let icon_kind = tray_icon_kind(&statuses);
     let mut actions = TrayMenuActions::default();
 
     let menu = Menu::new(app)?;
@@ -675,7 +688,29 @@ fn build_tray_menu(
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&quit)?;
 
-    Ok((menu, actions))
+    Ok((menu, actions, icon_kind))
+}
+
+/// 接続状態からトレイアイコン種別を決定する
+fn tray_icon_kind(statuses: &[ScopedRuntimeStatus]) -> TrayIconKind {
+    if statuses
+        .iter()
+        .any(|status| status.status.process_state == ProcessState::Running)
+    {
+        TrayIconKind::Active
+    } else {
+        TrayIconKind::Idle
+    }
+}
+
+/// トレイアイコン種別に対応する画像を読み込む
+fn tray_icon_image(kind: TrayIconKind) -> Result<Image<'static>, AppError> {
+    let bytes = match kind {
+        TrayIconKind::Idle => TRAY_ICON_IDLE_BYTES,
+        TrayIconKind::Active => TRAY_ICON_ACTIVE_BYTES,
+    };
+
+    Ok(Image::from_bytes(bytes)?.to_owned())
 }
 
 /// 設定済みトンネルをトレイメニュー項目へ変換する
@@ -3605,6 +3640,22 @@ use_global = true
         assert!(!idle_item.checked);
         assert!(idle_item.enabled);
         assert_eq!(idle_item.action.operation, TrayTunnelOperation::Start);
+    }
+
+    /// トレイアイコン種別が起動中トンネルの有無に追従することを検証する
+    #[test]
+    fn tray_icon_kind_reflects_running_tunnels() {
+        let running =
+            resolved_tunnel_with_port("running-db", PathBuf::from("fwd-deck.toml"), 15432);
+        let stale = resolved_tunnel_with_port("stale-db", PathBuf::from("fwd-deck.toml"), 15433);
+        let stale_status =
+            scoped_runtime_status(&stale, RuntimeScope::Workspace, ProcessState::Stale);
+        let running_status =
+            scoped_runtime_status(&running, RuntimeScope::Workspace, ProcessState::Running);
+
+        assert_eq!(tray_icon_kind(&[]), TrayIconKind::Idle);
+        assert_eq!(tray_icon_kind(&[stale_status]), TrayIconKind::Idle);
+        assert_eq!(tray_icon_kind(&[running_status]), TrayIconKind::Active);
     }
 
     /// 設定エラー時は開始系のトレイ項目だけが無効化されることを検証する

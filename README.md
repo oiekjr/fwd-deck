@@ -32,7 +32,7 @@ brew install --cask fwd-deck-app
 ```
 
 macOSアプリは当面、個人利用向けの unsigned app として配布します。  
-Gatekeeper で止まる場合は Finder で右クリックして Open を選択するか、Homebrew の `--no-quarantine` option を付けてインストールします。  
+Gatekeeper で止まる場合は Finder で右クリックして Open を選択します。  
 
 ## Quick Example
 

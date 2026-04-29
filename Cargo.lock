@@ -1068,7 +1068,7 @@ dependencies = [
 
 [[package]]
 name = "fwd-deck-app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "fwd-deck-core",
  "objc2",
@@ -1085,7 +1085,7 @@ dependencies = [
 
 [[package]]
 name = "fwd-deck-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "clap_complete",
@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "fwd-deck-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "libc",
  "serde",

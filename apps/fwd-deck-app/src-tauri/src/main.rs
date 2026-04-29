@@ -329,7 +329,7 @@ fn set_runtime_dock_icon() {
     }
 }
 
-/// 開発実行時も Dock にアプリのアイコンを表示する
+/// Dock アイコン復元を行わずに処理を完了する
 #[cfg(not(target_os = "macos"))]
 fn set_runtime_dock_icon() {}
 
@@ -1088,8 +1088,18 @@ fn handle_quit_confirmation_event(
         } => {
             handle_close_requested(app, api, &label);
         }
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen { .. } => {
+            handle_reopen_requested(app);
+        }
         _ => {}
     }
+}
+
+/// アプリ再起動要求に応じてメインウィンドウを復帰する
+#[cfg(target_os = "macos")]
+fn handle_reopen_requested(app: &tauri::AppHandle) {
+    let _ = show_main_window(app);
 }
 
 /// アプリ終了要求に対する停止確認を開始する

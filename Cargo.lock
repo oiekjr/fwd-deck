@@ -1065,6 +1065,9 @@ name = "fwd-deck-app"
 version = "0.1.0"
 dependencies = [
  "fwd-deck-core",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "serde",
  "tauri",
  "tauri-build",

@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
+#[cfg(target_os = "macos")]
+use std::{thread, time::Duration};
 
 use fwd_deck_core::{
     ConfigEditError, ConfigLoadError, ConfigPaths, ConfigSourceKind, EffectiveConfig, ProcessState,
@@ -13,6 +15,12 @@ use fwd_deck_core::{
     default_state_file_path, load_effective_config, remove_tunnel_from_config_file,
     start_tunnels_with_progress, stop_tunnel, tag_is_valid, tunnel_statuses, validate_config,
 };
+#[cfg(target_os = "macos")]
+use objc2::MainThreadMarker;
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSApp, NSImage};
+#[cfg(target_os = "macos")]
+use objc2_foundation::NSData;
 use serde::{Deserialize, Serialize};
 use tauri::{
     Emitter, Manager,
@@ -32,15 +40,22 @@ const STATE_FILE_NAME: &str = "state.toml";
 const START_TUNNELS_PARALLELISM: usize = 4;
 const OPERATION_PROGRESS_EVENT: &str = "operation-progress";
 const TRAY_OPERATION_RESULT_EVENT: &str = "tray-operation-result";
+const OPEN_SETTINGS_EVENT: &str = "open-settings";
 const MAIN_WINDOW_LABEL: &str = "main";
+const APP_MENU_SETTINGS: &str = "app-settings";
 const TRAY_ID: &str = "main-tray";
 const TRAY_MENU_SHOW: &str = "tray-show";
 const TRAY_MENU_HIDE: &str = "tray-hide";
+const TRAY_MENU_SETTINGS: &str = "tray-settings";
+const TRAY_MENU_HIDE_DOCK_WHEN_HIDDEN: &str = "tray-hide-dock-when-hidden";
 const TRAY_MENU_REFRESH: &str = "tray-refresh";
 const TRAY_MENU_QUIT: &str = "tray-quit";
+const TRAY_MENU_CURRENT_WORKSPACE: &str = "tray-current-workspace";
+const TRAY_MENU_WORKSPACE_BROWSE: &str = "tray-workspace-browse";
 const TRAY_MENU_NO_TUNNELS: &str = "tray-no-tunnels";
 const TRAY_MENU_INVALID_CONFIG: &str = "tray-invalid-config";
 const TRAY_TUNNEL_ITEM_PREFIX: &str = "tray-tunnel-";
+const TRAY_WORKSPACE_ITEM_PREFIX: &str = "tray-workspace-";
 const TRAY_OPERATION_ID: &str = "tray";
 const QUIT_DIALOG_TITLE: &str = "fwd-deck を終了";
 const QUIT_DIALOG_STOP_LABEL: &str = "停止して終了";
@@ -56,7 +71,10 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(OperationLockState::default())
         .manage(TrayState::default())
+        .menu(build_app_menu)
+        .on_menu_event(handle_app_menu_event)
         .setup(|app| {
+            set_runtime_dock_icon();
             initialize_tray(app.handle())
                 .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
             Ok(())
@@ -87,6 +105,7 @@ struct OperationLockState(Mutex<()>);
 struct TrayState {
     icon: Mutex<Option<TrayIcon>>,
     tunnel_actions: Mutex<HashMap<String, TrayTunnelAction>>,
+    workspace_actions: Mutex<HashMap<String, TrayWorkspaceAction>>,
 }
 
 impl TrayState {
@@ -114,11 +133,30 @@ impl TrayState {
             .expect("tray action state should not be poisoned") = tunnel_actions;
     }
 
+    /// トレイメニューの動的操作を差し替える
+    fn set_actions(&self, actions: TrayMenuActions) {
+        self.set_tunnel_actions(actions.tunnel_actions);
+        *self
+            .workspace_actions
+            .lock()
+            .expect("tray workspace action state should not be poisoned") =
+            actions.workspace_actions;
+    }
+
     /// トレイメニュー ID に対応する操作を取得する
     fn tunnel_action(&self, menu_id: &str) -> Option<TrayTunnelAction> {
         self.tunnel_actions
             .lock()
             .expect("tray action state should not be poisoned")
+            .get(menu_id)
+            .cloned()
+    }
+
+    /// トレイメニュー ID に対応するワークスペース操作を取得する
+    fn workspace_action(&self, menu_id: &str) -> Option<TrayWorkspaceAction> {
+        self.workspace_actions
+            .lock()
+            .expect("tray workspace action state should not be poisoned")
             .get(menu_id)
             .cloned()
     }
@@ -149,6 +187,29 @@ struct TrayTunnelMenuItem {
     action: TrayTunnelAction,
 }
 
+/// トレイメニューの動的操作対応表を表現する
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TrayMenuActions {
+    tunnel_actions: HashMap<String, TrayTunnelAction>,
+    workspace_actions: HashMap<String, TrayWorkspaceAction>,
+}
+
+/// トレイから実行するワークスペース操作を表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrayWorkspaceAction {
+    workspace_path: PathBuf,
+}
+
+/// トレイメニューへ表示するワークスペース項目を表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrayWorkspaceMenuItem {
+    menu_id: String,
+    label: String,
+    checked: bool,
+    enabled: bool,
+    action: Option<TrayWorkspaceAction>,
+}
+
 /// トレイ操作結果をフロントエンドへ通知する
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -158,9 +219,73 @@ struct TrayOperationResultEvent {
     detail: Option<String>,
 }
 
+/// アプリ上部メニューを作成する
+fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let menu = Menu::default(app)?;
+
+    #[cfg(target_os = "macos")]
+    if let Some(app_submenu) = menu
+        .items()?
+        .first()
+        .and_then(|item| item.as_submenu().cloned())
+    {
+        let settings = MenuItem::with_id(
+            app,
+            APP_MENU_SETTINGS,
+            "Settings...",
+            true,
+            Some("CmdOrCtrl+,"),
+        )?;
+        let separator = PredefinedMenuItem::separator(app)?;
+
+        app_submenu.insert(&settings, 2)?;
+        app_submenu.insert(&separator, 3)?;
+    }
+
+    Ok(menu)
+}
+
+/// アプリ上部メニューの選択を処理する
+fn handle_app_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
+    if event.id().as_ref() != APP_MENU_SETTINGS {
+        return;
+    }
+
+    open_settings_window(app);
+}
+
+/// Settings 表示をフロントエンドへ要求する
+fn open_settings_window(app: &tauri::AppHandle) {
+    let _ = show_main_window(app);
+    let _ = app.emit(OPEN_SETTINGS_EVENT, ());
+}
+
+/// 開発実行時も Dock にアプリのアイコンを表示する
+#[cfg(target_os = "macos")]
+fn set_runtime_dock_icon() {
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return;
+    };
+
+    let icon_bytes = include_bytes!("../icons/128x128@2x.png");
+    let data =
+        unsafe { NSData::dataWithBytes_length(icon_bytes.as_ptr().cast(), icon_bytes.len()) };
+    let Some(image) = NSImage::initWithData(main_thread.alloc(), &data) else {
+        return;
+    };
+
+    unsafe {
+        NSApp(main_thread).setApplicationIconImage(Some(&image));
+    }
+}
+
+/// 開発実行時も Dock にアプリのアイコンを表示する
+#[cfg(not(target_os = "macos"))]
+fn set_runtime_dock_icon() {}
+
 /// トレイアイコンと初期メニューを作成する
 fn initialize_tray(app: &tauri::AppHandle) -> Result<(), AppError> {
-    let (menu, tunnel_actions) = build_tray_menu(app)?;
+    let (menu, actions) = build_tray_menu(app)?;
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .tooltip("fwd-deck")
@@ -174,7 +299,7 @@ fn initialize_tray(app: &tauri::AppHandle) -> Result<(), AppError> {
 
     let tray_icon = builder.build(app)?;
     let tray_state = app.state::<TrayState>();
-    tray_state.set_tunnel_actions(tunnel_actions);
+    tray_state.set_actions(actions);
     tray_state.set_icon(tray_icon);
 
     Ok(())
@@ -199,12 +324,17 @@ fn handle_tray_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent)
     match menu_id {
         TRAY_MENU_SHOW => handle_tray_result(app, show_main_window(app)),
         TRAY_MENU_HIDE => handle_tray_result(app, hide_window_to_tray(app, MAIN_WINDOW_LABEL)),
+        TRAY_MENU_SETTINGS => open_settings_window(app),
+        TRAY_MENU_HIDE_DOCK_WHEN_HIDDEN => handle_tray_dock_visibility_toggle(app),
         TRAY_MENU_REFRESH => handle_tray_result(app, rebuild_tray_menu(app)),
+        TRAY_MENU_WORKSPACE_BROWSE => handle_tray_workspace_browse(app),
         TRAY_MENU_QUIT => app.exit(0),
         _ => {
-            let action = app.state::<TrayState>().tunnel_action(menu_id);
-            if let Some(action) = action {
+            let tray_state = app.state::<TrayState>();
+            if let Some(action) = tray_state.tunnel_action(menu_id) {
                 handle_tray_tunnel_action(app, action);
+            } else if let Some(action) = tray_state.workspace_action(menu_id) {
+                handle_tray_workspace_action(app, action);
             }
         }
     }
@@ -243,6 +373,101 @@ fn run_tray_tunnel_action(
     }
 }
 
+/// トレイからのワークスペース切り替えを実行する
+fn handle_tray_workspace_action(app: &tauri::AppHandle, action: TrayWorkspaceAction) {
+    let result = switch_tray_workspace(app, action.workspace_path);
+    emit_tray_workspace_result(app, result);
+}
+
+/// トレイからワークスペース選択ダイアログを表示する
+fn handle_tray_workspace_browse(app: &tauri::AppHandle) {
+    let dialog = app.dialog().file().set_title("Select Workspace");
+    let dialog = match tray_workspace_dialog_directory(app) {
+        Ok(Some(path)) => dialog.set_directory(path),
+        Ok(None) => dialog,
+        Err(error) => {
+            emit_tray_operation_error(app, error.to_string());
+            return;
+        }
+    };
+    let app = app.clone();
+
+    dialog.pick_folder(move |workspace_path| {
+        let Some(workspace_path) = workspace_path else {
+            return;
+        };
+
+        let result = workspace_path
+            .into_path()
+            .map_err(|error| {
+                AppError::InvalidInput(format!("ワークスペースパスを解決できませんでした: {error}"))
+            })
+            .and_then(|workspace_path| switch_tray_workspace(&app, workspace_path));
+
+        emit_tray_workspace_result(&app, result);
+    });
+}
+
+/// ワークスペース切り替え結果をメニューとフロントエンドへ反映する
+fn emit_tray_workspace_result(app: &tauri::AppHandle, result: Result<PathBuf, AppError>) {
+    let _ = rebuild_tray_menu(app);
+
+    match result {
+        Ok(workspace_path) => {
+            let _ = app.emit(
+                TRAY_OPERATION_RESULT_EVENT,
+                TrayOperationResultEvent {
+                    kind: "success".to_owned(),
+                    summary: "Workspace を切り替えました".to_owned(),
+                    detail: Some(display_path(&workspace_path)),
+                },
+            );
+        }
+        Err(error) => emit_tray_operation_error(app, error.to_string()),
+    }
+}
+
+/// トレイ操作からワークスペース設定を保存する
+fn switch_tray_workspace(
+    app: &tauri::AppHandle,
+    workspace_path: PathBuf,
+) -> Result<PathBuf, AppError> {
+    let selection = workspace_selection_for_path(&workspace_path)?;
+    let runtime_paths = resolve_runtime_paths(app, Some(selection))?;
+
+    Ok(runtime_paths
+        .preferences
+        .active_workspace_path
+        .unwrap_or(workspace_path))
+}
+
+/// ワークスペース選択ダイアログの開始ディレクトリを決定する
+fn tray_workspace_dialog_directory(app: &tauri::AppHandle) -> Result<Option<PathBuf>, AppError> {
+    let app_config_dir = app_config_dir(app)?;
+    let preferences_path = preferences_path_from_app_config_dir(&app_config_dir);
+    let mut preferences = read_preferences_file(&preferences_path)?;
+
+    normalize_loaded_preferences(&mut preferences);
+
+    Ok(preferences
+        .active_workspace_path
+        .or_else(|| preferences.workspace_history.first().cloned()))
+}
+
+/// Path をワークスペース選択入力へ変換する
+fn workspace_selection_for_path(path: &Path) -> Result<WorkspaceSelection, AppError> {
+    let Some(workspace_path) = path.to_str() else {
+        return Err(AppError::InvalidInput(
+            "ワークスペースパスに非 UTF-8 文字が含まれています".to_owned(),
+        ));
+    };
+
+    Ok(WorkspaceSelection {
+        workspace_path: Some(workspace_path.to_owned()),
+        ..WorkspaceSelection::default()
+    })
+}
+
 /// トレイ操作の成功・失敗をフロントエンドへ通知する
 fn emit_tray_operation_report(app: &tauri::AppHandle, report: OperationReport) {
     if let Some(event) = tray_operation_event_from_report(report) {
@@ -265,6 +490,30 @@ fn emit_tray_operation_error(app: &tauri::AppHandle, message: String) {
             detail: None,
         },
     );
+}
+
+/// トレイから Dock 表示設定を切り替える
+fn handle_tray_dock_visibility_toggle(app: &tauri::AppHandle) {
+    match toggle_hidden_window_dock_preference(app) {
+        Ok(should_hide) => {
+            let _ = rebuild_tray_menu(app);
+            let summary = if should_hide {
+                "ウィンドウ非表示中は Dock アイコンを隠します"
+            } else {
+                "ウィンドウ非表示中も Dock アイコンを表示します"
+            };
+
+            let _ = app.emit(
+                TRAY_OPERATION_RESULT_EVENT,
+                TrayOperationResultEvent {
+                    kind: "success".to_owned(),
+                    summary: summary.to_owned(),
+                    detail: None,
+                },
+            );
+        }
+        Err(error) => emit_tray_operation_error(app, error.to_string()),
+    }
 }
 
 /// トレイ操作結果を通知イベントへ変換する
@@ -313,8 +562,8 @@ fn refresh_tray_menu(app: tauri::AppHandle) -> Result<(), String> {
 
 /// トレイメニューを現在の設定と状態で再構築する
 fn rebuild_tray_menu(app: &tauri::AppHandle) -> Result<(), AppError> {
-    let (menu, tunnel_actions) = build_tray_menu(app)?;
-    app.state::<TrayState>().set_tunnel_actions(tunnel_actions);
+    let (menu, actions) = build_tray_menu(app)?;
+    app.state::<TrayState>().set_actions(actions);
 
     if let Some(icon) = app.state::<TrayState>().icon() {
         icon.set_menu(Some(menu))?;
@@ -326,22 +575,30 @@ fn rebuild_tray_menu(app: &tauri::AppHandle) -> Result<(), AppError> {
 /// トレイメニューと動的項目の対応表を生成する
 fn build_tray_menu(
     app: &tauri::AppHandle,
-) -> Result<(Menu<tauri::Wry>, HashMap<String, TrayTunnelAction>), AppError> {
+) -> Result<(Menu<tauri::Wry>, TrayMenuActions), AppError> {
     let runtime_paths = resolve_runtime_paths(app, None)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
     let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
     let validation = validate_config(&config);
-    let items = tray_tunnel_menu_items(&config, &statuses, &validation);
-    let mut actions = HashMap::new();
+    let tunnel_items = tray_tunnel_menu_items(&config, &statuses, &validation);
+    let workspace_items = tray_workspace_menu_items(&runtime_paths.preferences);
+    let mut actions = TrayMenuActions::default();
 
     let menu = Menu::new(app)?;
-    let show = MenuItem::with_id(app, TRAY_MENU_SHOW, "Show fwd-deck", true, None::<&str>)?;
-    let hide = MenuItem::with_id(app, TRAY_MENU_HIDE, "Hide Window", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, TRAY_MENU_SHOW, "Open fwd-deck", true, None::<&str>)?;
+    let settings = MenuItem::with_id(
+        app,
+        TRAY_MENU_SETTINGS,
+        "Settings...",
+        true,
+        Some("CmdOrCtrl+,"),
+    )?;
     let refresh = MenuItem::with_id(app, TRAY_MENU_REFRESH, "Refresh Status", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, TRAY_MENU_QUIT, "Quit fwd-deck", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, TRAY_MENU_QUIT, "Quit", true, None::<&str>)?;
     let tunnels = Submenu::new(app, "Tunnels", true)?;
+    let workspaces = Submenu::new(app, "Workspaces", true)?;
 
-    if items.is_empty() {
+    if tunnel_items.is_empty() {
         let empty = MenuItem::with_id(
             app,
             TRAY_MENU_NO_TUNNELS,
@@ -351,7 +608,7 @@ fn build_tray_menu(
         )?;
         tunnels.append(&empty)?;
     } else {
-        for item in items {
+        for item in tunnel_items {
             let menu_item = CheckMenuItem::with_id(
                 app,
                 item.menu_id.clone(),
@@ -360,7 +617,7 @@ fn build_tray_menu(
                 item.checked,
                 None::<&str>,
             )?;
-            actions.insert(item.menu_id, item.action);
+            actions.tunnel_actions.insert(item.menu_id, item.action);
             tunnels.append(&menu_item)?;
         }
     }
@@ -377,11 +634,40 @@ fn build_tray_menu(
         tunnels.append(&invalid)?;
     }
 
-    menu.append(&show)?;
-    menu.append(&hide)?;
-    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    for item in workspace_items {
+        let menu_item = CheckMenuItem::with_id(
+            app,
+            item.menu_id.clone(),
+            item.label,
+            item.enabled,
+            item.checked,
+            None::<&str>,
+        )?;
+
+        if let Some(action) = item.action {
+            actions.workspace_actions.insert(item.menu_id, action);
+        }
+
+        workspaces.append(&menu_item)?;
+    }
+
+    let browse_workspace = MenuItem::with_id(
+        app,
+        TRAY_MENU_WORKSPACE_BROWSE,
+        "Browse Workspace...",
+        true,
+        None::<&str>,
+    )?;
+    workspaces.append(&PredefinedMenuItem::separator(app)?)?;
+    workspaces.append(&browse_workspace)?;
+
     menu.append(&tunnels)?;
     menu.append(&refresh)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&workspaces)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&settings)?;
+    menu.append(&show)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&quit)?;
 
@@ -414,6 +700,48 @@ fn tray_tunnel_menu_items(
         .collect::<Vec<_>>();
 
     items.sort_by(|left, right| left.label.cmp(&right.label));
+    items
+}
+
+/// 保存済みワークスペースをトレイメニュー項目へ変換する
+fn tray_workspace_menu_items(preferences: &AppPreferences) -> Vec<TrayWorkspaceMenuItem> {
+    let mut items = Vec::new();
+
+    items.push(match &preferences.active_workspace_path {
+        Some(workspace_path) => TrayWorkspaceMenuItem {
+            menu_id: TRAY_MENU_CURRENT_WORKSPACE.to_owned(),
+            label: format!("Current workspace: {}", display_path(workspace_path)),
+            checked: true,
+            enabled: false,
+            action: None,
+        },
+        None => TrayWorkspaceMenuItem {
+            menu_id: TRAY_MENU_CURRENT_WORKSPACE.to_owned(),
+            label: "No workspace selected".to_owned(),
+            checked: false,
+            enabled: false,
+            action: None,
+        },
+    });
+
+    let mut index = 0;
+    for workspace_path in &preferences.workspace_history {
+        if preferences.active_workspace_path.as_ref() == Some(workspace_path) {
+            continue;
+        }
+
+        items.push(TrayWorkspaceMenuItem {
+            menu_id: format!("{TRAY_WORKSPACE_ITEM_PREFIX}{index}"),
+            label: display_path(workspace_path),
+            checked: false,
+            enabled: true,
+            action: Some(TrayWorkspaceAction {
+                workspace_path: workspace_path.clone(),
+            }),
+        });
+        index += 1;
+    }
+
     items
 }
 
@@ -509,10 +837,64 @@ fn apply_hidden_window_dock_visibility(app: &tauri::AppHandle) -> Result<(), App
     )
 }
 
+/// 非表示中の Dock 表示設定を保存して現在状態へ反映する
+fn toggle_hidden_window_dock_preference(app: &tauri::AppHandle) -> Result<bool, AppError> {
+    let app_config_dir = app_config_dir(app)?;
+    let preferences_path = preferences_path_from_app_config_dir(&app_config_dir);
+    let mut preferences = read_preferences_file(&preferences_path)?;
+
+    normalize_loaded_preferences(&mut preferences);
+    preferences.hide_dock_icon_when_window_hidden = !preferences.hide_dock_icon_when_window_hidden;
+
+    let runtime_paths = runtime_paths_from_preferences(&app_config_dir, preferences)?;
+    write_preferences_file(&preferences_path, &runtime_paths.preferences)?;
+    apply_window_state_dock_visibility(
+        app,
+        runtime_paths.preferences.hide_dock_icon_when_window_hidden,
+    )?;
+
+    Ok(runtime_paths.preferences.hide_dock_icon_when_window_hidden)
+}
+
+/// 現在のウィンドウ表示状態に応じて Dock 表示設定を反映する
+fn apply_window_state_dock_visibility(
+    app: &tauri::AppHandle,
+    hide_when_window_hidden: bool,
+) -> Result<(), AppError> {
+    let is_window_visible = app
+        .get_webview_window(MAIN_WINDOW_LABEL)
+        .map(|window| window.is_visible())
+        .transpose()?
+        .unwrap_or(false);
+
+    set_dock_visibility(app, is_window_visible || !hide_when_window_hidden)
+}
+
 /// Dock 表示状態を切り替える
 #[cfg(target_os = "macos")]
 fn set_dock_visibility(app: &tauri::AppHandle, visible: bool) -> Result<(), AppError> {
     app.set_dock_visibility(visible)?;
+    if visible {
+        restore_runtime_dock_icon(app)?;
+    }
+
+    Ok(())
+}
+
+/// Dock 再表示後に実行時アイコンを復元する
+#[cfg(target_os = "macos")]
+fn restore_runtime_dock_icon(app: &tauri::AppHandle) -> Result<(), AppError> {
+    app.run_on_main_thread(set_runtime_dock_icon)?;
+
+    // Dock の再表示は macOS 側で非同期に完了するため、完了後にもアイコンを再適用する
+    let app = app.clone();
+    let _ = thread::Builder::new()
+        .name("dock-icon-restore".to_owned())
+        .spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let _ = app.run_on_main_thread(set_runtime_dock_icon);
+        });
+
     Ok(())
 }
 
@@ -2841,6 +3223,32 @@ use_global = true
         assert!(!tray_item_by_id(&items, "idle-db").enabled);
     }
 
+    /// トレイのワークスペース項目が現在値と履歴を分けて表現することを検証する
+    #[test]
+    fn tray_workspace_menu_items_reflect_current_and_history() {
+        let active = PathBuf::from("/tmp/fwd-deck-active");
+        let recent = PathBuf::from("/tmp/fwd-deck-recent");
+        let preferences = AppPreferences {
+            active_workspace_path: Some(active.clone()),
+            workspace_history: vec![active.clone(), recent.clone()],
+            ..AppPreferences::default()
+        };
+
+        let items = tray_workspace_menu_items(&preferences);
+
+        let current = &items[0];
+        assert_eq!(current.menu_id, TRAY_MENU_CURRENT_WORKSPACE);
+        assert!(current.label.contains(&display_path(&active)));
+        assert!(current.checked);
+        assert!(!current.enabled);
+        assert!(current.action.is_none());
+
+        let recent_item = workspace_item_by_path(&items, &recent);
+        assert_eq!(recent_item.label, display_path(&recent));
+        assert!(!recent_item.checked);
+        assert!(recent_item.enabled);
+    }
+
     /// 終了時対象収集が global state の起動中トンネルを含めることを検証する
     #[test]
     fn collect_visible_quit_targets_includes_running_global_state() {
@@ -3189,6 +3597,22 @@ use_global = true
             .iter()
             .find(|item| item.action.id == id)
             .expect("tray item should exist")
+    }
+
+    /// テスト用のワークスペース項目を path で取得する
+    fn workspace_item_by_path<'a>(
+        items: &'a [TrayWorkspaceMenuItem],
+        path: &Path,
+    ) -> &'a TrayWorkspaceMenuItem {
+        items
+            .iter()
+            .find(|item| {
+                item.action
+                    .as_ref()
+                    .map(|action| action.workspace_path.as_path() == path)
+                    .unwrap_or(false)
+            })
+            .expect("workspace item should exist")
     }
 
     /// テスト用の resolved tunnel を生成する

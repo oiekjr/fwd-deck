@@ -297,6 +297,7 @@ const autoRefreshIntervalMilliseconds = 2_000;
 const operationToastDismissMilliseconds = 4_000;
 const operationProgressEventName = "operation-progress";
 const trayOperationResultEventName = "tray-operation-result";
+const openSettingsEventName = "open-settings";
 const missingTauriRuntimeMessage =
   "Tauri 実行環境が見つかりません。アプリの操作確認は npm run tauri dev またはビルド済みアプリから実行してください";
 
@@ -490,6 +491,33 @@ function App(): ReactElement {
       unlisten?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntimeAvailable()) {
+      return;
+    }
+
+    let isDisposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void listen<void>(openSettingsEventName, () => {
+      setSettingsDraft((current) => current ?? paths);
+    })
+      .then((nextUnlisten) => {
+        if (isDisposed) {
+          nextUnlisten();
+          return;
+        }
+
+        unlisten = nextUnlisten;
+      })
+      .catch(() => {});
+
+    return () => {
+      isDisposed = true;
+      unlisten?.();
+    };
+  }, [paths]);
 
   /**
    * 現在のパス設定に基づいてダッシュボードを再取得する
@@ -815,6 +843,82 @@ function App(): ReactElement {
   }
 
   /**
+   * トレイメニューへ現在の設定状態を反映する
+   */
+  async function refreshTrayMenuFromUi(): Promise<void> {
+    try {
+      await invokeCommand<void>("refresh_tray_menu", {});
+    } catch (error) {
+      showOperationToast({ kind: "error", summary: stringifyError(error) });
+    }
+  }
+
+  /**
+   * ツールバーから変更したパス設定を即時保存する
+   */
+  async function applyToolbarPathSelection(
+    nextPaths: WorkspaceSelection,
+    successSummary: string,
+  ): Promise<void> {
+    const applied = await refreshDashboard(nextPaths);
+    if (!applied) {
+      return;
+    }
+
+    setSettingsDraft((current) => (current === null ? current : { ...current, ...nextPaths }));
+    await refreshTrayMenuFromUi();
+    showOperationToast({ kind: "success", summary: successSummary });
+  }
+
+  /**
+   * 履歴から選択したワークスペースを即時適用する
+   */
+  async function switchWorkspaceFromToolbar(workspacePath: string): Promise<void> {
+    const nextWorkspacePath = workspacePath.trim();
+    if (nextWorkspacePath.length === 0 || nextWorkspacePath === paths.workspacePath.trim()) {
+      return;
+    }
+
+    await applyToolbarPathSelection(
+      { ...paths, workspacePath: nextWorkspacePath },
+      "Workspace を切り替えました",
+    );
+  }
+
+  /**
+   * フォルダ選択ダイアログからワークスペースを即時適用する
+   */
+  async function browseWorkspaceFromToolbar(): Promise<void> {
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected !== "string") {
+        return;
+      }
+
+      await applyToolbarPathSelection(
+        { ...paths, workspacePath: selected },
+        "Workspace を切り替えました",
+      );
+    } catch (error) {
+      showOperationToast({ kind: "error", summary: stringifyError(error) });
+    }
+  }
+
+  /**
+   * Dock アイコン非表示設定を即時保存する
+   */
+  async function toggleDockIconPreference(shouldHide: boolean): Promise<void> {
+    if (shouldHide === paths.hideDockIconWhenWindowHidden) {
+      return;
+    }
+
+    await applyToolbarPathSelection(
+      { ...paths, hideDockIconWhenWindowHidden: shouldHide },
+      "Dock 表示設定を保存しました",
+    );
+  }
+
+  /**
    * 設定モーダルを現在の適用済み設定で開く
    */
   function openSettings(): void {
@@ -916,11 +1020,7 @@ function App(): ReactElement {
 
     const applied = await refreshDashboard(settingsDraft);
     if (applied) {
-      try {
-        await invokeCommand<void>("refresh_tray_menu", {});
-      } catch (error) {
-        showOperationToast({ kind: "error", summary: stringifyError(error) });
-      }
+      await refreshTrayMenuFromUi();
 
       closeSettings();
     }
@@ -997,6 +1097,9 @@ function App(): ReactElement {
           isBusy={isBusy}
           onViewChange={setActiveView}
           onOpenSettings={openSettings}
+          onBrowseWorkspace={() => void browseWorkspaceFromToolbar()}
+          onSelectWorkspace={(workspacePath) => void switchWorkspaceFromToolbar(workspacePath)}
+          onToggleDockIcon={(shouldHide) => void toggleDockIconPreference(shouldHide)}
           onRefresh={() => void refreshDashboard()}
         />
 
@@ -1082,6 +1185,9 @@ interface AppHeaderProps {
   isBusy: boolean;
   onViewChange: (view: AppView) => void;
   onOpenSettings: () => void;
+  onBrowseWorkspace: () => void;
+  onSelectWorkspace: (workspacePath: string) => void;
+  onToggleDockIcon: (shouldHide: boolean) => void;
   onRefresh: () => void;
 }
 
@@ -1095,6 +1201,9 @@ function AppHeader({
   isBusy,
   onViewChange,
   onOpenSettings,
+  onBrowseWorkspace,
+  onSelectWorkspace,
+  onToggleDockIcon,
   onRefresh,
 }: AppHeaderProps): ReactElement {
   return (
@@ -1112,7 +1221,13 @@ function AppHeader({
                 SSH tunnel operations for local development
               </p>
             </div>
-            <WorkspacePill paths={paths} isBusy={isBusy} onOpenSettings={onOpenSettings} />
+            <WorkspacePill
+              paths={paths}
+              isBusy={isBusy}
+              onOpenSettings={onOpenSettings}
+              onBrowseWorkspace={onBrowseWorkspace}
+              onSelectWorkspace={onSelectWorkspace}
+            />
           </div>
         </div>
         <div className="flex flex-col gap-3 xl:items-end">
@@ -1148,6 +1263,16 @@ function AppHeader({
               Settings
             </button>
           </div>
+          <label className="flex w-full items-center justify-between gap-3 rounded-md border border-base-300 bg-base-200/50 px-3 py-2 xl:w-auto xl:min-w-72">
+            <span className="text-sm font-semibold">Hide Dock icon</span>
+            <input
+              type="checkbox"
+              className="toggle toggle-primary toggle-sm"
+              checked={paths.hideDockIconWhenWindowHidden}
+              onChange={(event) => onToggleDockIcon(event.target.checked)}
+              disabled={isBusy}
+            />
+          </label>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-[repeat(3,minmax(6.5rem,1fr))_auto] xl:w-auto">
             <StatusMetric label="Configured" value={stats.configured} icon={<Gauge size={17} />} />
             <StatusMetric
@@ -1181,18 +1306,29 @@ interface WorkspacePillProps {
   paths: WorkspaceSelection;
   isBusy: boolean;
   onOpenSettings: () => void;
+  onBrowseWorkspace: () => void;
+  onSelectWorkspace: (workspacePath: string) => void;
 }
 
 /**
  * 現在の作業対象ワークスペースをヘッダー内へ表示する
  */
-function WorkspacePill({ paths, isBusy, onOpenSettings }: WorkspacePillProps): ReactElement {
+function WorkspacePill({
+  paths,
+  isBusy,
+  onOpenSettings,
+  onBrowseWorkspace,
+  onSelectWorkspace,
+}: WorkspacePillProps): ReactElement {
   const workspacePath = paths.workspacePath.trim();
   const hasWorkspace = workspacePath.length > 0;
+  const recentWorkspaces = paths.workspaceHistory.filter(
+    (historyPath) => historyPath.trim() !== "",
+  );
 
   return (
     <div
-      className={`grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md border px-3 py-2 lg:w-[28rem] ${
+      className={`grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-2 rounded-md border px-3 py-2 lg:w-[30rem] ${
         hasWorkspace ? "border-base-300 bg-base-200/50" : "border-warning/40 bg-warning/10"
       }`}
     >
@@ -1215,6 +1351,46 @@ function WorkspacePill({ paths, isBusy, onOpenSettings }: WorkspacePillProps): R
         >
           {workspacePath || "Not selected"}
         </div>
+      </div>
+      <div className="dropdown dropdown-end">
+        <button
+          type="button"
+          className="btn btn-square btn-ghost btn-sm"
+          disabled={isBusy}
+          aria-label="ワークスペースを切り替え"
+          title="Switch workspace"
+        >
+          <ChevronDown size={15} />
+        </button>
+        <ul
+          tabIndex={0}
+          className="menu dropdown-content z-20 mt-2 w-[min(24rem,calc(100vw-2rem))] rounded-md border border-base-300 bg-base-100 p-2 shadow-lg"
+        >
+          <li>
+            <button type="button" onClick={onBrowseWorkspace} disabled={isBusy}>
+              <FolderOpen size={14} />
+              Browse workspace...
+            </button>
+          </li>
+          {recentWorkspaces.length > 0 ? (
+            recentWorkspaces.map((historyPath) => (
+              <li key={historyPath}>
+                <button
+                  type="button"
+                  onClick={() => onSelectWorkspace(historyPath)}
+                  disabled={isBusy || historyPath === workspacePath}
+                  title={historyPath}
+                >
+                  <span className="truncate font-mono text-xs">{historyPath}</span>
+                </button>
+              </li>
+            ))
+          ) : (
+            <li className="menu-disabled">
+              <span>No recent workspaces</span>
+            </li>
+          )}
+        </ul>
       </div>
       <IconButton
         label="ワークスペース設定"

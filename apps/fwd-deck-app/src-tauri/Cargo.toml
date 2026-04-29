@@ -10,6 +10,9 @@ tauri-build.workspace = true
 
 [dependencies]
 fwd-deck-core = { path = "../../../crates/fwd-deck-core" }
+objc2.workspace = true
+objc2-app-kit = { workspace = true, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { workspace = true, features = ["std", "NSData"] }
 serde.workspace = true
 tauri = { workspace = true, features = ["tray-icon"] }
 tauri-plugin-dialog.workspace = true

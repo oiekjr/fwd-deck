@@ -63,7 +63,8 @@ type AppCommand =
   | "stop_tunnels"
   | "add_tunnel_entry"
   | "remove_tunnel_entry"
-  | "remove_workspace_history_entry";
+  | "remove_workspace_history_entry"
+  | "refresh_tray_menu";
 
 interface WorkspaceSelection {
   workspacePath: string;
@@ -73,12 +74,14 @@ interface WorkspaceSelection {
   useGlobal: boolean;
   globalStatePath: string;
   workspaceStatePath: string;
+  hideDockIconWhenWindowHidden: boolean;
 }
 
 interface WorkspaceSelectionInput {
   workspacePath: string;
   globalConfigPath: string;
   useGlobal: boolean;
+  hideDockIconWhenWindowHidden: boolean;
 }
 
 interface OperationTarget {
@@ -222,6 +225,12 @@ interface OperationProgressEventPayload {
   totalCount: number;
 }
 
+interface TrayOperationResultPayload {
+  kind: AppMessageKind;
+  summary: string;
+  detail: string | null;
+}
+
 interface RefreshDashboardOptions {
   silent?: boolean;
   persistPaths?: boolean;
@@ -258,6 +267,7 @@ const initialPaths: WorkspaceSelection = {
   useGlobal: true,
   globalStatePath: "",
   workspaceStatePath: "",
+  hideDockIconWhenWindowHidden: false,
 };
 
 const initialForm: TunnelFormState = {
@@ -286,6 +296,7 @@ const searchDebounceMilliseconds = 200;
 const autoRefreshIntervalMilliseconds = 2_000;
 const operationToastDismissMilliseconds = 4_000;
 const operationProgressEventName = "operation-progress";
+const trayOperationResultEventName = "tray-operation-result";
 const missingTauriRuntimeMessage =
   "Tauri 実行環境が見つかりません。アプリの操作確認は npm run tauri dev またはビルド済みアプリから実行してください";
 
@@ -350,6 +361,22 @@ function App(): ReactElement {
     () => hasActiveTunnelFilters(filters) || queryInput.trim().length > 0,
     [filters, queryInput],
   );
+
+  /**
+   * 操作結果トーストを表示する
+   */
+  const showOperationToast = useCallback((message: OperationToastInput): void => {
+    operationToastIdRef.current += 1;
+    setMessage(null);
+    setOperationToast({ ...message, id: operationToastIdRef.current });
+  }, []);
+
+  /**
+   * 表示中の操作結果トーストを閉じる
+   */
+  const dismissOperationToast = useCallback((): void => {
+    setOperationToast(null);
+  }, []);
 
   const captureResultScrollPosition = useCallback((): void => {
     resultScrollSnapshotRef.current = createViewportScrollSnapshot();
@@ -513,6 +540,44 @@ function App(): ReactElement {
   );
 
   useEffect(() => {
+    if (!isTauriRuntimeAvailable()) {
+      return;
+    }
+
+    let isDisposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void listen<TrayOperationResultPayload>(trayOperationResultEventName, (event) => {
+      const payload = event.payload;
+
+      void refreshDashboard(paths, { persistPaths: false, silent: true });
+      showOperationToast({
+        kind: payload.kind,
+        summary: payload.summary,
+        detail: payload.detail ?? undefined,
+      });
+
+      if (payload.kind === "error") {
+        setActiveView("dashboard");
+      }
+    })
+      .then((nextUnlisten) => {
+        if (isDisposed) {
+          nextUnlisten();
+          return;
+        }
+
+        unlisten = nextUnlisten;
+      })
+      .catch(() => {});
+
+    return () => {
+      isDisposed = true;
+      unlisten?.();
+    };
+  }, [paths, refreshDashboard, showOperationToast]);
+
+  useEffect(() => {
     async function loadInitialDashboard(): Promise<void> {
       setIsBusy(true);
 
@@ -569,22 +634,6 @@ function App(): ReactElement {
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
   }, [hasCompletedInitialLoad, paths, refreshDashboard]);
-
-  /**
-   * 操作結果トーストを表示する
-   */
-  function showOperationToast(message: OperationToastInput): void {
-    operationToastIdRef.current += 1;
-    setMessage(null);
-    setOperationToast({ ...message, id: operationToastIdRef.current });
-  }
-
-  /**
-   * 表示中の操作結果トーストを閉じる
-   */
-  function dismissOperationToast(): void {
-    setOperationToast(null);
-  }
 
   /**
    * 指定 ID のトンネルを開始する
@@ -867,6 +916,12 @@ function App(): ReactElement {
 
     const applied = await refreshDashboard(settingsDraft);
     if (applied) {
+      try {
+        await invokeCommand<void>("refresh_tray_menu", {});
+      } catch (error) {
+        showOperationToast({ kind: "error", summary: stringifyError(error) });
+      }
+
       closeSettings();
     }
   }
@@ -1678,6 +1733,24 @@ function PathPanel({
               className="toggle toggle-primary toggle-sm"
               checked={paths.useGlobal}
               onChange={(event) => onChange("useGlobal", event.target.checked)}
+            />
+          </label>
+        </div>
+      </section>
+
+      <section className="flex flex-col gap-3 rounded-lg border border-base-300 bg-base-200/30 p-4 lg:col-span-2">
+        <div className="flex items-center gap-2">
+          <Settings2 className="text-primary" size={17} />
+          <h3 className="text-sm font-bold">Application</h3>
+        </div>
+        <div className="rounded-md border border-base-300 bg-base-100 px-3 py-2">
+          <label className="flex cursor-pointer items-center justify-between gap-3">
+            <span className="text-sm font-semibold">Hide Dock icon while window is hidden</span>
+            <input
+              type="checkbox"
+              className="toggle toggle-primary toggle-sm"
+              checked={paths.hideDockIconWhenWindowHidden}
+              onChange={(event) => onChange("hideDockIconWhenWindowHidden", event.target.checked)}
             />
           </label>
         </div>
@@ -3669,6 +3742,7 @@ function normalizeWorkspaceSelection(paths: WorkspaceSelection): WorkspaceSelect
     workspacePath: paths.workspacePath.trim(),
     globalConfigPath: paths.globalConfigPath.trim(),
     useGlobal: paths.useGlobal,
+    hideDockIconWhenWindowHidden: paths.hideDockIconWhenWindowHidden,
   };
 }
 

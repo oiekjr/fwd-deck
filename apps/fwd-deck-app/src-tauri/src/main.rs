@@ -22,13 +22,14 @@ use objc2_app_kit::{NSApp, NSImage};
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSData, NSProcessInfo, NSString};
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
+use tauri::menu::AboutMetadata;
 use tauri::{
     Emitter, Manager,
+    image::Image,
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
 };
-#[cfg(target_os = "macos")]
-use tauri::{image::Image, menu::AboutMetadata};
 use tauri_plugin_dialog::{
     DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
 };

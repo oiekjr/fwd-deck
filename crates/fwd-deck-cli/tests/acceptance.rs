@@ -186,6 +186,62 @@ fn start_fails_when_id_and_tag_are_combined() {
     output.assert_stderr_contains("Cannot combine tunnel IDs with --tag.");
 }
 
+/// --help が日本語の概要、主要コマンド、代表例を表示することを検証する
+#[test]
+fn help_displays_japanese_overview_commands_and_examples() {
+    let workspace = TestWorkspace::new();
+
+    let output = workspace.run(["--help"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("設定ファイルに定義したポートフォワーディングを操作する");
+    output.assert_stdout_contains("設定済みトンネルを一覧表示する");
+    output.assert_stdout_contains("設定ファイルを検証する");
+    output.assert_stdout_contains("fwd-deck start dev-db --dry-run");
+}
+
+/// start --help が対話選択、排他制約、dry-run の説明を表示することを検証する
+#[test]
+fn start_help_displays_selection_constraints_and_dry_run_note() {
+    let workspace = TestWorkspace::new();
+
+    let output = workspace.run(["start", "--help"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("ID を省略すると対話選択を表示します。");
+    output.assert_stdout_contains("--all、ID、--tag は同時に指定できません。");
+    output.assert_stdout_contains("--dry-run は SSH を起動せず、状態ファイルも更新しません。");
+}
+
+/// list --help が tag、query、wide の説明を表示することを検証する
+#[test]
+fn list_help_displays_filter_and_wide_notes() {
+    let workspace = TestWorkspace::new();
+
+    let output = workspace.run(["list", "--help"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("--tag は複数指定でき");
+    output.assert_stdout_contains("--query は ID と description");
+    output.assert_stdout_contains("--wide は REMOTE の host 部分を省略せずに表示します。");
+}
+
+/// config add --help が scope 省略時の対話選択を表示することを検証する
+#[test]
+fn config_add_help_displays_scope_selection_note() {
+    let workspace = TestWorkspace::new();
+
+    let output = workspace.run(["config", "add", "--help"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains(
+        "--scope を省略すると、編集する local または global 設定を対話選択します。",
+    );
+    output.assert_stdout_contains(
+        "local は ./fwd-deck.toml、global は ~/.config/fwd-deck/config.toml",
+    );
+}
+
 struct TestWorkspace {
     temp_dir: TempDir,
     config_path: PathBuf,

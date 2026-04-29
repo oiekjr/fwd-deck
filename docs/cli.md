@@ -1,6 +1,21 @@
 # CLI Reference
 
 `fwd-deck` の CLIコマンド、代表的な呼び出し、主要オプションの意味をまとめます。  
+CLIヘルプにも同じ代表例と重要な制約を表示します。  
+
+## Common Options
+
+```sh
+fwd-deck --config ./my-fwd-deck.toml list
+fwd-deck --global-config ~/.config/fwd-deck/work.toml list
+fwd-deck --no-global list
+fwd-deck --state /tmp/fwd-deck-state.toml status
+```
+
+`--config` は local設定ファイルのパスを指定します。  
+`--global-config` は global設定ファイルのパスを指定します。  
+`--no-global` は global設定ファイルを読み込まない場合に使います。  
+`--state` は起動中トンネルのPIDなどを保存する実行状態ファイルのパスを指定します。  
 
 ## List And Search
 
@@ -9,6 +24,7 @@ fwd-deck list
 fwd-deck list --wide
 fwd-deck list --query db
 fwd-deck list --tag dev
+fwd-deck list --tag dev --tag project-a
 fwd-deck list --tag dev --query db
 ```
 
@@ -39,7 +55,8 @@ fwd-deck start dev-db --dry-run
 `start` は ID を指定しない場合に対話選択を表示します。  
 `start --all` は設定済みのすべてのトンネルを開始します。  
 `start --tag` は、指定したタグをすべて持つトンネルだけを開始します。  
-`start --dry-run` は、実際の起動や状態ファイル更新を行わずに実行予定だけを表示します。  
+`--all`、ID、`--tag` は同時に指定できません。  
+`start --dry-run` は、SSH を起動せず、状態ファイルも更新せずに実行予定だけを表示します。  
 
 local endpoint が使用中の場合、取得できる範囲でそのポートを使っている LISTENプロセスも表示します。  
 
@@ -54,7 +71,7 @@ fwd-deck watch dev-db --interval-seconds 5
 ```
 
 `status` は状態ファイル上で追跡しているトンネルの状態を表示します。  
-`recover` は stale になっているトンネルを現在の設定に基づいて再起動します。  
+`recover` は、ID を省略した場合に状態ファイルで stale と判定された追跡中トンネルを現在の設定に基づいて再起動します。  
 `watch` は追跡中のトンネルを監視し、stale になった場合に自動で再起動します。  
 
 ## Stop Tunnels
@@ -68,6 +85,7 @@ fwd-deck stop dev-db --dry-run
 
 `stop` は ID を指定しない場合に対話選択を表示します。  
 `stop --all` は追跡中のすべてのトンネルを停止します。  
+`--all` と ID は同時に指定できません。  
 `stop --dry-run` は、実際の停止や状態ファイル更新を行わずに実行予定だけを表示します。  
 
 ## Edit Configuration
@@ -82,6 +100,8 @@ fwd-deck config remove --scope global
 ```
 
 `config add` と `config remove` は、グローバル設定またはローカル設定を対話形式で編集します。  
+`--scope` を省略すると、編集する local または global 設定を対話選択します。  
+`--scope local` は `./fwd-deck.toml`、`--scope global` は `~/.config/fwd-deck/config.toml` を対象にします。  
 `config add` は対象ファイルが存在しない場合に新規作成します。  
 既存の有効設定と重複する `id` と `local_port` は入力時に拒否します。  
 
@@ -93,6 +113,7 @@ fwd-deck config remove --scope global
 fwd-deck completion zsh
 ```
 
+対応シェルは `bash`, `elvish`, `fish`, `powershell`, `zsh` です。  
 zsh で補完を有効にする場合は、生成した補完スクリプトを `fpath` 配下へ配置します。  
 
 ```sh

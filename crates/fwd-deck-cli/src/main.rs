@@ -38,20 +38,131 @@ const STATUS_REMOTE_MIN_WIDTH: usize = 32;
 const STATUS_PID_MIN_WIDTH: usize = 8;
 const STATUS_STATE_MIN_WIDTH: usize = 10;
 const TRUNCATION_MARKER: &str = "...";
+const CLI_AFTER_HELP: &str = "\
+例:
+  fwd-deck validate
+  fwd-deck list --tag dev
+  fwd-deck start dev-db --dry-run
+  fwd-deck status
+
+設定:
+  既定では ./fwd-deck.toml と ~/.config/fwd-deck/config.toml を読み込みます。
+  起動中トンネルの状態は ~/.local/state/fwd-deck/state.toml に保存します。";
+const LIST_AFTER_HELP: &str = "\
+例:
+  fwd-deck list
+  fwd-deck list --wide
+  fwd-deck list --tag dev --tag project-a
+  fwd-deck list --query db
+
+補足:
+  --tag は複数指定でき、指定したタグをすべて持つトンネルだけを表示します。
+  --query は ID と description を大文字小文字を区別せずに検索します。
+  --wide は REMOTE の host 部分を省略せずに表示します。";
+const SHOW_AFTER_HELP: &str = "\
+例:
+  fwd-deck show dev-db
+
+補足:
+  統合後の設定、接続先、有効なタイムアウト、読み込み元の設定ファイルを表示します。";
+const START_AFTER_HELP: &str = "\
+例:
+  fwd-deck start
+  fwd-deck start dev-db
+  fwd-deck start --all
+  fwd-deck start --tag dev --tag project-a
+  fwd-deck start dev-db --dry-run
+
+補足:
+  ID を省略すると対話選択を表示します。
+  --all、ID、--tag は同時に指定できません。
+  --dry-run は SSH を起動せず、状態ファイルも更新しません。";
+const RECOVER_AFTER_HELP: &str = "\
+例:
+  fwd-deck recover
+  fwd-deck recover dev-db
+
+補足:
+  ID を省略すると、状態ファイルで stale と判定された追跡中トンネルを再起動します。";
+const WATCH_AFTER_HELP: &str = "\
+例:
+  fwd-deck watch
+  fwd-deck watch dev-db --interval-seconds 5
+
+補足:
+  状態ファイル上の追跡中トンネルを監視し、stale になった場合に現在の設定で再起動します。";
+const STATUS_AFTER_HELP: &str = "\
+例:
+  fwd-deck status
+
+補足:
+  状態ファイルに記録された PID を使い、追跡中トンネルが実行中か stale かを表示します。";
+const STOP_AFTER_HELP: &str = "\
+例:
+  fwd-deck stop
+  fwd-deck stop dev-db
+  fwd-deck stop --all
+  fwd-deck stop dev-db --dry-run
+
+補足:
+  ID を省略すると対話選択を表示します。
+  --all と ID は同時に指定できません。
+  --dry-run はプロセスを停止せず、状態ファイルも更新しません。";
+const CONFIG_AFTER_HELP: &str = "\
+例:
+  fwd-deck config add
+  fwd-deck config remove --scope local
+
+補足:
+  --scope を省略すると、編集する local または global 設定を対話選択します。";
+const CONFIG_ADD_AFTER_HELP: &str = "\
+例:
+  fwd-deck config add
+  fwd-deck config add --scope local
+  fwd-deck config add --scope global
+
+補足:
+  --scope を省略すると、編集する local または global 設定を対話選択します。
+  local は ./fwd-deck.toml、global は ~/.config/fwd-deck/config.toml を対象にします。";
+const CONFIG_REMOVE_AFTER_HELP: &str = "\
+例:
+  fwd-deck config remove
+  fwd-deck config remove --scope local
+  fwd-deck config remove --scope global
+
+補足:
+  --scope を省略すると、編集する local または global 設定を対話選択します。
+  選択した設定ファイルに定義されているトンネルだけを削除対象にします。";
+const COMPLETION_AFTER_HELP: &str = "\
+例:
+  fwd-deck completion zsh
+  fwd-deck completion zsh > ~/.zfunc/_fwd-deck
+
+補足:
+  対応シェルは bash、elvish、fish、powershell、zsh です。
+  zsh では出力先を fpath に追加し、compinit を有効にします。";
+const VALIDATE_AFTER_HELP: &str = "\
+例:
+  fwd-deck validate
+  fwd-deck --config ./my-fwd-deck.toml validate
+
+補足:
+  読み込んだ local と global の設定を統合し、エラーと warning を表示します。";
 
 /// fwd-deck の CLI 引数を表現する
 #[derive(Debug, Parser)]
 #[command(
     name = "fwd-deck",
     version,
-    about = "Operate port forwarding entries defined in configuration files"
+    about = "設定ファイルに定義したポートフォワーディングを操作する",
+    after_help = CLI_AFTER_HELP
 )]
 struct Cli {
     #[arg(
         long,
         global = true,
         value_name = "PATH",
-        help = "Read local configuration from PATH"
+        help = "local設定ファイルを PATH から読み込む"
     )]
     config: Option<PathBuf>,
 
@@ -59,18 +170,18 @@ struct Cli {
         long,
         global = true,
         value_name = "PATH",
-        help = "Read global configuration from PATH"
+        help = "global設定ファイルを PATH から読み込む"
     )]
     global_config: Option<PathBuf>,
 
-    #[arg(long, global = true, help = "Do not read the global configuration")]
+    #[arg(long, global = true, help = "global設定ファイルを読み込まない")]
     no_global: bool,
 
     #[arg(
         long,
         global = true,
         value_name = "PATH",
-        help = "Read and write runtime state from PATH"
+        help = "実行状態ファイルを PATH から読み書きする"
     )]
     state: Option<PathBuf>,
 
@@ -81,88 +192,95 @@ struct Cli {
 /// fwd-deck が提供するサブコマンドを表現する
 #[derive(Debug, Clone, Subcommand)]
 enum Command {
-    #[command(about = "List configured tunnels")]
+    #[command(about = "設定済みトンネルを一覧表示する", after_help = LIST_AFTER_HELP)]
     List {
-        #[arg(long = "tag", value_name = "TAG", help = "Filter tunnels by tag")]
+        #[arg(long = "tag", value_name = "TAG", help = "指定タグで絞り込む")]
         tags: Vec<String>,
         #[arg(
             long,
             value_name = "TEXT",
-            help = "Filter tunnels by id or description"
+            help = "ID または description の部分一致で絞り込む"
         )]
         query: Option<String>,
-        #[arg(long, help = "Show full remote hosts without truncation")]
+        #[arg(long, help = "REMOTE の host 部分を省略せずに表示する")]
         wide: bool,
     },
-    #[command(about = "Show configured tunnel details")]
+    #[command(about = "設定済みトンネルの詳細を表示する", after_help = SHOW_AFTER_HELP)]
     Show {
-        #[arg(value_name = "ID", help = "Tunnel ID to show")]
+        #[arg(value_name = "ID", help = "詳細を表示するトンネルID")]
         id: String,
     },
-    #[command(about = "Start configured tunnels")]
+    #[command(about = "設定済みトンネルを起動する", after_help = START_AFTER_HELP)]
     Start {
-        #[arg(value_name = "ID", help = "Tunnel IDs to start")]
+        #[arg(value_name = "ID", help = "起動するトンネルID")]
         ids: Vec<String>,
-        #[arg(long = "tag", value_name = "TAG", help = "Start tunnels matching tag")]
+        #[arg(
+            long = "tag",
+            value_name = "TAG",
+            help = "指定タグに一致するトンネルを起動する"
+        )]
         tags: Vec<String>,
-        #[arg(long, help = "Start all configured tunnels")]
+        #[arg(long, help = "設定済みの全トンネルを起動する")]
         all: bool,
-        #[arg(long, help = "Preview start actions without starting ssh")]
+        #[arg(long, help = "SSH を起動せずに実行予定だけを表示する")]
         dry_run: bool,
     },
-    #[command(about = "Recover stale tracked tunnels")]
+    #[command(about = "stale な追跡中トンネルを再起動する", after_help = RECOVER_AFTER_HELP)]
     Recover {
-        #[arg(value_name = "ID", help = "Tunnel IDs to recover")]
+        #[arg(value_name = "ID", help = "再起動するトンネルID")]
         ids: Vec<String>,
     },
-    #[command(about = "Watch tracked tunnels and recover stale tunnels")]
+    #[command(about = "追跡中トンネルを監視して stale 時に再起動する", after_help = WATCH_AFTER_HELP)]
     Watch {
-        #[arg(value_name = "ID", help = "Tunnel IDs to watch")]
+        #[arg(value_name = "ID", help = "監視するトンネルID")]
         ids: Vec<String>,
         #[arg(
             long,
             default_value_t = DEFAULT_WATCH_INTERVAL_SECONDS,
             value_parser = clap::value_parser!(u64).range(1..),
-            help = "Watch interval in seconds"
+            help = "監視間隔を秒単位で指定する"
         )]
         interval_seconds: u64,
     },
-    #[command(about = "Show tracked tunnel status")]
+    #[command(about = "追跡中トンネルの状態を表示する", after_help = STATUS_AFTER_HELP)]
     Status,
-    #[command(about = "Stop tracked tunnels")]
+    #[command(about = "追跡中トンネルを停止する", after_help = STOP_AFTER_HELP)]
     Stop {
-        #[arg(value_name = "ID", help = "Tunnel IDs to stop")]
+        #[arg(value_name = "ID", help = "停止するトンネルID")]
         ids: Vec<String>,
-        #[arg(long, help = "Stop all tracked tunnels")]
+        #[arg(long, help = "追跡中の全トンネルを停止する")]
         all: bool,
-        #[arg(long, help = "Preview stop actions without stopping processes")]
+        #[arg(long, help = "プロセスを停止せずに実行予定だけを表示する")]
         dry_run: bool,
     },
-    #[command(about = "Edit configuration files")]
+    #[command(about = "設定ファイルを対話形式で編集する", after_help = CONFIG_AFTER_HELP)]
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    #[command(about = "Generate shell completion script")]
+    #[command(about = "シェル補完スクリプトを生成する", after_help = COMPLETION_AFTER_HELP)]
     Completion {
-        #[arg(value_enum, help = "Shell to generate completions for")]
+        #[arg(value_enum, help = "補完スクリプトを生成するシェル")]
         shell: Shell,
     },
-    #[command(about = "Validate configuration files")]
+    #[command(about = "設定ファイルを検証する", after_help = VALIDATE_AFTER_HELP)]
     Validate,
 }
 
 /// 設定編集サブコマンドを表現する
 #[derive(Debug, Clone, Subcommand)]
 enum ConfigCommand {
-    #[command(about = "Add a tunnel to a configuration file")]
+    #[command(about = "設定ファイルへトンネルを追加する", after_help = CONFIG_ADD_AFTER_HELP)]
     Add {
-        #[arg(long, value_enum, help = "Configuration scope to edit")]
+        #[arg(long, value_enum, help = "編集する設定スコープ")]
         scope: Option<ConfigScopeArg>,
     },
-    #[command(about = "Remove a tunnel from a configuration file")]
+    #[command(
+        about = "設定ファイルからトンネルを削除する",
+        after_help = CONFIG_REMOVE_AFTER_HELP
+    )]
     Remove {
-        #[arg(long, value_enum, help = "Configuration scope to edit")]
+        #[arg(long, value_enum, help = "編集する設定スコープ")]
         scope: Option<ConfigScopeArg>,
     },
 }

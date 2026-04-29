@@ -24,10 +24,11 @@ use objc2_foundation::{NSData, NSProcessInfo, NSString};
 use serde::{Deserialize, Serialize};
 use tauri::{
     Emitter, Manager,
-    image::Image,
-    menu::{AboutMetadata, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
 };
+#[cfg(target_os = "macos")]
+use tauri::{image::Image, menu::AboutMetadata};
 use tauri_plugin_dialog::{
     DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
 };
@@ -273,6 +274,7 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 }
 
 /// About パネルへ表示するアプリ情報を生成する
+#[cfg(target_os = "macos")]
 fn app_about_metadata(app: &tauri::AppHandle) -> tauri::Result<AboutMetadata<'static>> {
     let package_info = app.package_info();
     let config = app.config();

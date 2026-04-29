@@ -17,7 +17,7 @@ env:
 
 jobs:
   release:
-    name: Publish unsigned release and Homebrew tap
+    name: Publish unsigned binaries and Homebrew tap
     runs-on: macos-15
     timeout-minutes: 90
 
@@ -69,7 +69,9 @@ jobs:
 
           echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "asset_name=fwd-deck-app_${version}_universal.dmg" >> "$GITHUB_OUTPUT"
+          echo "app_asset_name=fwd-deck-app_${version}_universal.dmg" >> "$GITHUB_OUTPUT"
+          echo "cli_aarch64_asset_name=fwd-deck_${version}_aarch64-apple-darwin.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "cli_x86_64_asset_name=fwd-deck_${version}_x86_64-apple-darwin.tar.gz" >> "$GITHUB_OUTPUT"
 
       - name: Create release
         env:
@@ -98,6 +100,14 @@ jobs:
             exit 1
           fi
 
+      - name: Build CLI release binaries
+        run: |
+          set -euo pipefail
+
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --locked --release -p fwd-deck-cli --bin fwd-deck --target "$target"
+          done
+
       - name: Build unsigned DMG
         working-directory: apps/fwd-deck-app
         env:
@@ -107,7 +117,9 @@ jobs:
       - name: Collect release assets
         id: assets
         env:
-          ASSET_NAME: ${{ steps.release.outputs.asset_name }}
+          APP_ASSET_NAME: ${{ steps.release.outputs.app_asset_name }}
+          CLI_AARCH64_ASSET_NAME: ${{ steps.release.outputs.cli_aarch64_asset_name }}
+          CLI_X86_64_ASSET_NAME: ${{ steps.release.outputs.cli_x86_64_asset_name }}
         run: |
           set -euo pipefail
 
@@ -136,38 +148,62 @@ jobs:
             exit 1
           fi
 
-          asset_path="$RUNNER_TEMP/$ASSET_NAME"
-          checksum_path="$asset_path.sha256"
-          cp "$dmg_path" "$asset_path"
-          shasum -a 256 "$asset_path" | awk '{ print $1 }' > "$checksum_path"
+          app_asset_path="$RUNNER_TEMP/$APP_ASSET_NAME"
+          app_checksum_path="$app_asset_path.sha256"
+          cp "$dmg_path" "$app_asset_path"
+          shasum -a 256 "$app_asset_path" | awk '{ print $1 }' > "$app_checksum_path"
 
-          echo "asset_path=$asset_path" >> "$GITHUB_OUTPUT"
-          echo "checksum_path=$checksum_path" >> "$GITHUB_OUTPUT"
-          echo "dmg_sha256=$(cat "$checksum_path")" >> "$GITHUB_OUTPUT"
+          package_cli_asset() {
+            target="$1"
+            asset_name="$2"
+            output_prefix="$3"
+            binary_path="$GITHUB_WORKSPACE/target/$target/release/fwd-deck"
+            staging_dir="$(mktemp -d "$RUNNER_TEMP/fwd-deck-$target.XXXXXX")"
+            asset_path="$RUNNER_TEMP/$asset_name"
+            checksum_path="$asset_path.sha256"
+
+            if [ ! -x "$binary_path" ]; then
+              echo "CLI binary was not found or is not executable: $binary_path" >&2
+              exit 1
+            fi
+
+            cp "$binary_path" "$staging_dir/fwd-deck"
+            tar -czf "$asset_path" -C "$staging_dir" fwd-deck
+            shasum -a 256 "$asset_path" | awk '{ print $1 }' > "$checksum_path"
+
+            echo "${output_prefix}_asset_path=$asset_path" >> "$GITHUB_OUTPUT"
+            echo "${output_prefix}_checksum_path=$checksum_path" >> "$GITHUB_OUTPUT"
+            echo "${output_prefix}_sha256=$(cat "$checksum_path")" >> "$GITHUB_OUTPUT"
+          }
+
+          package_cli_asset "aarch64-apple-darwin" "$CLI_AARCH64_ASSET_NAME" "cli_aarch64"
+          package_cli_asset "x86_64-apple-darwin" "$CLI_X86_64_ASSET_NAME" "cli_x86_64"
+
+          echo "app_asset_path=$app_asset_path" >> "$GITHUB_OUTPUT"
+          echo "app_checksum_path=$app_checksum_path" >> "$GITHUB_OUTPUT"
+          echo "dmg_sha256=$(cat "$app_checksum_path")" >> "$GITHUB_OUTPUT"
           echo "app_bundle_name=$(basename "$app_path")" >> "$GITHUB_OUTPUT"
-
-      - name: Compute source archive checksum
-        id: source
-        env:
-          TAG_NAME: ${{ steps.release.outputs.tag_name }}
-        run: |
-          set -euo pipefail
-
-          source_url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG_NAME}.tar.gz"
-          source_archive="$RUNNER_TEMP/fwd-deck-${TAG_NAME}.tar.gz"
-          curl -fsSL "$source_url" -o "$source_archive"
-          echo "source_sha256=$(shasum -a 256 "$source_archive" | awk '{ print $1 }')" >> "$GITHUB_OUTPUT"
 
       - name: Upload release assets
         env:
-          ASSET_PATH: ${{ steps.assets.outputs.asset_path }}
-          CHECKSUM_PATH: ${{ steps.assets.outputs.checksum_path }}
+          APP_ASSET_PATH: ${{ steps.assets.outputs.app_asset_path }}
+          APP_CHECKSUM_PATH: ${{ steps.assets.outputs.app_checksum_path }}
+          CLI_AARCH64_ASSET_PATH: ${{ steps.assets.outputs.cli_aarch64_asset_path }}
+          CLI_AARCH64_CHECKSUM_PATH: ${{ steps.assets.outputs.cli_aarch64_checksum_path }}
+          CLI_X86_64_ASSET_PATH: ${{ steps.assets.outputs.cli_x86_64_asset_path }}
+          CLI_X86_64_CHECKSUM_PATH: ${{ steps.assets.outputs.cli_x86_64_checksum_path }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ steps.release.outputs.tag_name }}
         run: |
           set -euo pipefail
 
-          gh release upload "$TAG_NAME" "$ASSET_PATH" "$CHECKSUM_PATH"
+          gh release upload "$TAG_NAME" \
+            "$APP_ASSET_PATH" \
+            "$APP_CHECKSUM_PATH" \
+            "$CLI_AARCH64_ASSET_PATH" \
+            "$CLI_AARCH64_CHECKSUM_PATH" \
+            "$CLI_X86_64_ASSET_PATH" \
+            "$CLI_X86_64_CHECKSUM_PATH"
 
       - name: Checkout Homebrew tap
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -180,8 +216,9 @@ jobs:
         working-directory: homebrew-tap
         env:
           APP_BUNDLE_NAME: ${{ steps.assets.outputs.app_bundle_name }}
+          CLI_AARCH64_SHA256: ${{ steps.assets.outputs.cli_aarch64_sha256 }}
+          CLI_X86_64_SHA256: ${{ steps.assets.outputs.cli_x86_64_sha256 }}
           DMG_SHA256: ${{ steps.assets.outputs.dmg_sha256 }}
-          SOURCE_SHA256: ${{ steps.source.outputs.source_sha256 }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
@@ -193,14 +230,22 @@ jobs:
             desc "Manage SSH local port forwarding profiles"
             homepage "https://github.com/oiekjr/fwd-deck"
             version "$VERSION"
-            url "https://github.com/oiekjr/fwd-deck/archive/refs/tags/v#{version}.tar.gz"
-            sha256 "$SOURCE_SHA256"
             license "MIT"
 
-            depends_on "rust" => :build
+            on_macos do
+              on_arm do
+                url "https://github.com/oiekjr/fwd-deck/releases/download/v#{version}/fwd-deck_#{version}_aarch64-apple-darwin.tar.gz"
+                sha256 "$CLI_AARCH64_SHA256"
+              end
+
+              on_intel do
+                url "https://github.com/oiekjr/fwd-deck/releases/download/v#{version}/fwd-deck_#{version}_x86_64-apple-darwin.tar.gz"
+                sha256 "$CLI_X86_64_SHA256"
+              end
+            end
 
             def install
-              system "cargo", "install", "--locked", "--path", "crates/fwd-deck-cli", "--root", prefix
+              bin.install "fwd-deck"
             end
 
             test do

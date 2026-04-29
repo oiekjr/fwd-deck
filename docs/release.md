@@ -10,7 +10,7 @@
 ### Prepare Public Repository
 
 Homebrew tap から通常の `brew install` で配布するため、本体リポジトリ `oiekjr/fwd-deck` は public にします。  
-release workflow は GitHub tag archive の SHA256 を算出し、formula と cask は GitHub Releases の asset を参照します。  
+release workflow は GitHub Releases に CLI tarball と DMG を添付し、formula と cask はそれらの asset を参照します。  
 本体リポジトリが private のままだと、これらの URL が Homebrew から取得できません。  
 
 public 化前に、少なくとも次を確認します。  
@@ -153,6 +153,19 @@ brew install fwd-deck
 brew install --cask fwd-deck-app
 ```
 
+CLI formula は macOS用の binary install です。  
+Apple Silicon用と Intel Mac用の2種類の tarball を GitHub Releases に添付し、formula は実行環境に合う asset を取得します。  
+利用者の環境では Rust toolchain を使った source build を行いません。  
+
+CLI release asset の命名規則は次のとおりです。  
+
+```text
+fwd-deck_<version>_aarch64-apple-darwin.tar.gz
+fwd-deck_<version>_x86_64-apple-darwin.tar.gz
+```
+
+各 tarball には、実行ファイル `fwd-deck` を repo root相当の位置に1つだけ含めます。  
+
 ## macOS App Signing
 
 macOSアプリは当面、個人利用向けの unsigned app として配布します。  
@@ -176,14 +189,18 @@ git push origin v0.1.0
 tag push後、release workflow は次を実行します。  
 
 1. GitHub Release を作成する
-2. unsigned universal macOS DMG を build する
-3. DMG と SHA256ファイルを Release asset として添付する
-4. GitHub tag archive の SHA256 を算出する
-5. `oiekjr/homebrew-tap` の formula と cask を更新して push する
+2. `aarch64-apple-darwin` と `x86_64-apple-darwin` の CLI binary を build する
+3. unsigned universal macOS DMG を build する
+4. CLI tarball、DMG、各SHA256ファイルを Release asset として添付する
+5. CLI tarball と DMG の SHA256 を使って `oiekjr/homebrew-tap` の formula と cask を更新する
+6. `oiekjr/homebrew-tap` へ更新 commit を push する
 
 Release asset は上書きしません。  
 同じ tag に同名 asset が存在する場合、workflow は失敗します。  
 公開済み version を差し替えるのではなく、新しい version を作成してください。  
+
+既存の tag に後から CLI tarball を追加する運用は行いません。  
+binary install型の formula への切り替えは、次の新しい release tag から反映します。  
 
 ## Verification
 
@@ -191,7 +208,7 @@ tap更新後に、ローカル環境で Homebrew の検証を行います。
 
 ```sh
 brew audit --formula oiekjr/tap/fwd-deck
-brew install --build-from-source oiekjr/tap/fwd-deck
+brew install oiekjr/tap/fwd-deck
 brew test oiekjr/tap/fwd-deck
 brew audit --cask oiekjr/tap/fwd-deck-app
 brew install --cask oiekjr/tap/fwd-deck-app

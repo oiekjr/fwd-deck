@@ -1,135 +1,62 @@
 @import "tailwindcss";
-@import "daisyui/daisyui.css";
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-surface: var(--card);
+  --color-surface-secondary: var(--secondary);
+  --color-surface-tertiary: var(--muted);
+  --color-overlay: var(--popover);
+  --color-separator: var(--border);
+  --color-default: var(--secondary);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--destructive);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
 
 :root {
-  background: #eef2f7;
   color-scheme: light;
-  --color-base-100: #ffffff;
-  --color-base-200: #f6f8fb;
-  --color-base-300: #d9e0ea;
-  --color-base-content: #17202a;
-  --color-primary: #0f766e;
-  --color-primary-content: #ffffff;
-  --color-neutral: #1f2937;
-  --color-neutral-content: #f8fafc;
-  --color-success: #16a34a;
-  --color-success-content: #ffffff;
-  --color-warning: #d97706;
-  --color-warning-content: #1f1605;
-  --color-error: #dc2626;
-  --color-error-content: #ffffff;
-  font-family:
-    Inter,
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif;
-}
-
-html {
-  background: #eef2f7;
-}
-
-body {
-  min-width: 320px;
-  min-height: 100vh;
-  margin: 0;
-  color: var(--color-base-content);
-}
-
-button,
-input {
-  letter-spacing: 0;
-}
-
-#root {
-  min-height: 100vh;
-}
-
-.app-shell {
-  background:
-    linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(237, 242, 248, 0.96) 44%), #eef2f7;
-}
-
-.tag-outline {
-  border-color: transparent;
-  background-image: none;
-  box-shadow: inset 0 0 0 1.5px currentColor;
-}
-
-.tag-outline.btn {
-  --btn-border: transparent;
-  --btn-shadow: "";
-  --btn-noise: none;
-  --btn-color: var(--color-base-content);
-}
-
-.tag-outline.btn:is(:hover, :focus-visible, :active) {
-  --btn-bg: var(--color-primary);
-  --btn-fg: var(--color-primary-content);
-  --btn-border: var(--color-primary);
-  --btn-color: var(--color-primary);
-  box-shadow: none;
-}
-
-.tag-outline.badge {
-  --badge-bg: transparent;
-}
-
-.segmented-control .btn-outline:is(:hover, :focus-visible, :active) {
-  --btn-bg: color-mix(in oklab, var(--color-base-content) 8%, var(--color-base-100));
-  --btn-border: var(--color-base-content);
-  --btn-fg: var(--color-base-content);
-  --btn-noise: none;
-  --btn-shadow: "";
-}
-
-.segmented-control .join-item[aria-pressed="true"] {
-  z-index: 1;
-}
-
-.segmented-control .join-item:is(:hover, :focus-visible, :active) {
-  z-index: 2;
-}
-
-.tunnel-card {
-  border-left-width: 4px;
-}
-
-.tunnel-card-selected {
-  background: color-mix(in oklab, var(--color-primary) 8%, var(--color-base-100));
-}
-
-.tunnel-card-running {
-  border-left-color: #16a34a;
-}
-
-.tunnel-card-stale {
-  border-left-color: #d97706;
-}
-
-.tunnel-card-idle {
-  border-left-color: #94a3b8;
-}
-
-.tunnel-card:is(:hover, :focus-within) {
-  box-shadow:
-    0 14px 34px rgba(15, 23, 42, 0.08),
-    0 2px 8px rgba(15, 23, 42, 0.06);
-}
-
-.tunnel-slim-table tbody tr:is(:hover, :focus-within) {
-  background: color-mix(in oklab, var(--color-base-content) 5%, var(--color-base-100));
-}
-
-.tunnel-slim-row-selected {
-  background: color-mix(in oklab, var(--color-primary) 8%, var(--color-base-100));
-}
-
-.status-badge-stale {
-  border-color: color-mix(in oklab, var(--color-warning) 48%, var(--color-base-100));
-  background: color-mix(in oklab, var(--color-warning) 18%, var(--color-base-100));
-  color: #7c2d12;
+  --radius: 0.375rem;
+  --background: oklch(0.972 0.003 247.8);
+  --foreground: oklch(0.18 0.01 252.8);
+  --card: oklch(0.995 0.001 247.8);
+  --card-foreground: var(--foreground);
+  --popover: oklch(1 0 0);
+  --popover-foreground: var(--foreground);
+  --primary: oklch(0.53 0.18 254.6);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.938 0.004 255.1);
+  --secondary-foreground: oklch(0.23 0.01 252.8);
+  --muted: oklch(0.938 0.004 255.1);
+  --muted-foreground: oklch(0.46 0.012 252.2);
+  --accent: oklch(0.932 0.006 255.1);
+  --accent-foreground: oklch(0.23 0.01 252.8);
+  --destructive: oklch(0.577 0.245 27.3);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(0.86 0.006 255.5);
+  --input: oklch(0.83 0.006 255.5);
+  --ring: oklch(0.53 0.18 254.6);
+  --success: oklch(0.64 0.18 148.5);
+  --warning: oklch(0.7 0.17 70.6);
 }

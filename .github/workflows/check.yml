@@ -27,6 +27,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
       - name: Setup mise
         uses: jdx/mise-action@v3
         with:
@@ -36,6 +50,10 @@ jobs:
 
       - name: Install Rust components
         run: rustup component add rustfmt clippy
+
+      - name: Install frontend dependencies
+        working-directory: apps/fwd-deck-app
+        run: npm ci
 
       - name: Cache Cargo
         uses: actions/cache@v4

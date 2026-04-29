@@ -12,9 +12,9 @@ use fwd_deck_core::{
     ResolvedTimeoutConfig, ResolvedTunnelConfig, StartedTunnel, StoppedTunnel, TimeoutConfig,
     TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport,
     add_tunnel_to_config_file, default_global_config_path, default_local_config_path,
-    default_state_file_path, load_effective_config, remove_tunnel_from_config_file,
-    start_tunnels_with_progress, stop_tunnel, tag_is_valid, tunnel_statuses,
-    update_tunnel_in_config_file, validate_config,
+    default_state_file_path, format_path_for_display, load_effective_config,
+    remove_tunnel_from_config_file, start_tunnels_with_progress, stop_tunnel, tag_is_valid,
+    tunnel_statuses, update_tunnel_in_config_file, validate_config,
 };
 #[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
@@ -470,7 +470,7 @@ fn emit_tray_workspace_result(app: &tauri::AppHandle, result: Result<PathBuf, Ap
                 TrayOperationResultEvent {
                     kind: "success".to_owned(),
                     summary: "Workspace を切り替えました".to_owned(),
-                    detail: Some(display_path(&workspace_path)),
+                    detail: Some(format_path_for_display(&workspace_path)),
                 },
             );
         }
@@ -790,7 +790,10 @@ fn tray_workspace_menu_items(preferences: &AppPreferences) -> Vec<TrayWorkspaceM
     items.push(match &preferences.active_workspace_path {
         Some(workspace_path) => TrayWorkspaceMenuItem {
             menu_id: TRAY_MENU_CURRENT_WORKSPACE.to_owned(),
-            label: format!("Current workspace: {}", display_path(workspace_path)),
+            label: format!(
+                "Current workspace: {}",
+                format_path_for_display(workspace_path)
+            ),
             checked: true,
             enabled: false,
             action: None,
@@ -812,7 +815,7 @@ fn tray_workspace_menu_items(preferences: &AppPreferences) -> Vec<TrayWorkspaceM
 
         items.push(TrayWorkspaceMenuItem {
             menu_id: format!("{TRAY_WORKSPACE_ITEM_PREFIX}{index}"),
-            label: display_path(workspace_path),
+            label: format_path_for_display(workspace_path),
             checked: false,
             enabled: true,
             action: Some(TrayWorkspaceAction {
@@ -1746,29 +1749,47 @@ enum AppError {
     MissingStatePath,
     #[error("local 設定を操作するにはワークスペースを選択してください")]
     MissingWorkspace,
-    #[error("ワークスペースディレクトリが存在しません: {path}")]
+    #[error(
+        "ワークスペースディレクトリが存在しません: {}",
+        format_path_for_display(.path)
+    )]
     WorkspaceNotFound { path: PathBuf },
-    #[error("アプリ設定を読み込めませんでした: {path}: {source}")]
+    #[error(
+        "アプリ設定を読み込めませんでした: {}: {source}",
+        format_path_for_display(.path)
+    )]
     PreferencesRead {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("アプリ設定を解析できませんでした: {path}: {source}")]
+    #[error(
+        "アプリ設定を解析できませんでした: {}: {source}",
+        format_path_for_display(.path)
+    )]
     PreferencesParse {
         path: PathBuf,
         source: toml::de::Error,
     },
-    #[error("アプリ設定をシリアライズできませんでした: {path}: {source}")]
+    #[error(
+        "アプリ設定をシリアライズできませんでした: {}: {source}",
+        format_path_for_display(.path)
+    )]
     PreferencesSerialize {
         path: PathBuf,
         source: toml::ser::Error,
     },
-    #[error("アプリ設定ディレクトリを作成できませんでした: {path}: {source}")]
+    #[error(
+        "アプリ設定ディレクトリを作成できませんでした: {}: {source}",
+        format_path_for_display(.path)
+    )]
     PreferencesCreateDir {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("アプリ設定を書き込めませんでした: {path}: {source}")]
+    #[error(
+        "アプリ設定を書き込めませんでした: {}: {source}",
+        format_path_for_display(.path)
+    )]
     PreferencesWrite {
         path: PathBuf,
         source: std::io::Error,
@@ -2815,7 +2836,7 @@ fn validate_new_tunnel(config: &EffectiveConfig, tunnel: &TunnelConfig) -> Resul
         return Err(AppError::InvalidInput(format!(
             "同じ ID のトンネルが既に存在します: {} ({})",
             existing.tunnel.id,
-            display_path(&existing.source.path)
+            format_path_for_display(&existing.source.path)
         )));
     }
 
@@ -2862,7 +2883,7 @@ fn validate_updated_tunnel(
         return Err(AppError::InvalidInput(format!(
             "同じ ID のトンネルが既に存在します: {} ({})",
             existing.tunnel.id,
-            display_path(&existing.source.path)
+            format_path_for_display(&existing.source.path)
         )));
     }
 

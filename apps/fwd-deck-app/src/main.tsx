@@ -378,6 +378,7 @@ function App(): ReactElement {
   const [queryInput, setQueryInput] = useState<string>(initialFilters.query);
   const [activeView, setActiveView] = useState<AppView>("dashboard");
   const [tunnelDisplayMode, setTunnelDisplayMode] = useState<TunnelDisplayMode>("slim");
+  const [homePath, setHomePath] = useState<string | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<WorkspaceSelection | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<TunnelView | null>(null);
@@ -405,8 +406,8 @@ function App(): ReactElement {
     [dashboard],
   );
   const filteredTunnels = useMemo<TunnelView[]>(
-    () => filterTunnels(dashboard?.tunnels ?? [], filters),
-    [dashboard, filters],
+    () => filterTunnels(dashboard?.tunnels ?? [], filters, homePath),
+    [dashboard, filters, homePath],
   );
   const filteredTunnelIds = useMemo<string[]>(
     () => filteredTunnels.map((tunnel) => tunnel.id),
@@ -471,6 +472,26 @@ function App(): ReactElement {
 
     restoreViewportScroll(snapshot);
   });
+
+  useEffect(() => {
+    if (!isTauriRuntimeAvailable()) {
+      return;
+    }
+
+    let isDisposed = false;
+
+    void homeDir()
+      .then((path) => {
+        if (!isDisposed) {
+          setHomePath(path);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isDisposed = true;
+    };
+  }, []);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -1296,6 +1317,7 @@ function App(): ReactElement {
         <AppHeader
           stats={stats}
           paths={paths}
+          homePath={homePath}
           activeView={activeView}
           isBusy={isBusy}
           onViewChange={setActiveView}
@@ -1314,6 +1336,7 @@ function App(): ReactElement {
               hasCompletedInitialLoad={hasCompletedInitialLoad}
               filteredTunnels={filteredTunnels}
               hasActiveFilters={hasActiveFilters}
+              homePath={homePath}
               selectedIds={selectedIds}
               selectedCount={selectedIdList.length}
               selectedVisibleCount={selectedVisibleCount}
@@ -1359,6 +1382,7 @@ function App(): ReactElement {
       <SettingsModal
         isOpen={settingsDraft !== null}
         paths={settingsDraft ?? paths}
+        homePath={homePath}
         isBusy={isBusy}
         onCancel={closeSettings}
         onApply={() => void applySettings()}
@@ -1377,6 +1401,7 @@ function App(): ReactElement {
       <EditTunnelModal
         tunnel={editTarget}
         form={editForm}
+        homePath={homePath}
         feedback={editFormFeedback}
         isBusy={isBusy}
         onChange={updateEditForm}
@@ -1401,6 +1426,7 @@ interface DashboardStats {
 interface AppHeaderProps {
   stats: DashboardStats;
   paths: WorkspaceSelection;
+  homePath: string | null;
   activeView: AppView;
   isBusy: boolean;
   onViewChange: (view: AppView) => void;
@@ -1416,6 +1442,7 @@ interface AppHeaderProps {
 function AppHeader({
   stats,
   paths,
+  homePath,
   activeView,
   isBusy,
   onViewChange,
@@ -1441,6 +1468,7 @@ function AppHeader({
           </div>
           <WorkspacePill
             paths={paths}
+            homePath={homePath}
             isBusy={isBusy}
             onOpenSettings={onOpenSettings}
             onBrowseWorkspace={onBrowseWorkspace}
@@ -1518,6 +1546,7 @@ function AppHeader({
 
 interface WorkspacePillProps {
   paths: WorkspaceSelection;
+  homePath: string | null;
   isBusy: boolean;
   onOpenSettings: () => void;
   onBrowseWorkspace: () => void;
@@ -1529,12 +1558,14 @@ interface WorkspacePillProps {
  */
 function WorkspacePill({
   paths,
+  homePath,
   isBusy,
   onOpenSettings,
   onBrowseWorkspace,
   onSelectWorkspace,
 }: WorkspacePillProps): ReactElement {
   const workspacePath = paths.workspacePath.trim();
+  const workspaceDisplayPath = formatPathForDisplay(workspacePath, homePath);
   const hasWorkspace = workspacePath.length > 0;
   const recentWorkspaces = paths.workspaceHistory.filter(
     (historyPath) => historyPath.trim() !== "",
@@ -1559,7 +1590,7 @@ function WorkspacePill({
           className={`truncate font-mono text-xs ${hasWorkspace ? "text-foreground/85" : "text-warning"}`}
           title={workspacePath || "Not selected"}
         >
-          {workspacePath || "Not selected"}
+          {workspaceDisplayPath || "Not selected"}
         </div>
       </div>
       <Dropdown>
@@ -1595,7 +1626,7 @@ function WorkspacePill({
                   textValue={historyPath}
                 >
                   <HeroLabel className="max-w-full truncate font-mono text-xs">
-                    {historyPath}
+                    {formatPathForDisplay(historyPath, homePath)}
                   </HeroLabel>
                 </Dropdown.Item>
               ))
@@ -1787,6 +1818,7 @@ interface DashboardViewProps {
   hasCompletedInitialLoad: boolean;
   filteredTunnels: TunnelView[];
   hasActiveFilters: boolean;
+  homePath: string | null;
   selectedIds: Set<string>;
   selectedCount: number;
   selectedVisibleCount: number;
@@ -1824,6 +1856,7 @@ function DashboardView({
   hasCompletedInitialLoad,
   filteredTunnels,
   hasActiveFilters,
+  homePath,
   selectedIds,
   selectedCount,
   selectedVisibleCount,
@@ -1903,6 +1936,7 @@ function DashboardView({
         filters={filters}
         displayMode={displayMode}
         hasActiveFilters={hasActiveFilters}
+        homePath={homePath}
         selectedIds={selectedIds}
         isBusy={isBusy}
         onToggle={onToggleSelection}
@@ -1968,6 +2002,7 @@ function AddTunnelView({
 interface SettingsModalProps {
   isOpen: boolean;
   paths: WorkspaceSelection;
+  homePath: string | null;
   isBusy: boolean;
   onChange: (field: keyof WorkspaceSelection, value: string | boolean) => void;
   onApply: () => void;
@@ -1984,6 +2019,7 @@ interface SettingsModalProps {
 function SettingsModal({
   isOpen,
   paths,
+  homePath,
   isBusy,
   onChange,
   onApply,
@@ -2032,6 +2068,7 @@ function SettingsModal({
             <div className="max-h-[calc(100vh-13rem)] overflow-y-auto bg-muted/25 px-5 py-4">
               <PathPanel
                 paths={paths}
+                homePath={homePath}
                 isBusy={isBusy}
                 onChange={onChange}
                 onBrowseWorkspace={onBrowseWorkspace}
@@ -2065,6 +2102,7 @@ function SettingsModal({
 
 interface PathPanelProps {
   paths: WorkspaceSelection;
+  homePath: string | null;
   isBusy: boolean;
   onChange: (field: keyof WorkspaceSelection, value: string | boolean) => void;
   onBrowseWorkspace: () => void;
@@ -2078,6 +2116,7 @@ interface PathPanelProps {
  */
 function PathPanel({
   paths,
+  homePath,
   isBusy,
   onChange,
   onBrowseWorkspace,
@@ -2127,7 +2166,9 @@ function PathPanel({
                     onPress={() => onSelectWorkspace(workspacePath)}
                     isDisabled={isBusy}
                   >
-                    <span className="truncate">{workspacePath}</span>
+                    <span className="truncate">
+                      {formatPathForDisplay(workspacePath, homePath)}
+                    </span>
                   </HeroButton>
                   <HeroButton
                     type="button"
@@ -2152,7 +2193,7 @@ function PathPanel({
           <Settings2 className="text-foreground/70" size={17} />
           <h3 className="text-sm font-bold">Configuration files</h3>
         </div>
-        <PathValue label="Local config" value={paths.localConfigPath} />
+        <PathValue label="Local config" value={paths.localConfigPath} homePath={homePath} />
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
           <TextField
             label="Global config"
@@ -2232,8 +2273,8 @@ function PathPanel({
           <h3 className="text-sm font-bold">Runtime state</h3>
         </div>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <PathValue label="Global state" value={paths.globalStatePath} />
-          <PathValue label="Workspace state" value={paths.workspaceStatePath} />
+          <PathValue label="Global state" value={paths.globalStatePath} homePath={homePath} />
+          <PathValue label="Workspace state" value={paths.workspaceStatePath} homePath={homePath} />
         </div>
       </Card>
     </div>
@@ -2243,17 +2284,20 @@ function PathPanel({
 interface PathValueProps {
   label: string;
   value: string;
+  homePath: string | null;
 }
 
 /**
  * 読み取り専用パスを表示する
  */
-function PathValue({ label, value }: PathValueProps): ReactElement {
+function PathValue({ label, value, homePath }: PathValueProps): ReactElement {
+  const displayValue = formatPathForDisplay(value, homePath);
+
   return (
     <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
       <div className="text-xs font-semibold text-foreground/60">{label}</div>
       <div className="mt-1 min-h-5 truncate font-mono text-xs text-foreground/85" title={value}>
-        {value || "Not selected"}
+        {displayValue || "Not selected"}
       </div>
     </div>
   );
@@ -2926,6 +2970,7 @@ interface TunnelDeckProps {
   filters: TunnelFilters;
   displayMode: TunnelDisplayMode;
   hasActiveFilters: boolean;
+  homePath: string | null;
   selectedIds: Set<string>;
   isBusy: boolean;
   onToggle: (id: string) => void;
@@ -2947,6 +2992,7 @@ function TunnelDeck({
   filters,
   displayMode,
   hasActiveFilters,
+  homePath,
   selectedIds,
   isBusy,
   onToggle,
@@ -3024,6 +3070,7 @@ function TunnelDeck({
           key={tunnel.id}
           tunnel={tunnel}
           query={filters.query}
+          homePath={homePath}
           checked={selectedIds.has(tunnel.id)}
           isBusy={isBusy}
           onToggle={onToggle}
@@ -3237,6 +3284,7 @@ function EmptyState({ title, children, action }: EmptyStateProps): ReactElement 
 interface TunnelCardProps {
   tunnel: TunnelView;
   query: string;
+  homePath: string | null;
   checked: boolean;
   isBusy: boolean;
   onToggle: (id: string) => void;
@@ -3252,6 +3300,7 @@ interface TunnelCardProps {
 function TunnelCard({
   tunnel,
   query,
+  homePath,
   checked,
   isBusy,
   onToggle,
@@ -3263,6 +3312,7 @@ function TunnelCard({
   const running = tunnel.status?.state === "running";
   const status = tunnel.status?.state ?? "idle";
   const highlightQuery = query.trim();
+  const sourceDisplayPath = formatPathForDisplay(tunnel.sourcePath, homePath);
   const statusBorderClassName =
     status === "running"
       ? "border-l-success"
@@ -3292,7 +3342,7 @@ function TunnelCard({
                 <HighlightedText text={tunnel.id} query={highlightQuery} />
               </span>
               <span className="mt-0.5 block truncate text-xs text-foreground/50">
-                <HighlightedText text={tunnel.sourcePath} query={highlightQuery} />
+                <HighlightedText text={sourceDisplayPath} query={highlightQuery} />
               </span>
             </Checkbox.Content>
           </Checkbox>
@@ -3949,6 +3999,7 @@ interface ConfirmRemoveModalProps {
 interface EditTunnelModalProps {
   tunnel: TunnelView | null;
   form: TunnelFormState;
+  homePath: string | null;
   feedback: AppMessage | null;
   isBusy: boolean;
   onChange: (field: keyof TunnelFormState, value: string) => void;
@@ -3963,6 +4014,7 @@ interface EditTunnelModalProps {
 function EditTunnelModal({
   tunnel,
   form,
+  homePath,
   feedback,
   isBusy,
   onChange,
@@ -3973,6 +4025,8 @@ function EditTunnelModal({
   if (tunnel === null) {
     return null;
   }
+
+  const sourceDisplayPath = formatPathForDisplay(tunnel.sourcePath, homePath);
 
   return (
     <Modal
@@ -3996,8 +4050,11 @@ function EditTunnelModal({
                       {tunnel.source}
                     </Chip>
                   </div>
-                  <p className="mt-1 truncate font-mono text-xs text-foreground/55">
-                    {tunnel.sourcePath}
+                  <p
+                    className="mt-1 truncate font-mono text-xs text-foreground/55"
+                    title={tunnel.sourcePath}
+                  >
+                    {sourceDisplayPath}
                   </p>
                 </div>
               </div>
@@ -4187,7 +4244,11 @@ function ConfirmRemoveModal({
 /**
  * トンネル一覧を画面上の絞り込み条件で抽出する
  */
-function filterTunnels(tunnels: TunnelView[], filters: TunnelFilters): TunnelView[] {
+function filterTunnels(
+  tunnels: TunnelView[],
+  filters: TunnelFilters,
+  homePath: string | null,
+): TunnelView[] {
   const query = filters.query.trim().toLowerCase();
   const requiredTags = new Set(filters.tags);
 
@@ -4206,7 +4267,7 @@ function filterTunnels(tunnels: TunnelView[], filters: TunnelFilters): TunnelVie
       return false;
     }
 
-    return query.length === 0 || tunnelContainsQuery(tunnel, query);
+    return query.length === 0 || tunnelContainsQuery(tunnel, query, homePath);
   });
 }
 
@@ -4284,7 +4345,9 @@ function tunnelStatus(tunnel: TunnelView): TunnelStatus {
 /**
  * トンネルが検索語を含むか判定する
  */
-function tunnelContainsQuery(tunnel: TunnelView, query: string): boolean {
+function tunnelContainsQuery(tunnel: TunnelView, query: string, homePath: string | null): boolean {
+  const sourceDisplayPath = formatPathForDisplay(tunnel.sourcePath, homePath);
+
   return (
     stringContainsQuery(tunnel.id, query) ||
     stringContainsQuery(tunnel.description ?? "", query) ||
@@ -4293,6 +4356,7 @@ function tunnelContainsQuery(tunnel: TunnelView, query: string): boolean {
     stringContainsQuery(tunnel.ssh, query) ||
     stringContainsQuery(tunnel.source, query) ||
     stringContainsQuery(tunnel.sourcePath, query) ||
+    stringContainsQuery(sourceDisplayPath, query) ||
     tunnel.tags.some((tag) => stringContainsQuery(tag, query))
   );
 }
@@ -4367,6 +4431,46 @@ async function identityFileDialogDefaultPath(): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Path をユーザー表示用文字列へ変換する
+ */
+function formatPathForDisplay(path: string, homePath: string | null): string {
+  if (path.length === 0 || homePath === null) {
+    return path;
+  }
+
+  const home = trimTrailingPathSeparators(homePath);
+  if (home.length === 0) {
+    return path;
+  }
+
+  if (path === home) {
+    return "~";
+  }
+
+  const separator = path.charAt(home.length);
+  if (path.startsWith(home) && pathSeparatorCharacters.has(separator)) {
+    return `~${separator}${path.slice(home.length + 1)}`;
+  }
+
+  return path;
+}
+
+const pathSeparatorCharacters = new Set(["/", "\\"]);
+
+/**
+ * ホームディレクトリ末尾のパス区切りを比較用に正規化する
+ */
+function trimTrailingPathSeparators(path: string): string {
+  let end = path.length;
+
+  while (end > 1 && pathSeparatorCharacters.has(path.charAt(end - 1))) {
+    end -= 1;
+  }
+
+  return path.slice(0, end);
 }
 
 /**

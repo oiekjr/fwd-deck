@@ -1,6 +1,7 @@
 //! fwd-deck の CLI と将来のアプリで共有する中核機能を提供する。
 
 pub mod config;
+pub mod path_display;
 pub mod state;
 pub mod tunnel;
 
@@ -14,6 +15,7 @@ pub use config::{
     normalize_tags, read_config_file, remove_tunnel_from_config_file, tag_is_valid,
     tunnel_matches_tags, update_tunnel_in_config_file, validate_config,
 };
+pub use path_display::{format_path_for_display, format_path_for_display_with_home};
 pub use state::{StateFileError, TunnelState, TunnelStateFile, default_state_file_path};
 pub use tunnel::{
     ProcessState, StartedTunnel, StoppedTunnel, TunnelRuntimeError, TunnelRuntimeStatus,

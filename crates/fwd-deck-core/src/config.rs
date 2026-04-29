@@ -9,6 +9,8 @@ use std::{
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
+use crate::path_display::format_path_for_display;
+
 const GLOBAL_CONFIG_RELATIVE_PATH: &str = ".config/fwd-deck/config.toml";
 const LOCAL_CONFIG_FILE_NAME: &str = "fwd-deck.toml";
 pub const DEFAULT_LOCAL_HOST: &str = "127.0.0.1";
@@ -278,12 +280,18 @@ struct RawConfigFile {
 /// 設定読込時の失敗理由を表現する
 #[derive(Debug, Error)]
 pub enum ConfigLoadError {
-    #[error("Failed to read configuration file: {path}: {source}")]
+    #[error(
+        "Failed to read configuration file: {}: {source}",
+        format_path_for_display(.path)
+    )]
     Read {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("Failed to parse TOML configuration file: {path}: {source}")]
+    #[error(
+        "Failed to parse TOML configuration file: {}: {source}",
+        format_path_for_display(.path)
+    )]
     Parse {
         path: PathBuf,
         source: toml::de::Error,
@@ -293,33 +301,57 @@ pub enum ConfigLoadError {
 /// 設定編集時の失敗理由を表現する
 #[derive(Debug, Error)]
 pub enum ConfigEditError {
-    #[error("Configuration file was not found: {path}")]
+    #[error(
+        "Configuration file was not found: {}",
+        format_path_for_display(.path)
+    )]
     Missing { path: PathBuf },
-    #[error("Tunnel id already exists in configuration file: {id} ({path})")]
+    #[error(
+        "Tunnel id already exists in configuration file: {id} ({})",
+        format_path_for_display(.path)
+    )]
     DuplicateId { path: PathBuf, id: String },
-    #[error("Tunnel id was not found in configuration file: {id} ({path})")]
+    #[error(
+        "Tunnel id was not found in configuration file: {id} ({})",
+        format_path_for_display(.path)
+    )]
     NotFound { path: PathBuf, id: String },
-    #[error("Failed to read configuration file: {path}: {source}")]
+    #[error(
+        "Failed to read configuration file: {}: {source}",
+        format_path_for_display(.path)
+    )]
     Read {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("Failed to parse TOML configuration file: {path}: {source}")]
+    #[error(
+        "Failed to parse TOML configuration file: {}: {source}",
+        format_path_for_display(.path)
+    )]
     Parse {
         path: PathBuf,
         source: toml::de::Error,
     },
-    #[error("Failed to serialize TOML configuration file: {path}: {source}")]
+    #[error(
+        "Failed to serialize TOML configuration file: {}: {source}",
+        format_path_for_display(.path)
+    )]
     Serialize {
         path: PathBuf,
         source: toml::ser::Error,
     },
-    #[error("Failed to create configuration directory: {path}: {source}")]
+    #[error(
+        "Failed to create configuration directory: {}: {source}",
+        format_path_for_display(.path)
+    )]
     CreateDir {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("Failed to write configuration file: {path}: {source}")]
+    #[error(
+        "Failed to write configuration file: {}: {source}",
+        format_path_for_display(.path)
+    )]
     Write {
         path: PathBuf,
         source: std::io::Error,

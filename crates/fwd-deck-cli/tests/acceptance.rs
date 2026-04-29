@@ -317,6 +317,59 @@ fn doctor_fails_when_configuration_is_missing() {
     output.assert_stdout_contains("[ERROR] Configuration files");
 }
 
+/// 人間向け出力ではホームディレクトリ配下のパスをチルダで表示することを検証する
+#[test]
+fn human_output_shortens_home_paths() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(valid_config());
+
+    let output = workspace.run_with_home(["show", "dev-db"], workspace.path());
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("Source: local (~/fwd-deck.toml)");
+
+    let output = workspace.run_with_home(
+        [
+            "--state",
+            workspace.state_path_str(),
+            "start",
+            "dev-db",
+            "--dry-run",
+        ],
+        workspace.path(),
+    );
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("State file: ~/state.toml");
+}
+
+/// JSON出力ではホームディレクトリ配下のパスを絶対パスのまま保持することを検証する
+#[test]
+fn json_output_keeps_absolute_home_paths() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(valid_config());
+
+    let output = workspace.run_with_home(
+        [
+            "--state",
+            workspace.state_path_str(),
+            "--json",
+            "start",
+            "dev-db",
+            "--dry-run",
+        ],
+        workspace.path(),
+    );
+
+    assert!(output.status.success());
+    let json = output.stdout_json();
+    assert_eq!(json["stateFile"], workspace.state_path_str());
+    assert_eq!(
+        json["tunnels"][0]["tunnel"]["sourcePath"],
+        workspace.config_path_str()
+    );
+}
+
 struct TestWorkspace {
     temp_dir: TempDir,
     config_path: PathBuf,
@@ -344,16 +397,45 @@ impl TestWorkspace {
 
     /// fwd-deck を一時ワークスペース上で実行する
     fn run<const N: usize>(&self, args: [&str; N]) -> CommandOutput {
-        let output = Command::new(env!("CARGO_BIN_EXE_fwd-deck"))
-            .current_dir(self.temp_dir.path())
-            .arg("--config")
-            .arg(&self.config_path)
-            .arg("--no-global")
-            .args(args)
+        let output = self.command(args).output().expect("run fwd-deck");
+
+        CommandOutput::from_output(output)
+    }
+
+    /// ホームディレクトリを差し替えて fwd-deck を一時ワークスペース上で実行する
+    fn run_with_home<const N: usize>(&self, args: [&str; N], home: &Path) -> CommandOutput {
+        let output = self
+            .command(args)
+            .env("HOME", home)
             .output()
             .expect("run fwd-deck");
 
         CommandOutput::from_output(output)
+    }
+
+    /// fwd-deck 実行コマンドを初期化する
+    fn command<const N: usize>(&self, args: [&str; N]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fwd-deck"));
+        command
+            .current_dir(self.temp_dir.path())
+            .arg("--config")
+            .arg(&self.config_path)
+            .arg("--no-global")
+            .args(args);
+
+        command
+    }
+
+    /// 一時ワークスペースのパスを取得する
+    fn path(&self) -> &Path {
+        self.temp_dir.path()
+    }
+
+    /// 設定ファイルのパスを CLI 引数用文字列として取得する
+    fn config_path_str(&self) -> &str {
+        self.config_path
+            .to_str()
+            .expect("configuration path must be valid UTF-8")
     }
 
     /// 状態ファイルのパスを取得する

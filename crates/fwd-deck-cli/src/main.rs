@@ -19,9 +19,9 @@ use fwd_deck_core::{
     TimeoutConfig, TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, TunnelState,
     ValidationReport, add_tunnel_to_config_file, build_ssh_command_args,
     default_global_config_path, default_local_config_path, default_state_file_path,
-    filter_tunnels_by_tags, load_effective_config, normalize_tag, read_config_file,
-    remove_tunnel_from_config_file, start_tunnel, start_tunnels, stop_tunnel, tag_is_valid,
-    tunnel_statuses, update_tunnel_in_config_file, validate_config,
+    filter_tunnels_by_tags, format_path_for_display, load_effective_config, normalize_tag,
+    read_config_file, remove_tunnel_from_config_file, start_tunnel, start_tunnels, stop_tunnel,
+    tag_is_valid, tunnel_statuses, update_tunnel_in_config_file, validate_config,
 };
 use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
 use serde::Serialize;
@@ -550,7 +550,7 @@ fn config_add_command(
             &format!(
                 "Added tunnel to {} configuration: {}",
                 scope,
-                path.display()
+                format_path_for_display(&path)
             ),
             OutputStream::Stdout
         )
@@ -570,7 +570,10 @@ fn config_remove_command(
         eprintln!(
             "{}",
             red(
-                &format!("Configuration file was not found: {}", path.display()),
+                &format!(
+                    "Configuration file was not found: {}",
+                    format_path_for_display(&path)
+                ),
                 OutputStream::Stderr
             )
         );
@@ -578,7 +581,10 @@ fn config_remove_command(
     };
 
     if file.tunnels.is_empty() {
-        println!("No tunnels are configured in {}.", path.display());
+        println!(
+            "No tunnels are configured in {}.",
+            format_path_for_display(&path)
+        );
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -621,7 +627,7 @@ fn config_edit_command(
             &format!(
                 "Updated tunnel in {} configuration: {}",
                 target.scope,
-                target.path.display()
+                format_path_for_display(&target.path)
             ),
             OutputStream::Stdout
         )
@@ -1039,7 +1045,7 @@ fn print_tunnel_details(resolved: &ResolvedTunnelConfig) {
     println!(
         "Source: {} ({})",
         resolved.source.kind,
-        resolved.source.path.display()
+        format_path_for_display(&resolved.source.path)
     );
     print_timeout_details(resolved.timeouts);
 }
@@ -1523,9 +1529,9 @@ fn doctor_config_presence_check(config: &EffectiveConfig, paths: &ConfigPaths) -
             paths
                 .global
                 .as_deref()
-                .map(|path| path.display().to_string())
+                .map(format_path_for_display)
                 .unwrap_or_else(|| "-".to_owned()),
-            paths.local.display()
+            format_path_for_display(&paths.local)
         ),
     )
 }
@@ -1560,7 +1566,10 @@ fn doctor_state_check(state_path: &Path) -> DoctorCheck {
     match verify_state_file_writable(state_path) {
         Ok(()) => DoctorCheck::ok(
             "State file",
-            format!("readable and writable: {}", state_path.display()),
+            format!(
+                "readable and writable: {}",
+                format_path_for_display(state_path)
+            ),
         ),
         Err(error) => DoctorCheck::error("State file", error),
     }
@@ -1572,18 +1581,30 @@ fn verify_state_file_writable(state_path: &Path) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|source| {
             format!(
                 "failed to create state directory {}: {source}",
-                parent.display()
+                format_path_for_display(parent)
             )
         })?;
     }
 
     let temp_path = doctor_state_temp_path(state_path);
-    fs::write(&temp_path, "tunnels = []\n")
-        .map_err(|source| format!("failed to write {}: {source}", temp_path.display()))?;
-    fs::read_to_string(&temp_path)
-        .map_err(|source| format!("failed to read {}: {source}", temp_path.display()))?;
-    fs::remove_file(&temp_path)
-        .map_err(|source| format!("failed to remove {}: {source}", temp_path.display()))?;
+    fs::write(&temp_path, "tunnels = []\n").map_err(|source| {
+        format!(
+            "failed to write {}: {source}",
+            format_path_for_display(&temp_path)
+        )
+    })?;
+    fs::read_to_string(&temp_path).map_err(|source| {
+        format!(
+            "failed to read {}: {source}",
+            format_path_for_display(&temp_path)
+        )
+    })?;
+    fs::remove_file(&temp_path).map_err(|source| {
+        format!(
+            "failed to remove {}: {source}",
+            format_path_for_display(&temp_path)
+        )
+    })?;
 
     Ok(())
 }
@@ -1632,11 +1653,11 @@ fn doctor_identity_file_checks(config: &EffectiveConfig) -> Vec<DoctorCheck> {
             let name = format!("Identity file ({})", resolved.tunnel.id);
 
             if path.is_file() {
-                Some(DoctorCheck::ok(name, path.display().to_string()))
+                Some(DoctorCheck::ok(name, format_path_for_display(&path)))
             } else {
                 Some(DoctorCheck::error(
                     name,
-                    format!("not found: {}", path.display()),
+                    format!("not found: {}", format_path_for_display(&path)),
                 ))
             }
         })
@@ -1865,13 +1886,13 @@ fn prompt_config_scope(paths: &ConfigPaths) -> Result<ConfigSourceKind, InquireE
 
     choices.push(ScopeChoice::new(
         ConfigSourceKind::Local,
-        format!("local ({})", paths.local.display()),
+        format!("local ({})", format_path_for_display(&paths.local)),
     ));
 
     if let Some(global_path) = &paths.global {
         choices.push(ScopeChoice::new(
             ConfigSourceKind::Global,
-            format!("global ({})", global_path.display()),
+            format!("global ({})", format_path_for_display(global_path)),
         ));
     }
 
@@ -1958,7 +1979,7 @@ fn prompt_available_tunnel_id(config: &EffectiveConfig) -> Result<String, CliErr
                         "Tunnel id is already used: {} ({}: {})",
                         conflict.tunnel.id,
                         conflict.source.kind,
-                        conflict.source.path.display()
+                        format_path_for_display(&conflict.source.path)
                     ),
                     OutputStream::Stderr
                 )
@@ -1986,7 +2007,7 @@ fn prompt_available_tunnel_id_for_update(
                         "Tunnel id is already used: {} ({}: {})",
                         conflict.tunnel.id,
                         conflict.source.kind,
-                        conflict.source.path.display()
+                        format_path_for_display(&conflict.source.path)
                     ),
                     OutputStream::Stderr
                 )
@@ -2558,7 +2579,7 @@ fn shell_quote(value: &str) -> String {
 /// start の dry-run 結果を表示する
 fn print_start_dry_run(tunnels: &[&ResolvedTunnelConfig], state_path: &Path) {
     println!("Dry run: no ssh process will be started and state file will not be written.");
-    println!("State file: {}", state_path.display());
+    println!("State file: {}", format_path_for_display(state_path));
 
     for tunnel in tunnels {
         print_start_dry_run_tunnel(tunnel);
@@ -2587,7 +2608,7 @@ fn print_stop_dry_run(
     state_path: &Path,
 ) -> ExitCode {
     println!("Dry run: no process will be stopped and state file will not be modified.");
-    println!("State file: {}", state_path.display());
+    println!("State file: {}", format_path_for_display(state_path));
 
     let statuses_by_id = status_index_by_id(statuses);
     let mut failed = false;
@@ -3223,7 +3244,7 @@ fn print_validation_errors(report: &ValidationReport) {
             "- [{}] {} ({}) {}",
             error.source.kind,
             tunnel,
-            error.source.path.display(),
+            format_path_for_display(&error.source.path),
             error.message
         );
         eprintln!("{}", red(&message, OutputStream::Stderr));
@@ -3247,7 +3268,7 @@ fn print_validation_warnings(report: &ValidationReport, stream: OutputStream) {
             "- [{}] {} ({}) {}",
             warning.source.kind,
             tunnel,
-            warning.source.path.display(),
+            format_path_for_display(&warning.source.path),
             warning.message
         );
         print_line(&yellow(&message, stream), stream);
@@ -3285,7 +3306,11 @@ struct EditTargetChoice {
 impl EditTargetChoice {
     /// 編集対象から選択肢を生成する
     fn new(target: ConfigEditTarget) -> Self {
-        let label = format!("{} ({})", target.scope, target.path.display());
+        let label = format!(
+            "{} ({})",
+            target.scope,
+            format_path_for_display(&target.path)
+        );
 
         Self { target, label }
     }

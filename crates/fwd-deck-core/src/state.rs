@@ -6,7 +6,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{ConfigSourceKind, ResolvedTunnelConfig};
+use crate::{ConfigSourceKind, ResolvedTunnelConfig, path_display::format_path_for_display};
 
 const STATE_FILE_RELATIVE_PATH: &str = ".local/state/fwd-deck/state.toml";
 
@@ -94,27 +94,42 @@ impl TunnelState {
 /// 状態ファイル操作時の失敗理由を表現する
 #[derive(Debug, Error)]
 pub enum StateFileError {
-    #[error("Failed to read state file: {path}: {source}")]
+    #[error(
+        "Failed to read state file: {}: {source}",
+        format_path_for_display(.path)
+    )]
     Read {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("Failed to parse state file: {path}: {source}")]
+    #[error(
+        "Failed to parse state file: {}: {source}",
+        format_path_for_display(.path)
+    )]
     Parse {
         path: PathBuf,
         source: toml::de::Error,
     },
-    #[error("Failed to serialize state file: {path}: {source}")]
+    #[error(
+        "Failed to serialize state file: {}: {source}",
+        format_path_for_display(.path)
+    )]
     Serialize {
         path: PathBuf,
         source: toml::ser::Error,
     },
-    #[error("Failed to create state directory: {path}: {source}")]
+    #[error(
+        "Failed to create state directory: {}: {source}",
+        format_path_for_display(.path)
+    )]
     CreateDir {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("Failed to write state file: {path}: {source}")]
+    #[error(
+        "Failed to write state file: {}: {source}",
+        format_path_for_display(.path)
+    )]
     Write {
         path: PathBuf,
         source: std::io::Error,

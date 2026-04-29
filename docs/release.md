@@ -98,6 +98,33 @@ Secret name: HOMEBREW_TAP_TOKEN
 Secret value: 作成した fine-grained personal access token
 ```
 
+### Protect Release Tags
+
+release workflow は `v*.*.*` の tag push を契機に、GitHub Release 作成、DMG upload、Homebrew tap更新まで実行します。  
+誤操作で tag を削除、再作成、上書きすると配布物に影響するため、GitHub の ruleset で release tag を保護します。  
+
+GitHub の `oiekjr/fwd-deck` で次の設定を行います。  
+
+```text
+Path: Settings > Rules > Rulesets > New ruleset > New tag ruleset
+Ruleset name: release-tags
+Enforcement status: Active
+Target tags: v*.*.*
+Rules:
+  - Restrict creations
+  - Restrict updates
+  - Restrict deletions
+  - Require signed commits
+Bypass list:
+  - Repository admin only
+```
+
+`Restrict creations` を有効にすると、release tag を作れる人を bypass許可者に限定できます。  
+`Restrict updates` と `Restrict deletions` は、公開済み tag の付け直しや削除を防ぎます。  
+`Require signed commits` は、tag が指す commit に署名を要求します。  
+
+GitHub の ruleset は repo管理者、または repository rules を編集できる権限を持つユーザーが設定します。  
+
 ### Confirm Tap Access
 
 tap として参照できることを確認します。  
@@ -158,6 +185,10 @@ tag push後、release workflow は次を実行します。
 3. DMG と SHA256ファイルを Release asset として添付する
 4. GitHub tag archive の SHA256 を算出する
 5. `oiekjr/homebrew-tap` の formula と cask を更新して push する
+
+Release asset は上書きしません。  
+同じ tag に同名 asset が存在する場合、workflow は失敗します。  
+公開済み version を差し替えるのではなく、新しい version を作成してください。  
 
 ## Verification
 

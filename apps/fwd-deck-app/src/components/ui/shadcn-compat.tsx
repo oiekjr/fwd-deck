@@ -29,18 +29,19 @@ type ChipColor = "accent" | "danger" | "default" | "success" | "warning";
 type ChipVariant = "primary" | "secondary" | "soft" | "tertiary";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-[background-color,border-color,color,box-shadow] focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/20 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
   {
     variants: {
       variant: {
-        danger: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
-        "danger-soft":
-          "bg-destructive/10 text-destructive hover:bg-destructive/15 hover:text-destructive",
-        ghost: "hover:bg-accent hover:text-accent-foreground",
-        outline: "border border-input bg-background hover:bg-accent hover:text-accent-foreground",
-        primary: "bg-primary text-primary-foreground hover:bg-primary/90",
-        secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80",
-        tertiary: "bg-muted text-foreground hover:bg-muted/80",
+        danger: "bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90",
+        "danger-soft": "text-destructive hover:bg-destructive/10 hover:text-destructive",
+        ghost: "text-foreground/80 hover:bg-accent hover:text-foreground",
+        outline:
+          "border border-input bg-card shadow-sm hover:bg-accent hover:text-accent-foreground",
+        primary: "bg-primary text-primary-foreground shadow-sm hover:bg-primary/90",
+        secondary:
+          "border border-transparent bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80",
+        tertiary: "bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground",
       },
       size: {
         lg: "h-10 px-5",
@@ -63,7 +64,7 @@ const buttonVariants = cva(
 
 export interface ButtonProps
   extends
-    Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "disabled" | "onClick">,
+    Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "disabled">,
     VariantProps<typeof buttonVariants> {
   asChild?: boolean;
   fullWidth?: boolean;
@@ -78,28 +79,40 @@ export interface ButtonProps
 /**
  * shadcn/ui の button 仕様に寄せた操作ボタンを表示する
  */
-export function Button({
-  asChild = false,
-  className,
-  fullWidth,
-  isDisabled,
-  isIconOnly,
-  onPress,
-  size,
-  slot,
-  type = "button",
-  variant,
-  ...props
-}: ButtonProps): React.ReactElement {
+export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  {
+    asChild = false,
+    className,
+    fullWidth,
+    isDisabled,
+    isIconOnly,
+    onClick,
+    onPress,
+    size,
+    slot,
+    type = "button",
+    variant,
+    ...props
+  },
+  ref,
+): React.ReactElement {
   const Comp = asChild ? Slot : "button";
+  const handleClick = (event: React.MouseEvent<HTMLButtonElement>): void => {
+    onClick?.(event);
+
+    if (!event.defaultPrevented) {
+      onPress?.();
+    }
+  };
   const button = (
     <Comp
+      ref={ref}
+      {...props}
       className={cn(buttonVariants({ fullWidth, isIconOnly, size, variant }), className)}
       data-slot={slot}
       disabled={isDisabled}
-      onClick={onPress}
+      onClick={handleClick}
       type={type}
-      {...props}
     />
   );
 
@@ -108,7 +121,8 @@ export function Button({
   }
 
   return button;
-}
+});
+Button.displayName = "Button";
 
 type CardProps = React.HTMLAttributes<HTMLDivElement> & {
   variant?: "default" | "secondary";
@@ -121,8 +135,8 @@ export function Card({ className, variant = "default", ...props }: CardProps): R
   return (
     <div
       className={cn(
-        "rounded-lg border bg-card text-card-foreground",
-        variant === "secondary" && "bg-muted/35",
+        "rounded-xl border border-border bg-card text-card-foreground shadow-sm",
+        variant === "secondary" && "bg-card",
         className,
       )}
       {...props}
@@ -149,7 +163,7 @@ export function Chip({
   return (
     <span
       className={cn(
-        "inline-flex max-w-full items-center rounded-md border font-medium",
+        "inline-flex max-w-full items-center rounded-full border font-medium",
         size === "sm" ? "px-1.5 py-0.5 text-xs" : "px-2 py-0.5 text-sm",
         chipColorClassName(color, variant),
         className,
@@ -170,22 +184,22 @@ function chipColorClassName(color: ChipColor, variant: ChipVariant): string {
   }
 
   if (color === "success") {
-    return "border-emerald-200 bg-emerald-50 text-emerald-700";
+    return "border-transparent bg-emerald-500/10 text-emerald-700";
   }
 
   if (color === "warning") {
-    return "border-amber-200 bg-amber-50 text-amber-700";
+    return "border-transparent bg-amber-500/10 text-amber-700";
   }
 
   if (color === "danger") {
-    return "border-destructive/20 bg-destructive/10 text-destructive";
+    return "border-transparent bg-destructive/10 text-destructive";
   }
 
   if (color === "accent") {
-    return "border-primary/20 bg-primary/10 text-primary";
+    return "border-transparent bg-primary/10 text-foreground";
   }
 
-  return "border-transparent bg-secondary text-secondary-foreground";
+  return "border-transparent bg-muted text-muted-foreground";
 }
 
 interface AlertRootProps extends React.HTMLAttributes<HTMLDivElement> {
@@ -199,7 +213,7 @@ function AlertRoot({ className, status = "accent", ...props }: AlertRootProps): 
   return (
     <div
       className={cn(
-        "relative flex w-full items-start gap-3 rounded-lg border px-4 py-3 text-sm",
+        "relative flex w-full items-start gap-3 rounded-lg border bg-card px-3.5 py-2.5 text-sm text-foreground shadow-sm",
         alertStatusClassName(status),
         className,
       )}
@@ -213,18 +227,18 @@ function AlertRoot({ className, status = "accent", ...props }: AlertRootProps): 
  */
 function alertStatusClassName(status: AlertStatus): string {
   if (status === "danger") {
-    return "border-destructive/30 bg-destructive/10 text-destructive";
+    return "border-destructive/20 border-l-4 border-l-destructive";
   }
 
   if (status === "success") {
-    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+    return "border-emerald-500/20 border-l-4 border-l-success";
   }
 
   if (status === "warning") {
-    return "border-amber-200 bg-amber-50 text-amber-800";
+    return "border-amber-500/25 border-l-4 border-l-warning";
   }
 
-  return "border-border bg-card text-card-foreground";
+  return "border-border";
 }
 
 function AlertIndicator({
@@ -271,7 +285,7 @@ export function Input({ className, fullWidth, ...props }: InputProps): React.Rea
   return (
     <input
       className={cn(
-        "flex h-9 rounded-md border border-input bg-background px-3 py-1 text-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
+        "flex h-9 rounded-md border border-input bg-card px-3 py-1 text-sm shadow-sm transition-[border-color,box-shadow] file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50",
         fullWidth && "w-full",
         className,
       )}
@@ -342,7 +356,7 @@ function CheckboxControl({
     <CheckboxPrimitive.Root
       checked={context.selected}
       className={cn(
-        "peer size-4 shrink-0 rounded-sm border border-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground",
+        "peer size-4 shrink-0 rounded-sm border border-input bg-card shadow-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground",
         className,
       )}
       disabled={context.disabled}
@@ -441,7 +455,7 @@ function SwitchControl({
     <RadixSwitchPrimitive.Root
       checked={context.selected}
       className={cn(
-        "peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-input",
+        "peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-muted",
         className,
       )}
       disabled={context.disabled}
@@ -456,7 +470,7 @@ function SwitchThumb({ className }: React.HTMLAttributes<HTMLSpanElement>): Reac
   return (
     <RadixSwitchPrimitive.Thumb
       className={cn(
-        "pointer-events-none block size-4 rounded-full bg-background shadow-lg ring-0 transition-transform data-[state=checked]:translate-x-4 data-[state=unchecked]:translate-x-0",
+        "pointer-events-none block size-4 rounded-full bg-card shadow-md ring-0 transition-transform data-[state=checked]:translate-x-4 data-[state=unchecked]:translate-x-0",
         className,
       )}
     />
@@ -495,7 +509,7 @@ interface ModalBackdropProps {
 function ModalBackdrop({ children }: ModalBackdropProps): React.ReactElement {
   return (
     <DialogPrimitive.Portal>
-      <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/45 backdrop-blur-sm" />
+      <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/35 backdrop-blur-sm" />
       {children}
     </DialogPrimitive.Portal>
   );
@@ -523,7 +537,7 @@ function ModalDialog({
   return (
     <DialogPrimitive.Content
       className={cn(
-        "max-h-[calc(100vh-2rem)] rounded-xl bg-background text-foreground shadow-lg outline-none",
+        "max-h-[calc(100vh-2rem)] rounded-xl border border-border bg-card text-foreground shadow-2xl outline-none",
         className,
       )}
       {...props}
@@ -591,7 +605,7 @@ function DropdownPopover({
       <DropdownMenuPrimitive.Content
         align={align}
         className={cn(
-          "z-50 min-w-56 overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md",
+          "z-50 min-w-56 overflow-hidden rounded-lg border bg-popover p-1 text-popover-foreground shadow-lg",
           className,
         )}
         side={side}
@@ -630,7 +644,7 @@ function DropdownItem({
   return (
     <DropdownMenuPrimitive.Item
       className={cn(
-        "relative flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+        "relative flex cursor-default select-none items-center gap-2 rounded-md px-2 py-1.5 text-sm outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
         className,
       )}
       disabled={isDisabled}
@@ -683,14 +697,14 @@ function TooltipContent({
     <TooltipPrimitive.Portal>
       <TooltipPrimitive.Content
         className={cn(
-          "z-50 overflow-hidden rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground shadow-md",
+          "z-50 overflow-hidden rounded-md bg-foreground px-3 py-1.5 text-xs text-background shadow-md",
           className,
         )}
         side={placement}
         sideOffset={4}
       >
         {children}
-        {showArrow ? <TooltipPrimitive.Arrow className="fill-primary" /> : null}
+        {showArrow ? <TooltipPrimitive.Arrow className="fill-foreground" /> : null}
       </TooltipPrimitive.Content>
     </TooltipPrimitive.Portal>
   );
@@ -727,7 +741,7 @@ function ProgressBarRoot({
   return (
     <ProgressBarContext.Provider value={{ maxValue, value }}>
       <ProgressPrimitive.Root
-        className={cn("relative h-2 w-full overflow-hidden rounded-full bg-primary/20", className)}
+        className={cn("relative h-2 w-full overflow-hidden rounded-full bg-muted", className)}
         max={maxValue}
         value={value}
         {...props}
@@ -783,8 +797,11 @@ function TableContent({
   return <table className={cn("w-full caption-bottom text-sm", className)} {...props} />;
 }
 
-function TableHeader(props: React.HTMLAttributes<HTMLTableSectionElement>): React.ReactElement {
-  return <thead className="[&_tr]:border-b" {...props} />;
+function TableHeader({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLTableSectionElement>): React.ReactElement {
+  return <thead className={cn("bg-muted/45 [&_tr]:border-b", className)} {...props} />;
 }
 
 function TableBody(props: React.HTMLAttributes<HTMLTableSectionElement>): React.ReactElement {
@@ -804,7 +821,7 @@ function TableColumn({
   return (
     <th
       className={cn(
-        "h-8 px-3 text-left align-middle text-xs font-medium text-muted-foreground [&:has([role=checkbox])]:pr-0",
+        "h-9 px-3 text-left align-middle text-xs font-medium text-muted-foreground [&:has([role=checkbox])]:pr-0",
         className,
       )}
       scope={scope ?? (isRowHeader ? "col" : undefined)}
@@ -820,7 +837,7 @@ function TableRow({
   return (
     <tr
       className={cn(
-        "border-b transition-colors hover:bg-muted/45 data-[state=selected]:bg-muted",
+        "border-b transition-colors hover:bg-muted/40 data-[state=selected]:bg-muted",
         className,
       )}
       {...props}
@@ -834,7 +851,7 @@ function TableCell({
 }: React.TdHTMLAttributes<HTMLTableCellElement>): React.ReactElement {
   return (
     <td
-      className={cn("px-3 py-2 align-middle [&:has([role=checkbox])]:pr-0", className)}
+      className={cn("px-3 py-2.5 align-middle [&:has([role=checkbox])]:pr-0", className)}
       {...props}
     />
   );

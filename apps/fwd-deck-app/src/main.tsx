@@ -76,6 +76,7 @@ interface WorkspaceSelection {
   globalStatePath: string;
   workspaceStatePath: string;
   hideDockIconWhenWindowHidden: boolean;
+  autoStopTunnelsOnQuit: boolean;
 }
 
 interface WorkspaceSelectionInput {
@@ -83,6 +84,7 @@ interface WorkspaceSelectionInput {
   globalConfigPath: string;
   useGlobal: boolean;
   hideDockIconWhenWindowHidden: boolean;
+  autoStopTunnelsOnQuit: boolean;
 }
 
 interface OperationTarget {
@@ -279,6 +281,7 @@ const initialPaths: WorkspaceSelection = {
   globalStatePath: "",
   workspaceStatePath: "",
   hideDockIconWhenWindowHidden: false,
+  autoStopTunnelsOnQuit: false,
 };
 
 const initialForm: TunnelFormState = {
@@ -1997,6 +2000,17 @@ function PathPanel({
               className="toggle toggle-primary toggle-sm"
               checked={paths.hideDockIconWhenWindowHidden}
               onChange={(event) => onChange("hideDockIconWhenWindowHidden", event.target.checked)}
+            />
+          </label>
+        </div>
+        <div className="rounded-md border border-base-300 bg-base-100 px-3 py-2">
+          <label className="flex cursor-pointer items-center justify-between gap-3">
+            <span className="text-sm font-semibold">Auto-stop tunnels on quit</span>
+            <input
+              type="checkbox"
+              className="toggle toggle-primary toggle-sm"
+              checked={paths.autoStopTunnelsOnQuit}
+              onChange={(event) => onChange("autoStopTunnelsOnQuit", event.target.checked)}
             />
           </label>
         </div>
@@ -3989,6 +4003,7 @@ function normalizeWorkspaceSelection(paths: WorkspaceSelection): WorkspaceSelect
     globalConfigPath: paths.globalConfigPath.trim(),
     useGlobal: paths.useGlobal,
     hideDockIconWhenWindowHidden: paths.hideDockIconWhenWindowHidden,
+    autoStopTunnelsOnQuit: paths.autoStopTunnelsOnQuit,
   };
 }
 

@@ -33,7 +33,7 @@ use tauri_plugin_dialog::{
 use thiserror::Error;
 
 const APP_PREFERENCES_FILE_NAME: &str = "preferences.toml";
-const APP_PREFERENCES_VERSION: u32 = 2;
+const APP_PREFERENCES_VERSION: u32 = 3;
 const WORKSPACE_HISTORY_LIMIT: usize = 10;
 const WORKSPACE_STATES_DIR: &str = "workspace-states";
 const STATE_FILE_NAME: &str = "state.toml";
@@ -983,6 +983,20 @@ struct QuitTunnelTargets {
     stale: Vec<QuitTunnelTarget>,
 }
 
+/// 終了時に起動中トンネルを扱う方針を表現する
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuitRunningTunnelsAction {
+    AutoStop,
+    Prompt,
+}
+
+/// 終了時の対象とアプリ設定を保持する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QuitTunnelContext {
+    targets: QuitTunnelTargets,
+    running_action: QuitRunningTunnelsAction,
+}
+
 /// 終了イベントに応じて停止確認を制御する
 fn handle_quit_confirmation_event(
     app: &tauri::AppHandle,
@@ -1033,8 +1047,8 @@ fn should_prevent_quit(
         QuitConfirmationState::Idle => quit_state.set(QuitConfirmationState::Prompting),
     }
 
-    match collect_quit_tunnel_targets(app) {
-        Ok(targets) => handle_collected_quit_targets(app, quit_state, request, targets),
+    match collect_quit_tunnel_context(app) {
+        Ok(context) => handle_collected_quit_context(app, quit_state, request, context),
         Err(error) => {
             show_quit_error_dialog(
                 app.clone(),
@@ -1047,13 +1061,15 @@ fn should_prevent_quit(
     }
 }
 
-/// 収集した終了対象に応じて自動掃除または確認を行う
-fn handle_collected_quit_targets(
+/// 収集した終了対象と設定に応じて自動掃除、停止、確認を行う
+fn handle_collected_quit_context(
     app: &tauri::AppHandle,
     quit_state: QuitConfirmationStateHandle,
     request: QuitRequest,
-    targets: QuitTunnelTargets,
+    context: QuitTunnelContext,
 ) -> bool {
+    let targets = context.targets;
+
     if let Err(failure) = stop_quit_tunnel_targets(&targets.stale) {
         show_quit_error_dialog(
             app.clone(),
@@ -1069,14 +1085,43 @@ fn handle_collected_quit_targets(
         return false;
     }
 
-    show_quit_confirmation_dialog(app.clone(), quit_state, request, targets.running);
+    match context.running_action {
+        QuitRunningTunnelsAction::AutoStop => match stop_quit_tunnel_targets(&targets.running) {
+            Ok(()) => perform_confirmed_quit(app.clone(), quit_state, request),
+            Err(failure) => show_quit_error_dialog(
+                app.clone(),
+                quit_state,
+                QUIT_ERROR_TITLE,
+                quit_stop_failure_message(&failure),
+            ),
+        },
+        QuitRunningTunnelsAction::Prompt => {
+            show_quit_confirmation_dialog(app.clone(), quit_state, request, targets.running);
+        }
+    }
+
     true
 }
 
-/// 終了時に停止または削除する対象を収集する
-fn collect_quit_tunnel_targets(app: &tauri::AppHandle) -> Result<QuitTunnelTargets, AppError> {
+/// 終了時に停止または削除する対象と設定を収集する
+fn collect_quit_tunnel_context(app: &tauri::AppHandle) -> Result<QuitTunnelContext, AppError> {
     let runtime_paths = resolve_runtime_paths(app, None)?;
-    collect_visible_quit_tunnel_targets(&runtime_paths)
+    let targets = collect_visible_quit_tunnel_targets(&runtime_paths)?;
+    let running_action = quit_running_tunnels_action(&runtime_paths.preferences);
+
+    Ok(QuitTunnelContext {
+        targets,
+        running_action,
+    })
+}
+
+/// アプリ設定から終了時の起動中トンネル処理を決定する
+fn quit_running_tunnels_action(preferences: &AppPreferences) -> QuitRunningTunnelsAction {
+    if preferences.auto_stop_tunnels_on_quit {
+        QuitRunningTunnelsAction::AutoStop
+    } else {
+        QuitRunningTunnelsAction::Prompt
+    }
 }
 
 /// 表示中スコープの tracked tunnel を終了処理対象へ変換する
@@ -1252,6 +1297,7 @@ struct WorkspaceSelection {
     global_config_path: Option<String>,
     use_global: Option<bool>,
     hide_dock_icon_when_window_hidden: Option<bool>,
+    auto_stop_tunnels_on_quit: Option<bool>,
 }
 
 /// アプリ固有の設定を表現する
@@ -1264,6 +1310,7 @@ struct AppPreferences {
     use_global: bool,
     global_config_path: Option<PathBuf>,
     hide_dock_icon_when_window_hidden: bool,
+    auto_stop_tunnels_on_quit: bool,
 }
 
 impl Default for AppPreferences {
@@ -1276,6 +1323,7 @@ impl Default for AppPreferences {
             use_global: true,
             global_config_path: None,
             hide_dock_icon_when_window_hidden: false,
+            auto_stop_tunnels_on_quit: false,
         }
     }
 }
@@ -1303,6 +1351,7 @@ struct PathView {
     global_state_path: String,
     workspace_state_path: String,
     hide_dock_icon_when_window_hidden: bool,
+    auto_stop_tunnels_on_quit: bool,
 }
 
 /// ダッシュボード表示に必要な状態を表現する
@@ -2132,6 +2181,10 @@ fn apply_workspace_selection(
         preferences.hide_dock_icon_when_window_hidden = hide_dock_icon_when_window_hidden;
     }
 
+    if let Some(auto_stop_tunnels_on_quit) = selection.auto_stop_tunnels_on_quit {
+        preferences.auto_stop_tunnels_on_quit = auto_stop_tunnels_on_quit;
+    }
+
     Ok(())
 }
 
@@ -2484,6 +2537,7 @@ fn path_view(paths: &RuntimePaths) -> PathView {
             .map(display_path)
             .unwrap_or_default(),
         hide_dock_icon_when_window_hidden: paths.preferences.hide_dock_icon_when_window_hidden,
+        auto_stop_tunnels_on_quit: paths.preferences.auto_stop_tunnels_on_quit,
     }
 }
 
@@ -3061,6 +3115,7 @@ use_global = true
 
         assert_eq!(preferences.version, APP_PREFERENCES_VERSION);
         assert!(!preferences.hide_dock_icon_when_window_hidden);
+        assert!(!preferences.auto_stop_tunnels_on_quit);
     }
 
     /// Dock 非表示設定が preferences に保存されることを検証する
@@ -3079,6 +3134,22 @@ use_global = true
         assert!(persisted.hide_dock_icon_when_window_hidden);
     }
 
+    /// 終了時自動停止設定が preferences に保存されることを検証する
+    #[test]
+    fn auto_stop_tunnels_on_quit_preference_is_persisted() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("preferences.toml");
+        let preferences = AppPreferences {
+            auto_stop_tunnels_on_quit: true,
+            ..AppPreferences::default()
+        };
+
+        write_preferences_file(&path, &preferences).expect("write preferences");
+        let persisted = read_preferences_file(&path).expect("read preferences");
+
+        assert!(persisted.auto_stop_tunnels_on_quit);
+    }
+
     /// ワークスペース選択入力から Dock 非表示設定が反映されることを検証する
     #[test]
     fn workspace_selection_updates_dock_visibility_preference() {
@@ -3091,11 +3162,32 @@ use_global = true
                 global_config_path: None,
                 use_global: None,
                 hide_dock_icon_when_window_hidden: Some(true),
+                auto_stop_tunnels_on_quit: None,
             },
         )
         .expect("apply dock visibility preference");
 
         assert!(preferences.hide_dock_icon_when_window_hidden);
+    }
+
+    /// ワークスペース選択入力から終了時自動停止設定が反映されることを検証する
+    #[test]
+    fn workspace_selection_updates_auto_stop_tunnels_on_quit_preference() {
+        let mut preferences = AppPreferences::default();
+
+        apply_workspace_selection(
+            &mut preferences,
+            WorkspaceSelection {
+                workspace_path: None,
+                global_config_path: None,
+                use_global: None,
+                hide_dock_icon_when_window_hidden: None,
+                auto_stop_tunnels_on_quit: Some(true),
+            },
+        )
+        .expect("apply quit auto-stop preference");
+
+        assert!(preferences.auto_stop_tunnels_on_quit);
     }
 
     /// ワークスペース選択時に履歴が先頭へ移動し重複しないことを検証する
@@ -3112,6 +3204,7 @@ use_global = true
                 global_config_path: None,
                 use_global: None,
                 hide_dock_icon_when_window_hidden: None,
+                auto_stop_tunnels_on_quit: None,
             },
         )
         .expect("select first workspace");
@@ -3122,6 +3215,7 @@ use_global = true
                 global_config_path: None,
                 use_global: None,
                 hide_dock_icon_when_window_hidden: None,
+                auto_stop_tunnels_on_quit: None,
             },
         )
         .expect("select second workspace");
@@ -3132,6 +3226,7 @@ use_global = true
                 global_config_path: None,
                 use_global: None,
                 hide_dock_icon_when_window_hidden: None,
+                auto_stop_tunnels_on_quit: None,
             },
         )
         .expect("select first workspace again");
@@ -3167,6 +3262,7 @@ use_global = true
                     global_config_path: None,
                     use_global: None,
                     hide_dock_icon_when_window_hidden: None,
+                    auto_stop_tunnels_on_quit: None,
                 },
             )
             .expect("select workspace");
@@ -3214,6 +3310,7 @@ use_global = true
                 global_config_path: None,
                 use_global: None,
                 hide_dock_icon_when_window_hidden: None,
+                auto_stop_tunnels_on_quit: None,
             },
         )
         .expect("select workspace");
@@ -3226,6 +3323,7 @@ use_global = true
                 global_config_path: None,
                 use_global: None,
                 hide_dock_icon_when_window_hidden: None,
+                auto_stop_tunnels_on_quit: None,
             },
         )
         .expect("apply unchanged workspace");
@@ -3254,6 +3352,7 @@ use_global = true
                 global_config_path: None,
                 use_global: None,
                 hide_dock_icon_when_window_hidden: None,
+                auto_stop_tunnels_on_quit: None,
             },
         )
         .expect("select first workspace");
@@ -3266,6 +3365,7 @@ use_global = true
                 global_config_path: None,
                 use_global: None,
                 hide_dock_icon_when_window_hidden: None,
+                auto_stop_tunnels_on_quit: None,
             },
         )
         .expect("select second workspace");
@@ -3727,6 +3827,25 @@ use_global = true
         assert_eq!(
             quit_dialog_action(&MessageDialogResult::Cancel),
             QuitDialogAction::Cancel
+        );
+    }
+
+    /// 終了時自動停止設定が起動中トンネルの扱いを切り替えることを検証する
+    #[test]
+    fn quit_running_tunnels_action_reflects_auto_stop_preference() {
+        let prompt_preferences = AppPreferences::default();
+        let auto_stop_preferences = AppPreferences {
+            auto_stop_tunnels_on_quit: true,
+            ..AppPreferences::default()
+        };
+
+        assert_eq!(
+            quit_running_tunnels_action(&prompt_preferences),
+            QuitRunningTunnelsAction::Prompt
+        );
+        assert_eq!(
+            quit_running_tunnels_action(&auto_stop_preferences),
+            QuitRunningTunnelsAction::AutoStop
         );
     }
 

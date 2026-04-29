@@ -59,6 +59,7 @@ type TunnelDisplayMode = "card" | "slim";
 
 type AppCommand =
   | "load_dashboard"
+  | "switch_workspace"
   | "start_tunnels"
   | "stop_tunnels"
   | "add_tunnel_entry"
@@ -95,6 +96,11 @@ interface DashboardState {
   validation: ValidationView;
   tunnels: TunnelView[];
   trackedTunnels: TrackedTunnelView[];
+}
+
+interface WorkspaceSwitchResult {
+  dashboard: DashboardState;
+  stoppedCount: number;
 }
 
 interface ValidationView {
@@ -234,6 +240,11 @@ interface TrayOperationResultPayload {
 interface RefreshDashboardOptions {
   silent?: boolean;
   persistPaths?: boolean;
+}
+
+interface PathSelectionApplyResult {
+  dashboard: DashboardState;
+  stoppedCount: number;
 }
 
 interface TauriRuntimeWindow extends Window {
@@ -382,6 +393,22 @@ function App(): ReactElement {
   const captureResultScrollPosition = useCallback((): void => {
     resultScrollSnapshotRef.current = createViewportScrollSnapshot();
   }, []);
+
+  /**
+   * 読み込んだダッシュボード状態を画面へ反映する
+   */
+  const applyLoadedDashboard = useCallback(
+    (loaded: DashboardState): void => {
+      if (hasActiveTunnelFilters(filters)) {
+        captureResultScrollPosition();
+      }
+
+      setDashboard(loaded);
+      setPaths(loaded.paths);
+      setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
+    },
+    [captureResultScrollPosition, filters],
+  );
 
   useLayoutEffect(() => {
     const snapshot = resultScrollSnapshotRef.current;
@@ -539,13 +566,7 @@ function App(): ReactElement {
           paths: shouldPersistPaths ? normalizeWorkspaceSelection(nextPaths) : null,
         });
 
-        if (hasActiveTunnelFilters(filters)) {
-          captureResultScrollPosition();
-        }
-
-        setDashboard(loaded);
-        setPaths(loaded.paths);
-        setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
+        applyLoadedDashboard(loaded);
 
         if (!isSilent) {
           setMessage(null);
@@ -564,7 +585,7 @@ function App(): ReactElement {
         }
       }
     },
-    [captureResultScrollPosition, filters, paths],
+    [applyLoadedDashboard, paths],
   );
 
   useEffect(() => {
@@ -860,14 +881,57 @@ function App(): ReactElement {
     nextPaths: WorkspaceSelection,
     successSummary: string,
   ): Promise<void> {
-    const applied = await refreshDashboard(nextPaths);
-    if (!applied) {
+    const result = await applyPathSelectionToDashboard(nextPaths);
+    if (result === null) {
       return;
     }
 
-    setSettingsDraft((current) => (current === null ? current : { ...current, ...nextPaths }));
+    setSettingsDraft((current) =>
+      current === null ? current : { ...current, ...result.dashboard.paths },
+    );
     await refreshTrayMenuFromUi();
-    showOperationToast({ kind: "success", summary: successSummary });
+    showOperationToast({
+      kind: "success",
+      summary: workspaceSwitchSuccessSummary(successSummary, result.stoppedCount),
+    });
+  }
+
+  /**
+   * パス設定を保存してダッシュボードへ反映する
+   */
+  async function applyPathSelectionToDashboard(
+    nextPaths: WorkspaceSelection,
+  ): Promise<PathSelectionApplyResult | null> {
+    const shouldSwitchWorkspace = workspacePathHasChanged(paths, nextPaths);
+    setIsBusy(true);
+
+    try {
+      const result = shouldSwitchWorkspace
+        ? await invokeCommand<WorkspaceSwitchResult>("switch_workspace", {
+            paths: normalizeWorkspaceSelection(nextPaths),
+          })
+        : {
+            dashboard: await invokeCommand<DashboardState>("load_dashboard", {
+              paths: normalizeWorkspaceSelection(nextPaths),
+            }),
+            stoppedCount: 0,
+          };
+
+      applyLoadedDashboard(result.dashboard);
+      setMessage(null);
+
+      return result;
+    } catch (error) {
+      if (shouldSwitchWorkspace) {
+        showOperationToast({ kind: "error", summary: stringifyError(error) });
+      } else {
+        setMessage({ kind: "error", text: stringifyError(error) });
+      }
+
+      return null;
+    } finally {
+      setIsBusy(false);
+    }
   }
 
   /**
@@ -1018,11 +1082,17 @@ function App(): ReactElement {
       return;
     }
 
-    const applied = await refreshDashboard(settingsDraft);
-    if (applied) {
+    const result = await applyPathSelectionToDashboard(settingsDraft);
+    if (result !== null) {
       await refreshTrayMenuFromUi();
 
       closeSettings();
+      if (result.stoppedCount > 0) {
+        showOperationToast({
+          kind: "success",
+          summary: workspaceSwitchSuccessSummary("Workspace を切り替えました", result.stoppedCount),
+        });
+      }
     }
   }
 
@@ -3920,6 +3990,24 @@ function normalizeWorkspaceSelection(paths: WorkspaceSelection): WorkspaceSelect
     useGlobal: paths.useGlobal,
     hideDockIconWhenWindowHidden: paths.hideDockIconWhenWindowHidden,
   };
+}
+
+/**
+ * ワークスペースパスの変更有無を判定する
+ */
+function workspacePathHasChanged(current: WorkspaceSelection, next: WorkspaceSelection): boolean {
+  return current.workspacePath.trim() !== next.workspacePath.trim();
+}
+
+/**
+ * ワークスペース切り替え時の成功通知文を生成する
+ */
+function workspaceSwitchSuccessSummary(defaultSummary: string, stoppedCount: number): string {
+  if (stoppedCount > 0) {
+    return "旧 Workspace のポートフォワーディングを停止して切り替えました";
+  }
+
+  return defaultSummary;
 }
 
 /**

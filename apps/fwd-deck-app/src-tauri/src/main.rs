@@ -81,6 +81,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             load_dashboard,
+            switch_workspace,
             start_tunnels,
             stop_tunnels,
             add_tunnel_entry,
@@ -433,7 +434,10 @@ fn switch_tray_workspace(
     workspace_path: PathBuf,
 ) -> Result<PathBuf, AppError> {
     let selection = workspace_selection_for_path(&workspace_path)?;
-    let runtime_paths = resolve_runtime_paths(app, Some(selection))?;
+    let operation_lock = app.state::<OperationLockState>();
+    let (runtime_paths, _) = with_operation_lock(&operation_lock, || {
+        switch_workspace_runtime_paths_for_app(app, selection)
+    })?;
 
     Ok(runtime_paths
         .preferences
@@ -1312,6 +1316,14 @@ struct DashboardState {
     tracked_tunnels: Vec<TrackedTunnelView>,
 }
 
+/// ワークスペース切り替え結果を表現する
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceSwitchResult {
+    dashboard: DashboardState,
+    stopped_count: usize,
+}
+
 /// 設定検証結果の表示情報を表現する
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1528,6 +1540,21 @@ struct ScopedRuntimeStatus {
     status: TunnelRuntimeStatus,
 }
 
+/// ワークスペース切り替え前に停止するトンネルを表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceSwitchStopTarget {
+    id: String,
+    runtime_scope: RuntimeScope,
+    state_path: PathBuf,
+}
+
+impl WorkspaceSwitchStopTarget {
+    /// 表示用 ID を生成する
+    fn display_id(&self) -> String {
+        runtime_status_key(self.runtime_scope, &self.id)
+    }
+}
+
 /// 設定追加フォームから受け取るトンネル入力を表現する
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1607,6 +1634,8 @@ enum AppError {
     InvalidInput(String),
     #[error("設定にエラーがあります: {0}")]
     InvalidConfig(String),
+    #[error("旧ワークスペースのポートフォワーディングを停止できませんでした: {id}: {message}")]
+    WorkspaceSwitchStop { id: String, message: String },
     #[error("アプリ操作に失敗しました: {0}")]
     Tauri(#[from] tauri::Error),
     #[error(transparent)]
@@ -1624,6 +1653,19 @@ fn load_dashboard(
     paths: Option<WorkspaceSelection>,
 ) -> Result<DashboardState, String> {
     command_result(load_dashboard_inner(&app, paths))
+}
+
+/// ワークスペースを切り替えて旧ワークスペース由来のトンネルを停止する
+#[tauri::command]
+fn switch_workspace(
+    app: tauri::AppHandle,
+    operation_lock: tauri::State<'_, OperationLockState>,
+    paths: WorkspaceSelection,
+) -> Result<WorkspaceSwitchResult, String> {
+    let result = with_operation_lock(&operation_lock, || switch_workspace_inner(&app, paths));
+    let _ = rebuild_tray_menu(&app);
+
+    command_result(result)
 }
 
 /// 指定トンネルを開始する
@@ -1708,6 +1750,14 @@ fn load_dashboard_inner(
     paths: Option<WorkspaceSelection>,
 ) -> Result<DashboardState, AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths)?;
+
+    load_dashboard_from_runtime_paths(runtime_paths)
+}
+
+/// 解決済みパスからダッシュボード状態を組み立てる
+fn load_dashboard_from_runtime_paths(
+    runtime_paths: RuntimePaths,
+) -> Result<DashboardState, AppError> {
     let config = load_effective_config(&runtime_paths.config_paths)?;
     let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
     let validation = validate_config(&config);
@@ -1718,6 +1768,20 @@ fn load_dashboard_inner(
         statuses,
         validation,
     ))
+}
+
+/// ワークスペース切り替え処理を実行する
+fn switch_workspace_inner(
+    app: &tauri::AppHandle,
+    selection: WorkspaceSelection,
+) -> Result<WorkspaceSwitchResult, AppError> {
+    let (runtime_paths, stopped_count) = switch_workspace_runtime_paths_for_app(app, selection)?;
+    let dashboard = load_dashboard_from_runtime_paths(runtime_paths)?;
+
+    Ok(WorkspaceSwitchResult {
+        dashboard,
+        stopped_count,
+    })
 }
 
 /// トンネル開始処理を実行する
@@ -1824,6 +1888,73 @@ fn remove_workspace_history_entry_inner(
     write_preferences_file(&preferences_path, &runtime_paths.preferences)?;
 
     Ok(path_view(&runtime_paths))
+}
+
+/// アプリ設定ディレクトリに基づいてワークスペース切り替え後のパスを解決する
+fn switch_workspace_runtime_paths_for_app(
+    app: &tauri::AppHandle,
+    selection: WorkspaceSelection,
+) -> Result<(RuntimePaths, usize), AppError> {
+    let app_config_dir = app_config_dir(app)?;
+    let preferences_path = preferences_path_from_app_config_dir(&app_config_dir);
+
+    switch_workspace_runtime_paths(&app_config_dir, &preferences_path, selection)
+}
+
+/// 旧ワークスペース由来のトンネルを停止してから設定を保存する
+fn switch_workspace_runtime_paths(
+    app_config_dir: &Path,
+    preferences_path: &Path,
+    selection: WorkspaceSelection,
+) -> Result<(RuntimePaths, usize), AppError> {
+    apply_workspace_switch_with_stop(
+        app_config_dir,
+        preferences_path,
+        selection,
+        stop_previous_workspace_tunnels,
+    )
+}
+
+/// 停止処理を注入してワークスペース設定を切り替える
+fn apply_workspace_switch_with_stop<F>(
+    app_config_dir: &Path,
+    preferences_path: &Path,
+    selection: WorkspaceSelection,
+    stop_previous_workspace: F,
+) -> Result<(RuntimePaths, usize), AppError>
+where
+    F: FnOnce(&RuntimePaths) -> Result<usize, AppError>,
+{
+    let mut preferences = read_preferences_file(preferences_path)?;
+    let original_preferences = preferences.clone();
+
+    normalize_loaded_preferences(&mut preferences);
+
+    let previous_preferences = preferences.clone();
+    let mut next_preferences = preferences;
+    apply_workspace_selection(&mut next_preferences, selection)?;
+
+    let stopped_count = if workspace_path_changed(&previous_preferences, &next_preferences) {
+        let previous_runtime_paths =
+            runtime_paths_from_preferences(app_config_dir, previous_preferences)?;
+        stop_previous_workspace(&previous_runtime_paths)?
+    } else {
+        0
+    };
+
+    let runtime_paths = runtime_paths_from_preferences(app_config_dir, next_preferences)?;
+    write_preferences_file_if_changed(
+        preferences_path,
+        &original_preferences,
+        &runtime_paths.preferences,
+    )?;
+
+    Ok((runtime_paths, stopped_count))
+}
+
+/// active workspace の変更有無を判定する
+fn workspace_path_changed(previous: &AppPreferences, next: &AppPreferences) -> bool {
+    previous.active_workspace_path != next.active_workspace_path
 }
 
 /// アプリ設定と入力から実行時パスを解決する
@@ -2139,6 +2270,69 @@ fn state_path_for_runtime_scope(
             .as_deref()
             .ok_or(AppError::MissingWorkspace),
     }
+}
+
+/// 旧ワークスペース由来のトンネルを停止する
+fn stop_previous_workspace_tunnels(paths: &RuntimePaths) -> Result<usize, AppError> {
+    let targets = collect_workspace_switch_stop_targets(paths)?;
+
+    stop_workspace_switch_targets(&targets)
+}
+
+/// 旧ワークスペース由来の停止対象を収集する
+fn collect_workspace_switch_stop_targets(
+    paths: &RuntimePaths,
+) -> Result<Vec<WorkspaceSwitchStopTarget>, AppError> {
+    let Some(local_config_path) = &paths.local_config_path else {
+        return Ok(Vec::new());
+    };
+    let mut targets = collect_workspace_switch_stop_targets_from_state(
+        &paths.global_state_path,
+        RuntimeScope::Global,
+        local_config_path,
+    )?;
+
+    if let Some(workspace_state_path) = &paths.workspace_state_path {
+        targets.extend(collect_workspace_switch_stop_targets_from_state(
+            workspace_state_path,
+            RuntimeScope::Workspace,
+            local_config_path,
+        )?);
+    }
+
+    Ok(targets)
+}
+
+/// 指定 state から旧ワークスペース local 設定由来の停止対象を収集する
+fn collect_workspace_switch_stop_targets_from_state(
+    state_path: &Path,
+    runtime_scope: RuntimeScope,
+    local_config_path: &Path,
+) -> Result<Vec<WorkspaceSwitchStopTarget>, AppError> {
+    Ok(tunnel_statuses(state_path)?
+        .into_iter()
+        .filter(|status| status.state.source_kind == ConfigSourceKind::Local)
+        .filter(|status| paths_refer_to_same_file(local_config_path, &status.state.source_path))
+        .map(|status| WorkspaceSwitchStopTarget {
+            id: status.state.id,
+            runtime_scope,
+            state_path: state_path.to_path_buf(),
+        })
+        .collect())
+}
+
+/// 旧ワークスペース切り替え対象を停止する
+fn stop_workspace_switch_targets(targets: &[WorkspaceSwitchStopTarget]) -> Result<usize, AppError> {
+    for target in targets {
+        stop_tunnel_for_app(&target.id, &target.state_path).map_err(|error| {
+            AppError::WorkspaceSwitchStop {
+                id: target.display_id(),
+                message: error.to_string(),
+            }
+        })?;
+    }
+
+    Ok(targets.len())
 }
 
 /// 設定ファイル種別に対応する runtime scope を取得する
@@ -3126,6 +3320,118 @@ use_global = true
         assert_eq!(message, Some("missing はすでに停止済みです".to_owned()));
     }
 
+    /// ワークスペース切り替えが旧 local state と CLI 互換 state の local 状態を停止することを検証する
+    #[test]
+    fn workspace_switch_stops_old_workspace_local_state() {
+        let workspace = TempDir::new().expect("create workspace");
+        let temp_dir = TempDir::new().expect("create state directory");
+        let local_config_path = workspace.path().join("fwd-deck.toml");
+        let global_state_path = temp_dir.path().join("global-state.toml");
+        let workspace_state_path = temp_dir.path().join("workspace-state.toml");
+        let mut child = TestChild::sleep();
+        fs::write(&local_config_path, "").expect("write local config");
+        write_state_file(
+            &global_state_path,
+            &state_file(vec![tunnel_state(
+                "cli-db",
+                ConfigSourceKind::Local,
+                local_config_path.clone(),
+                u32::MAX,
+            )]),
+        )
+        .expect("write global state");
+        write_state_file(
+            &workspace_state_path,
+            &state_file(vec![tunnel_state(
+                "app-db",
+                ConfigSourceKind::Local,
+                local_config_path.clone(),
+                child.pid(),
+            )]),
+        )
+        .expect("write workspace state");
+        let paths = runtime_paths_for_state_paths(
+            Some(local_config_path),
+            global_state_path.clone(),
+            Some(workspace_state_path.clone()),
+        );
+
+        let stopped_count =
+            stop_previous_workspace_tunnels(&paths).expect("stop old workspace tunnels");
+        child.wait_for_exit();
+        let global_state = read_state_file(&global_state_path).expect("read global state");
+        let workspace_state = read_state_file(&workspace_state_path).expect("read workspace state");
+
+        assert_eq!(stopped_count, 2);
+        assert!(global_state.tunnels.is_empty());
+        assert!(workspace_state.tunnels.is_empty());
+    }
+
+    /// ワークスペース切り替えが global 設定由来の状態を停止対象から除外することを検証する
+    #[test]
+    fn workspace_switch_keeps_global_source_state() {
+        let workspace = TempDir::new().expect("create workspace");
+        let temp_dir = TempDir::new().expect("create state directory");
+        let local_config_path = workspace.path().join("fwd-deck.toml");
+        let global_config_path = temp_dir.path().join("global-fwd-deck.toml");
+        let global_state_path = temp_dir.path().join("global-state.toml");
+        fs::write(&local_config_path, "").expect("write local config");
+        write_state_file(
+            &global_state_path,
+            &state_file(vec![tunnel_state(
+                "global-db",
+                ConfigSourceKind::Global,
+                global_config_path,
+                u32::MAX,
+            )]),
+        )
+        .expect("write global state");
+        let paths = runtime_paths_for_state_paths(Some(local_config_path), global_state_path, None);
+
+        let stopped_count =
+            stop_previous_workspace_tunnels(&paths).expect("stop old workspace tunnels");
+        let global_state = read_state_file(&paths.global_state_path).expect("read global state");
+
+        assert_eq!(stopped_count, 0);
+        assert_eq!(global_state.tunnels.len(), 1);
+        assert_eq!(global_state.tunnels[0].id, "global-db");
+    }
+
+    /// 停止失敗時に新しいワークスペース設定が保存されないことを検証する
+    #[test]
+    fn workspace_switch_stop_failure_keeps_previous_preferences() {
+        let app_config_dir = TempDir::new().expect("create app config directory");
+        let previous_workspace = TempDir::new().expect("create previous workspace");
+        let next_workspace = TempDir::new().expect("create next workspace");
+        let preferences_path = app_config_dir.path().join("preferences.toml");
+        let previous_workspace_path =
+            fs::canonicalize(previous_workspace.path()).expect("canonical previous workspace");
+        let preferences = AppPreferences {
+            active_workspace_path: Some(previous_workspace_path.clone()),
+            workspace_history: vec![previous_workspace_path],
+            ..AppPreferences::default()
+        };
+        write_preferences_file(&preferences_path, &preferences).expect("write preferences");
+        let selection =
+            workspace_selection_for_path(next_workspace.path()).expect("build workspace selection");
+
+        let result = apply_workspace_switch_with_stop(
+            app_config_dir.path(),
+            &preferences_path,
+            selection,
+            |_paths| {
+                Err(AppError::WorkspaceSwitchStop {
+                    id: "workspace:db".to_owned(),
+                    message: "stop failed".to_owned(),
+                })
+            },
+        );
+        let persisted = read_preferences_file(&preferences_path).expect("read preferences");
+
+        assert!(result.is_err());
+        assert_eq!(persisted, preferences);
+    }
+
     /// スキップされた操作対象が成功件数と失敗件数に含まれないことを検証する
     #[test]
     fn run_tunnel_operations_omits_skipped_targets() {
@@ -3643,5 +3949,44 @@ use_global = true
                 timeouts: TimeoutConfig::default(),
             },
         )
+    }
+
+    /// テスト用の短命な子プロセスを保持する
+    struct TestChild {
+        child: Option<std::process::Child>,
+    }
+
+    impl TestChild {
+        /// sleep プロセスを起動する
+        fn sleep() -> Self {
+            let child = std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("spawn sleep process");
+
+            Self { child: Some(child) }
+        }
+
+        /// 子プロセスの PID を取得する
+        fn pid(&self) -> u32 {
+            self.child.as_ref().expect("child should be running").id()
+        }
+
+        /// 子プロセスの終了を待機する
+        fn wait_for_exit(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.wait();
+            }
+        }
+    }
+
+    impl Drop for TestChild {
+        /// 残存プロセスを終了する
+        fn drop(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
     }
 }

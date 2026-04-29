@@ -10,14 +10,16 @@ tauri-build.workspace = true
 
 [dependencies]
 fwd-deck-core = { path = "../../../crates/fwd-deck-core" }
-objc2.workspace = true
-objc2-app-kit = { workspace = true, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
-objc2-foundation = { workspace = true, features = ["std", "NSData", "NSProcessInfo", "NSString"] }
 serde.workspace = true
 tauri = { workspace = true, features = ["image-png", "tray-icon"] }
 tauri-plugin-dialog.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit = { workspace = true, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { workspace = true, features = ["std", "NSData", "NSProcessInfo", "NSString"] }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -396,6 +396,7 @@ function App(): ReactElement {
   const operationSequenceRef = useRef<number>(0);
   const operationToastIdRef = useRef<number>(0);
   const resultScrollSnapshotRef = useRef<ViewportScrollSnapshot | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   const stats = useMemo<DashboardStats>(() => calculateStats(dashboard), [dashboard]);
   const selectedIdList = useMemo<string[]>(() => Array.from(selectedIds), [selectedIds]);
@@ -499,6 +500,19 @@ function App(): ReactElement {
         return;
       }
 
+      if (
+        isSearchKeyboardShortcut(event) &&
+        activeView === "dashboard" &&
+        settingsDraft === null &&
+        deleteTarget === null &&
+        editTarget === null
+      ) {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+        return;
+      }
+
       if (event.key === "Escape" && !isBusy) {
         setSettingsDraft(null);
       }
@@ -507,7 +521,7 @@ function App(): ReactElement {
     window.addEventListener("keydown", handleKeyDown);
 
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isBusy, paths]);
+  }, [activeView, deleteTarget, editTarget, isBusy, paths, settingsDraft]);
 
   useEffect(() => {
     if (operationToast === null) {
@@ -1307,6 +1321,7 @@ function App(): ReactElement {
               operationProgress={operationProgress}
               isBusy={isBusy}
               queryInput={queryInput}
+              searchInputRef={searchInputRef}
               filters={filters}
               displayMode={tunnelDisplayMode}
               onQueryInputChange={updateQueryInput}
@@ -1778,6 +1793,7 @@ interface DashboardViewProps {
   availableTags: string[];
   operationProgress: OperationProgress | null;
   queryInput: string;
+  searchInputRef: RefObject<HTMLInputElement | null>;
   filters: TunnelFilters;
   displayMode: TunnelDisplayMode;
   isBusy: boolean;
@@ -1814,6 +1830,7 @@ function DashboardView({
   availableTags,
   operationProgress,
   queryInput,
+  searchInputRef,
   filters,
   displayMode,
   isBusy,
@@ -1854,6 +1871,7 @@ function DashboardView({
         visibleCount={filteredTunnels.length}
         availableTags={availableTags}
         queryInput={queryInput}
+        searchInputRef={searchInputRef}
         filters={filters}
         displayMode={displayMode}
         hasActiveFilters={hasActiveFilters}
@@ -2328,6 +2346,7 @@ interface TunnelOperationsPanelProps {
   visibleCount: number;
   availableTags: string[];
   queryInput: string;
+  searchInputRef: RefObject<HTMLInputElement | null>;
   filters: TunnelFilters;
   displayMode: TunnelDisplayMode;
   hasActiveFilters: boolean;
@@ -2346,6 +2365,7 @@ function TunnelOperationsPanel({
   visibleCount,
   availableTags,
   queryInput,
+  searchInputRef,
   filters,
   displayMode,
   hasActiveFilters,
@@ -2396,6 +2416,7 @@ function TunnelOperationsPanel({
                 size={16}
               />
               <HeroInput
+                ref={searchInputRef}
                 fullWidth
                 className="h-9 w-full pr-9 pl-9"
                 variant="secondary"
@@ -4553,6 +4574,16 @@ function isSettingsKeyboardShortcut(event: KeyboardEvent): boolean {
   const isCommaKey = event.key === "," || event.code === "Comma";
 
   return hasPrimaryModifier && isCommaKey && !event.altKey && !event.shiftKey;
+}
+
+/**
+ * Dashboard の検索欄へ移動するショートカット入力か判定する
+ */
+function isSearchKeyboardShortcut(event: KeyboardEvent): boolean {
+  const hasPrimaryModifier = event.metaKey || event.ctrlKey;
+  const isKKey = event.key.toLowerCase() === "k" || event.code === "KeyK";
+
+  return hasPrimaryModifier && isKKey && !event.altKey && !event.shiftKey;
 }
 
 /**

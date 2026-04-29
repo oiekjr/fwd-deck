@@ -281,9 +281,13 @@ type InputProps = React.InputHTMLAttributes<HTMLInputElement> & {
 /**
  * shadcn/ui の input に相当する入力欄を表示する
  */
-export function Input({ className, fullWidth, ...props }: InputProps): React.ReactElement {
+export const Input = React.forwardRef<HTMLInputElement, InputProps>(function Input(
+  { className, fullWidth, ...props },
+  ref,
+): React.ReactElement {
   return (
     <input
+      ref={ref}
       className={cn(
         "flex h-9 rounded-md border border-input bg-card px-3 py-1 text-sm shadow-sm transition-[border-color,box-shadow] file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50",
         fullWidth && "w-full",
@@ -292,7 +296,8 @@ export function Input({ className, fullWidth, ...props }: InputProps): React.Rea
       {...props}
     />
   );
-}
+});
+Input.displayName = "Input";
 
 /**
  * shadcn/ui の label に相当するラベルを表示する

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{
     Emitter, Manager,
     image::Image,
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{AboutMetadata, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_dialog::{
@@ -240,6 +240,7 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .first()
         .and_then(|item| item.as_submenu().cloned())
     {
+        let about = PredefinedMenuItem::about(app, None, Some(app_about_metadata(app)?))?;
         let settings = MenuItem::with_id(
             app,
             APP_MENU_SETTINGS,
@@ -249,11 +250,33 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         )?;
         let separator = PredefinedMenuItem::separator(app)?;
 
+        let _ = app_submenu.remove_at(0)?;
+        app_submenu.insert(&about, 0)?;
         app_submenu.insert(&settings, 2)?;
         app_submenu.insert(&separator, 3)?;
     }
 
     Ok(menu)
+}
+
+/// About パネルへ表示するアプリ情報を生成する
+fn app_about_metadata(app: &tauri::AppHandle) -> tauri::Result<AboutMetadata<'static>> {
+    let package_info = app.package_info();
+    let config = app.config();
+    let icon_bytes = include_bytes!("../icons/128x128@2x.png");
+
+    Ok(AboutMetadata {
+        name: Some(package_info.name.clone()),
+        version: Some(package_info.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config
+            .bundle
+            .publisher
+            .clone()
+            .map(|publisher| vec![publisher]),
+        icon: Some(Image::from_bytes(icon_bytes)?.to_owned()),
+        ..Default::default()
+    })
 }
 
 /// アプリ上部メニューの選択を処理する

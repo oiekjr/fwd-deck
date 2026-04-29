@@ -2,9 +2,11 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     fmt::{self, Display},
+    fs,
     io::{self, IsTerminal},
+    net::TcpListener,
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{Command as ProcessCommand, ExitCode, Stdio},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -18,10 +20,11 @@ use fwd_deck_core::{
     ValidationReport, add_tunnel_to_config_file, build_ssh_command_args,
     default_global_config_path, default_local_config_path, default_state_file_path,
     filter_tunnels_by_tags, load_effective_config, normalize_tag, read_config_file,
-    remove_tunnel_from_config_file, start_tunnel, stop_tunnel, tag_is_valid, tunnel_statuses,
-    validate_config,
+    remove_tunnel_from_config_file, start_tunnel, start_tunnels, stop_tunnel, tag_is_valid,
+    tunnel_statuses, update_tunnel_in_config_file, validate_config,
 };
 use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
+use serde::Serialize;
 use thiserror::Error;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -38,20 +41,156 @@ const STATUS_REMOTE_MIN_WIDTH: usize = 32;
 const STATUS_PID_MIN_WIDTH: usize = 8;
 const STATUS_STATE_MIN_WIDTH: usize = 10;
 const TRUNCATION_MARKER: &str = "...";
+const CLI_AFTER_HELP: &str = "\
+例:
+  fwd-deck validate
+  fwd-deck doctor
+  fwd-deck list --tag dev
+  fwd-deck start dev-db --dry-run
+  fwd-deck status
+
+設定:
+  既定では ./fwd-deck.toml と ~/.config/fwd-deck/config.toml を読み込みます。
+  起動中トンネルの状態は ~/.local/state/fwd-deck/state.toml に保存します。";
+const LIST_AFTER_HELP: &str = "\
+例:
+  fwd-deck list
+  fwd-deck --json list
+  fwd-deck list --wide
+  fwd-deck list --tag dev --tag project-a
+  fwd-deck list --query db
+
+補足:
+  --tag は複数指定でき、指定したタグをすべて持つトンネルだけを表示します。
+  --query は ID と description を大文字小文字を区別せずに検索します。
+  --wide は REMOTE の host 部分を省略せずに表示します。";
+const SHOW_AFTER_HELP: &str = "\
+例:
+  fwd-deck show dev-db
+  fwd-deck --json show dev-db
+
+補足:
+  統合後の設定、接続先、有効なタイムアウト、読み込み元の設定ファイルを表示します。";
+const START_AFTER_HELP: &str = "\
+例:
+  fwd-deck start
+  fwd-deck start dev-db
+  fwd-deck start --all
+  fwd-deck start --all --parallel 4
+  fwd-deck start --tag dev --tag project-a
+  fwd-deck start dev-db --dry-run
+  fwd-deck --json start dev-db --dry-run
+
+補足:
+  ID を省略すると対話選択を表示します。
+  --all、ID、--tag は同時に指定できません。
+  --parallel は複数トンネルの開始処理を指定件数まで並列実行します。
+  --dry-run は SSH を起動せず、状態ファイルも更新しません。";
+const RECOVER_AFTER_HELP: &str = "\
+例:
+  fwd-deck recover
+  fwd-deck recover dev-db
+
+補足:
+  ID を省略すると、状態ファイルで stale と判定された追跡中トンネルを再起動します。";
+const WATCH_AFTER_HELP: &str = "\
+例:
+  fwd-deck watch
+  fwd-deck watch dev-db --interval-seconds 5
+
+補足:
+  状態ファイル上の追跡中トンネルを監視し、stale になった場合に現在の設定で再起動します。";
+const STATUS_AFTER_HELP: &str = "\
+例:
+  fwd-deck status
+  fwd-deck --json status
+
+補足:
+  状態ファイルに記録された PID を使い、追跡中トンネルが実行中か stale かを表示します。";
+const STOP_AFTER_HELP: &str = "\
+例:
+  fwd-deck stop
+  fwd-deck stop dev-db
+  fwd-deck stop --all
+  fwd-deck stop dev-db --dry-run
+
+補足:
+  ID を省略すると対話選択を表示します。
+  --all と ID は同時に指定できません。
+  --dry-run はプロセスを停止せず、状態ファイルも更新しません。";
+const CONFIG_AFTER_HELP: &str = "\
+例:
+  fwd-deck config add
+  fwd-deck config edit dev-db
+  fwd-deck config remove --scope local
+
+補足:
+  --scope を省略すると、編集する local または global 設定を対話選択します。";
+const CONFIG_ADD_AFTER_HELP: &str = "\
+例:
+  fwd-deck config add
+  fwd-deck config add --scope local
+  fwd-deck config add --scope global
+
+  補足:
+  --scope を省略すると、編集する local または global 設定を対話選択します。
+  local は ./fwd-deck.toml、global は ~/.config/fwd-deck/config.toml を対象にします。";
+const CONFIG_EDIT_AFTER_HELP: &str = "\
+例:
+  fwd-deck config edit dev-db
+  fwd-deck config edit dev-db --scope local
+  fwd-deck config edit dev-db --scope global
+
+補足:
+  既存値を初期値として表示し、空入力は既存値維持として扱います。
+  同じ ID が local と global の両方に存在する場合、対話実行時は編集対象を選択します。
+  非対話実行時は --scope を指定します。";
+const CONFIG_REMOVE_AFTER_HELP: &str = "\
+例:
+  fwd-deck config remove
+  fwd-deck config remove --scope local
+  fwd-deck config remove --scope global
+
+補足:
+  --scope を省略すると、編集する local または global 設定を対話選択します。
+  選択した設定ファイルに定義されているトンネルだけを削除対象にします。";
+const COMPLETION_AFTER_HELP: &str = "\
+例:
+  fwd-deck completion zsh
+  fwd-deck completion zsh > ~/.zfunc/_fwd-deck
+
+補足:
+  対応シェルは bash、elvish、fish、powershell、zsh です。
+  zsh では出力先を fpath に追加し、compinit を有効にします。";
+const VALIDATE_AFTER_HELP: &str = "\
+例:
+  fwd-deck validate
+  fwd-deck --json validate
+  fwd-deck --config ./my-fwd-deck.toml validate
+
+補足:
+  読み込んだ local と global の設定を統合し、エラーと warning を表示します。";
+const DOCTOR_AFTER_HELP: &str = "\
+例:
+  fwd-deck doctor
+
+補足:
+  設定ファイルの有無、設定検証、状態ファイルの読み書き、ssh / lsof の起動可否、identity_file の存在、local endpoint の使用状況を確認します。";
 
 /// fwd-deck の CLI 引数を表現する
 #[derive(Debug, Parser)]
 #[command(
     name = "fwd-deck",
     version,
-    about = "Operate port forwarding entries defined in configuration files"
+    about = "設定ファイルに定義したポートフォワーディングを操作する",
+    after_help = CLI_AFTER_HELP
 )]
 struct Cli {
     #[arg(
         long,
         global = true,
         value_name = "PATH",
-        help = "Read local configuration from PATH"
+        help = "local設定ファイルを PATH から読み込む"
     )]
     config: Option<PathBuf>,
 
@@ -59,20 +198,23 @@ struct Cli {
         long,
         global = true,
         value_name = "PATH",
-        help = "Read global configuration from PATH"
+        help = "global設定ファイルを PATH から読み込む"
     )]
     global_config: Option<PathBuf>,
 
-    #[arg(long, global = true, help = "Do not read the global configuration")]
+    #[arg(long, global = true, help = "global設定ファイルを読み込まない")]
     no_global: bool,
 
     #[arg(
         long,
         global = true,
         value_name = "PATH",
-        help = "Read and write runtime state from PATH"
+        help = "実行状態ファイルを PATH から読み書きする"
     )]
     state: Option<PathBuf>,
+
+    #[arg(long, global = true, help = "Print supported command output as JSON")]
+    json: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -81,88 +223,113 @@ struct Cli {
 /// fwd-deck が提供するサブコマンドを表現する
 #[derive(Debug, Clone, Subcommand)]
 enum Command {
-    #[command(about = "List configured tunnels")]
+    #[command(about = "設定済みトンネルを一覧表示する", after_help = LIST_AFTER_HELP)]
     List {
-        #[arg(long = "tag", value_name = "TAG", help = "Filter tunnels by tag")]
+        #[arg(long = "tag", value_name = "TAG", help = "指定タグで絞り込む")]
         tags: Vec<String>,
         #[arg(
             long,
             value_name = "TEXT",
-            help = "Filter tunnels by id or description"
+            help = "ID または description の部分一致で絞り込む"
         )]
         query: Option<String>,
-        #[arg(long, help = "Show full remote hosts without truncation")]
+        #[arg(long, help = "REMOTE の host 部分を省略せずに表示する")]
         wide: bool,
     },
-    #[command(about = "Show configured tunnel details")]
+    #[command(about = "設定済みトンネルの詳細を表示する", after_help = SHOW_AFTER_HELP)]
     Show {
-        #[arg(value_name = "ID", help = "Tunnel ID to show")]
+        #[arg(value_name = "ID", help = "詳細を表示するトンネルID")]
         id: String,
     },
-    #[command(about = "Start configured tunnels")]
+    #[command(about = "設定済みトンネルを起動する", after_help = START_AFTER_HELP)]
     Start {
-        #[arg(value_name = "ID", help = "Tunnel IDs to start")]
+        #[arg(value_name = "ID", help = "起動するトンネルID")]
         ids: Vec<String>,
-        #[arg(long = "tag", value_name = "TAG", help = "Start tunnels matching tag")]
+        #[arg(
+            long = "tag",
+            value_name = "TAG",
+            help = "指定タグに一致するトンネルを起動する"
+        )]
         tags: Vec<String>,
-        #[arg(long, help = "Start all configured tunnels")]
+        #[arg(long, help = "設定済みの全トンネルを起動する")]
         all: bool,
-        #[arg(long, help = "Preview start actions without starting ssh")]
+        #[arg(
+            long,
+            default_value_t = 1,
+            help = "複数トンネルの開始処理を指定件数まで並列実行する"
+        )]
+        parallel: usize,
+        #[arg(long, help = "SSH を起動せずに実行予定だけを表示する")]
         dry_run: bool,
     },
-    #[command(about = "Recover stale tracked tunnels")]
+    #[command(about = "stale な追跡中トンネルを再起動する", after_help = RECOVER_AFTER_HELP)]
     Recover {
-        #[arg(value_name = "ID", help = "Tunnel IDs to recover")]
+        #[arg(value_name = "ID", help = "再起動するトンネルID")]
         ids: Vec<String>,
     },
-    #[command(about = "Watch tracked tunnels and recover stale tunnels")]
+    #[command(about = "追跡中トンネルを監視して stale 時に再起動する", after_help = WATCH_AFTER_HELP)]
     Watch {
-        #[arg(value_name = "ID", help = "Tunnel IDs to watch")]
+        #[arg(value_name = "ID", help = "監視するトンネルID")]
         ids: Vec<String>,
         #[arg(
             long,
             default_value_t = DEFAULT_WATCH_INTERVAL_SECONDS,
             value_parser = clap::value_parser!(u64).range(1..),
-            help = "Watch interval in seconds"
+            help = "監視間隔を秒単位で指定する"
         )]
         interval_seconds: u64,
     },
-    #[command(about = "Show tracked tunnel status")]
+    #[command(about = "追跡中トンネルの状態を表示する", after_help = STATUS_AFTER_HELP)]
     Status,
-    #[command(about = "Stop tracked tunnels")]
+    #[command(about = "追跡中トンネルを停止する", after_help = STOP_AFTER_HELP)]
     Stop {
-        #[arg(value_name = "ID", help = "Tunnel IDs to stop")]
+        #[arg(value_name = "ID", help = "停止するトンネルID")]
         ids: Vec<String>,
-        #[arg(long, help = "Stop all tracked tunnels")]
+        #[arg(long, help = "追跡中の全トンネルを停止する")]
         all: bool,
-        #[arg(long, help = "Preview stop actions without stopping processes")]
+        #[arg(long, help = "プロセスを停止せずに実行予定だけを表示する")]
         dry_run: bool,
     },
-    #[command(about = "Edit configuration files")]
+    #[command(about = "設定ファイルを対話形式で編集する", after_help = CONFIG_AFTER_HELP)]
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    #[command(about = "Generate shell completion script")]
+    #[command(about = "シェル補完スクリプトを生成する", after_help = COMPLETION_AFTER_HELP)]
     Completion {
-        #[arg(value_enum, help = "Shell to generate completions for")]
+        #[arg(value_enum, help = "補完スクリプトを生成するシェル")]
         shell: Shell,
     },
-    #[command(about = "Validate configuration files")]
+    #[command(about = "設定と実行環境を診断する", after_help = DOCTOR_AFTER_HELP)]
+    Doctor,
+    #[command(about = "設定ファイルを検証する", after_help = VALIDATE_AFTER_HELP)]
     Validate,
 }
 
 /// 設定編集サブコマンドを表現する
 #[derive(Debug, Clone, Subcommand)]
 enum ConfigCommand {
-    #[command(about = "Add a tunnel to a configuration file")]
+    #[command(about = "設定ファイルへトンネルを追加する", after_help = CONFIG_ADD_AFTER_HELP)]
     Add {
-        #[arg(long, value_enum, help = "Configuration scope to edit")]
+        #[arg(long, value_enum, help = "編集する設定スコープ")]
         scope: Option<ConfigScopeArg>,
     },
-    #[command(about = "Remove a tunnel from a configuration file")]
+    #[command(
+        about = "設定ファイルからトンネルを削除する",
+        after_help = CONFIG_REMOVE_AFTER_HELP
+    )]
     Remove {
-        #[arg(long, value_enum, help = "Configuration scope to edit")]
+        #[arg(long, value_enum, help = "編集する設定スコープ")]
+        scope: Option<ConfigScopeArg>,
+    },
+    #[command(
+        about = "設定ファイル内の既存トンネルを編集する",
+        after_help = CONFIG_EDIT_AFTER_HELP
+    )]
+    Edit {
+        #[arg(value_name = "ID", help = "編集するトンネルID")]
+        id: String,
+        #[arg(long, value_enum, help = "編集する設定スコープ")]
         scope: Option<ConfigScopeArg>,
     },
 }
@@ -197,6 +364,10 @@ enum CliError {
         "Invalid tag: {tag}. Tags may contain only lowercase ASCII letters, numbers, '-', '_', '.', or '/'"
     )]
     InvalidTag { tag: String },
+    #[error(
+        "Tunnel ID exists in multiple configuration files: {id}. Specify --scope in non-interactive mode"
+    )]
+    AmbiguousConfigEdit { id: String },
     #[error(transparent)]
     Config(#[from] fwd_deck_core::ConfigLoadError),
     #[error(transparent)]
@@ -205,6 +376,10 @@ enum CliError {
     Runtime(#[from] TunnelRuntimeError),
     #[error(transparent)]
     Prompt(#[from] InquireError),
+    #[error("--json is not supported for this command")]
+    JsonUnsupported,
+    #[error("Failed to serialize JSON output: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 /// CLI の実行入口を初期化する
@@ -226,16 +401,17 @@ fn run() -> Result<ExitCode, CliError> {
     match &cli.command {
         Command::List { tags, query, wide } => {
             let config = load_config(&cli)?;
-            list_command(&config, tags.clone(), query.clone(), *wide)
+            list_command(&config, tags.clone(), query.clone(), *wide, cli.json)
         }
         Command::Show { id } => {
             let config = load_config(&cli)?;
-            show_command(&config, id)
+            show_command(&config, id, cli.json)
         }
         Command::Start {
             ids,
             tags,
             all,
+            parallel,
             dry_run,
         } => {
             let config = load_config(&cli)?;
@@ -243,10 +419,14 @@ fn run() -> Result<ExitCode, CliError> {
             start_command(
                 &config,
                 &state_path,
-                ids.clone(),
-                tags.clone(),
-                *all,
-                *dry_run,
+                StartCommandOptions {
+                    ids: ids.clone(),
+                    tags: tags.clone(),
+                    all: *all,
+                    parallel: *parallel,
+                    dry_run: *dry_run,
+                    json: cli.json,
+                },
             )
         }
         Command::Recover { ids } => {
@@ -264,22 +444,43 @@ fn run() -> Result<ExitCode, CliError> {
         }
         Command::Status => {
             let state_path = resolve_state_path(state_path)?;
-            status_command(&state_path)
+            status_command(&state_path, cli.json)
         }
         Command::Stop { ids, all, dry_run } => {
+            reject_json_if_requested(cli.json)?;
             let state_path = resolve_state_path(state_path)?;
             stop_command(&state_path, ids.clone(), *all, *dry_run)
         }
         Command::Config { command } => {
+            reject_json_if_requested(cli.json)?;
             let paths = resolve_config_paths(&cli)?;
             config_command(&paths, command.clone())
         }
-        Command::Completion { shell } => completion_command(*shell),
+        Command::Completion { shell } => {
+            reject_json_if_requested(cli.json)?;
+            completion_command(*shell)
+        }
+        Command::Doctor => {
+            reject_json_if_requested(cli.json)?;
+            let config = load_config(&cli)?;
+            let paths = resolve_config_paths(&cli)?;
+            let state_path = resolve_state_path(state_path)?;
+            doctor_command(&config, &paths, &state_path)
+        }
         Command::Validate => {
             let config = load_config(&cli)?;
-            Ok(print_validation(&config))
+            validate_command(&config, cli.json)
         }
     }
+}
+
+/// JSON 非対応コマンドで JSON 出力指定を拒否する
+fn reject_json_if_requested(json: bool) -> Result<(), CliError> {
+    if json {
+        return Err(CliError::JsonUnsupported);
+    }
+
+    Ok(())
 }
 
 /// CLI 引数に従って設定を読み込む
@@ -328,6 +529,7 @@ fn config_command(paths: &ConfigPaths, command: ConfigCommand) -> Result<ExitCod
     match command {
         ConfigCommand::Add { scope } => config_add_command(paths, scope),
         ConfigCommand::Remove { scope } => config_remove_command(paths, scope),
+        ConfigCommand::Edit { id, scope } => config_edit_command(paths, &id, scope),
     }
 }
 
@@ -402,6 +604,32 @@ fn config_remove_command(
     Ok(ExitCode::SUCCESS)
 }
 
+/// 設定ファイル内の既存トンネルを更新する
+fn config_edit_command(
+    paths: &ConfigPaths,
+    id: &str,
+    scope: Option<ConfigScopeArg>,
+) -> Result<ExitCode, CliError> {
+    let target = resolve_config_edit_target(paths, id, scope)?;
+    let config = load_effective_config(paths)?;
+    let tunnel = prompt_tunnel_config_update(&config, &target.tunnel)?;
+
+    update_tunnel_in_config_file(&target.path, target.scope, id, tunnel)?;
+    println!(
+        "{}",
+        green(
+            &format!(
+                "Updated tunnel in {} configuration: {}",
+                target.scope,
+                target.path.display()
+            ),
+            OutputStream::Stdout
+        )
+    );
+
+    Ok(ExitCode::SUCCESS)
+}
+
 /// CLI 指定または対話選択から設定スコープを解決する
 fn resolve_config_scope(
     paths: &ConfigPaths,
@@ -428,17 +656,125 @@ fn config_path_for_scope(
     }
 }
 
+/// 設定編集対象として解決済みのファイルとトンネルを表現する
+#[derive(Debug, Clone)]
+struct ConfigEditTarget {
+    scope: ConfigSourceKind,
+    path: PathBuf,
+    tunnel: TunnelConfig,
+}
+
+/// 既存トンネルの編集対象ファイルを解決する
+fn resolve_config_edit_target(
+    paths: &ConfigPaths,
+    id: &str,
+    scope: Option<ConfigScopeArg>,
+) -> Result<ConfigEditTarget, CliError> {
+    if let Some(scope) = scope {
+        let scope = ConfigSourceKind::from(scope);
+        return config_edit_target_for_scope(paths, id, scope);
+    }
+
+    let targets = config_edit_targets_for_id(paths, id)?;
+    match targets.len() {
+        0 => Err(ConfigEditError::NotFound {
+            path: paths.local.clone(),
+            id: id.to_owned(),
+        }
+        .into()),
+        1 => Ok(targets
+            .into_iter()
+            .next()
+            .expect("single edit target should exist")),
+        _ if io::stdin().is_terminal() => prompt_config_edit_target(targets),
+        _ => Err(CliError::AmbiguousConfigEdit { id: id.to_owned() }),
+    }
+}
+
+/// 指定スコープから編集対象トンネルを取得する
+fn config_edit_target_for_scope(
+    paths: &ConfigPaths,
+    id: &str,
+    scope: ConfigSourceKind,
+) -> Result<ConfigEditTarget, CliError> {
+    let path = config_path_for_scope(paths, scope)?;
+    let Some(file) = read_config_file(&path, scope)? else {
+        return Err(ConfigEditError::Missing { path }.into());
+    };
+    let Some(tunnel) = file.tunnels.into_iter().find(|tunnel| tunnel.id == id) else {
+        return Err(ConfigEditError::NotFound {
+            path,
+            id: id.to_owned(),
+        }
+        .into());
+    };
+
+    Ok(ConfigEditTarget {
+        scope,
+        path,
+        tunnel,
+    })
+}
+
+/// 全スコープから指定 ID の編集対象を取得する
+fn config_edit_targets_for_id(
+    paths: &ConfigPaths,
+    id: &str,
+) -> Result<Vec<ConfigEditTarget>, CliError> {
+    let mut targets = Vec::new();
+
+    if let Some(global_path) = &paths.global
+        && let Some(file) = read_config_file(global_path, ConfigSourceKind::Global)?
+        && let Some(tunnel) = file.tunnels.into_iter().find(|tunnel| tunnel.id == id)
+    {
+        targets.push(ConfigEditTarget {
+            scope: ConfigSourceKind::Global,
+            path: global_path.clone(),
+            tunnel,
+        });
+    }
+
+    if let Some(file) = read_config_file(&paths.local, ConfigSourceKind::Local)?
+        && let Some(tunnel) = file.tunnels.into_iter().find(|tunnel| tunnel.id == id)
+    {
+        targets.push(ConfigEditTarget {
+            scope: ConfigSourceKind::Local,
+            path: paths.local.clone(),
+            tunnel,
+        });
+    }
+
+    Ok(targets)
+}
+
+/// 複数スコープに存在するトンネルの編集対象を対話的に選択する
+fn prompt_config_edit_target(targets: Vec<ConfigEditTarget>) -> Result<ConfigEditTarget, CliError> {
+    let choices = targets
+        .into_iter()
+        .map(EditTargetChoice::new)
+        .collect::<Vec<_>>();
+    let selected = Select::new("Select configuration entry to edit:", choices).prompt()?;
+
+    Ok(selected.target)
+}
+
 /// トンネル設定一覧コマンドを実行する
 fn list_command(
     config: &EffectiveConfig,
     tags: Vec<String>,
     query: Option<String>,
     wide: bool,
+    json: bool,
 ) -> Result<ExitCode, CliError> {
     let tags = normalize_cli_tags(&tags)?;
     let query = normalize_list_query(query);
 
     if !config.has_sources() {
+        if json {
+            print_json(&ListJson::empty())?;
+            return Ok(ExitCode::SUCCESS);
+        }
+
         println!(
             "{}",
             red("No configuration files were found.", OutputStream::Stdout)
@@ -447,6 +783,11 @@ fn list_command(
     }
 
     let tunnels = select_tunnels_for_list(config, &tags, query.as_deref());
+
+    if json {
+        print_json(&ListJson::from_tunnels(&tunnels))?;
+        return Ok(ExitCode::SUCCESS);
+    }
 
     if tunnels.is_empty() && tags.is_empty() && query.is_none() {
         println!("No tunnels are configured.");
@@ -463,7 +804,7 @@ fn list_command(
 }
 
 /// トンネル詳細表示コマンドを実行する
-fn show_command(config: &EffectiveConfig, id: &str) -> Result<ExitCode, CliError> {
+fn show_command(config: &EffectiveConfig, id: &str, json: bool) -> Result<ExitCode, CliError> {
     if !config.has_sources() {
         eprintln!(
             "{}",
@@ -482,6 +823,11 @@ fn show_command(config: &EffectiveConfig, id: &str) -> Result<ExitCode, CliError
         );
         return Ok(ExitCode::FAILURE);
     };
+
+    if json {
+        print_json(&ShowJson::from_tunnel(resolved))?;
+        return Ok(ExitCode::SUCCESS);
+    }
 
     print_tunnel_details(resolved);
     Ok(ExitCode::SUCCESS)
@@ -751,11 +1097,17 @@ fn print_timeout_details(timeouts: ResolvedTimeoutConfig) {
 fn start_command(
     config: &EffectiveConfig,
     state_path: &Path,
-    ids: Vec<String>,
-    tags: Vec<String>,
-    all: bool,
-    dry_run: bool,
+    options: StartCommandOptions,
 ) -> Result<ExitCode, CliError> {
+    let StartCommandOptions {
+        ids,
+        tags,
+        all,
+        parallel,
+        dry_run,
+        json,
+    } = options;
+
     if !config.has_sources() {
         eprintln!(
             "{}",
@@ -784,6 +1136,17 @@ fn start_command(
             "{}",
             red(
                 "Cannot combine tunnel IDs with --tag.",
+                OutputStream::Stderr
+            )
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+
+    if parallel == 0 {
+        eprintln!(
+            "{}",
+            red(
+                "Parallelism must be greater than or equal to 1.",
                 OutputStream::Stderr
             )
         );
@@ -832,14 +1195,23 @@ fn start_command(
     };
 
     if dry_run {
-        print_start_dry_run(&tunnels, state_path);
+        if json {
+            print_json(&StartDryRunJson::from_tunnels(&tunnels, state_path))?;
+        } else {
+            print_start_dry_run(&tunnels, state_path);
+        }
         return Ok(ExitCode::SUCCESS);
     }
 
-    let mut failed = false;
+    if json {
+        return Err(CliError::JsonUnsupported);
+    }
 
-    for tunnel in tunnels {
-        match start_tunnel(tunnel, state_path) {
+    let mut failed = false;
+    let resolved_tunnels = tunnels.into_iter().cloned().collect::<Vec<_>>();
+
+    for result in start_tunnels(&resolved_tunnels, state_path, parallel)? {
+        match result {
             Ok(started) => print_started_tunnel(&started),
             Err(error) => {
                 failed = true;
@@ -849,6 +1221,17 @@ fn start_command(
     }
 
     Ok(exit_code_from_failure(failed))
+}
+
+/// start コマンドの実行条件を保持する
+#[derive(Debug, Clone)]
+struct StartCommandOptions {
+    ids: Vec<String>,
+    tags: Vec<String>,
+    all: bool,
+    parallel: usize,
+    dry_run: bool,
+    json: bool,
 }
 
 /// stale なトンネルを再起動する
@@ -992,8 +1375,15 @@ fn watch_command(
 }
 
 /// トンネル状態表示コマンドを実行する
-fn status_command(state_path: &Path) -> Result<ExitCode, CliError> {
+fn status_command(state_path: &Path, json: bool) -> Result<ExitCode, CliError> {
     let statuses = tunnel_statuses(state_path)?;
+
+    if json {
+        let now = current_unix_seconds();
+        let statuses = sorted_statuses_by_id(&statuses);
+        print_json(&StatusJson::from_statuses(state_path, &statuses, now))?;
+        return Ok(ExitCode::SUCCESS);
+    }
 
     if statuses.is_empty() {
         println!("No tracked tunnels.");
@@ -1072,6 +1462,281 @@ fn stop_command(
     }
 
     Ok(exit_code_from_failure(failed))
+}
+
+/// ローカル実行環境と設定内容を診断する
+fn doctor_command(
+    config: &EffectiveConfig,
+    paths: &ConfigPaths,
+    state_path: &Path,
+) -> Result<ExitCode, CliError> {
+    let checks = doctor_checks(config, paths, state_path);
+    let failed = checks
+        .iter()
+        .any(|check| check.status == DoctorCheckStatus::Error);
+
+    println!("Doctor report");
+    for check in &checks {
+        println!(
+            "{} {}: {}",
+            doctor_status_label(check.status),
+            check.name,
+            check.message
+        );
+    }
+
+    Ok(exit_code_from_failure(failed))
+}
+
+/// doctor で実行する診断項目を生成する
+fn doctor_checks(
+    config: &EffectiveConfig,
+    paths: &ConfigPaths,
+    state_path: &Path,
+) -> Vec<DoctorCheck> {
+    let mut checks = vec![
+        doctor_config_presence_check(config, paths),
+        doctor_validation_check(config),
+        doctor_state_check(state_path),
+        doctor_command_check("ssh", &["-V"]),
+        doctor_command_check("lsof", &["-v"]),
+    ];
+    checks.extend(doctor_identity_file_checks(config));
+    checks.extend(doctor_local_endpoint_checks(config));
+
+    checks
+}
+
+/// 設定ファイルの有無を診断する
+fn doctor_config_presence_check(config: &EffectiveConfig, paths: &ConfigPaths) -> DoctorCheck {
+    if config.has_sources() {
+        return DoctorCheck::ok(
+            "Configuration files",
+            format!("loaded {} file(s)", config.sources.len()),
+        );
+    }
+
+    DoctorCheck::error(
+        "Configuration files",
+        format!(
+            "no configuration files were found (global: {}, local: {})",
+            paths
+                .global
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "-".to_owned()),
+            paths.local.display()
+        ),
+    )
+}
+
+/// 設定検証結果を診断する
+fn doctor_validation_check(config: &EffectiveConfig) -> DoctorCheck {
+    let report = validate_config(config);
+
+    if report.is_valid() {
+        if report.has_warnings() {
+            return DoctorCheck::warning(
+                "Configuration validation",
+                format!("valid with {} warning(s)", report.warnings.len()),
+            );
+        }
+
+        return DoctorCheck::ok("Configuration validation", "valid");
+    }
+
+    DoctorCheck::error(
+        "Configuration validation",
+        format!("{} error(s)", report.errors.len()),
+    )
+}
+
+/// 状態ファイルの読み書きを診断する
+fn doctor_state_check(state_path: &Path) -> DoctorCheck {
+    if let Err(error) = fwd_deck_core::state::read_state_file(state_path) {
+        return DoctorCheck::error("State file", error.to_string());
+    }
+
+    match verify_state_file_writable(state_path) {
+        Ok(()) => DoctorCheck::ok(
+            "State file",
+            format!("readable and writable: {}", state_path.display()),
+        ),
+        Err(error) => DoctorCheck::error("State file", error),
+    }
+}
+
+/// 状態ファイルと同じ場所へ一時ファイルを書き込めるか検証する
+fn verify_state_file_writable(state_path: &Path) -> Result<(), String> {
+    if let Some(parent) = state_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| {
+            format!(
+                "failed to create state directory {}: {source}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let temp_path = doctor_state_temp_path(state_path);
+    fs::write(&temp_path, "tunnels = []\n")
+        .map_err(|source| format!("failed to write {}: {source}", temp_path.display()))?;
+    fs::read_to_string(&temp_path)
+        .map_err(|source| format!("failed to read {}: {source}", temp_path.display()))?;
+    fs::remove_file(&temp_path)
+        .map_err(|source| format!("failed to remove {}: {source}", temp_path.display()))?;
+
+    Ok(())
+}
+
+/// doctor 用の一時状態ファイルパスを生成する
+fn doctor_state_temp_path(state_path: &Path) -> PathBuf {
+    let file_name = state_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("state.toml");
+
+    state_path.with_file_name(format!("{file_name}.doctor.{}.tmp", std::process::id()))
+}
+
+/// 外部コマンドの起動可否を診断する
+fn doctor_command_check(command: &'static str, args: &[&str]) -> DoctorCheck {
+    match ProcessCommand::new(command)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(_) => DoctorCheck::ok(format!("{command} command"), "available"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound && command == "lsof" => {
+            DoctorCheck::warning(
+                "lsof command",
+                "not found; port process details may be limited",
+            )
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            DoctorCheck::error(format!("{command} command"), "not found")
+        }
+        Err(error) => DoctorCheck::error(format!("{command} command"), error.to_string()),
+    }
+}
+
+/// identity_file の存在を診断する
+fn doctor_identity_file_checks(config: &EffectiveConfig) -> Vec<DoctorCheck> {
+    config
+        .tunnels
+        .iter()
+        .filter_map(|resolved| {
+            let identity_file = resolved.tunnel.identity_file.as_deref()?;
+            let path = expand_home_pathbuf(identity_file);
+            let name = format!("Identity file ({})", resolved.tunnel.id);
+
+            if path.is_file() {
+                Some(DoctorCheck::ok(name, path.display().to_string()))
+            } else {
+                Some(DoctorCheck::error(
+                    name,
+                    format!("not found: {}", path.display()),
+                ))
+            }
+        })
+        .collect()
+}
+
+/// ローカルエンドポイントの使用状況を診断する
+fn doctor_local_endpoint_checks(config: &EffectiveConfig) -> Vec<DoctorCheck> {
+    config
+        .tunnels
+        .iter()
+        .map(|resolved| {
+            let tunnel = &resolved.tunnel;
+            let local_host = tunnel.effective_local_host();
+            let name = format!("Local endpoint ({})", tunnel.id);
+
+            match TcpListener::bind((local_host, tunnel.local_port)) {
+                Ok(listener) => {
+                    drop(listener);
+                    DoctorCheck::ok(
+                        name,
+                        format!("{local_host}:{} is available", tunnel.local_port),
+                    )
+                }
+                Err(error) => DoctorCheck::warning(
+                    name,
+                    format!(
+                        "{local_host}:{} is not available: {error}",
+                        tunnel.local_port
+                    ),
+                ),
+            }
+        })
+        .collect()
+}
+
+/// `~/` で始まるパスを PathBuf へ展開する
+fn expand_home_pathbuf(path: &str) -> PathBuf {
+    let Some(rest) = path.strip_prefix("~/") else {
+        return PathBuf::from(path);
+    };
+
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(rest))
+        .unwrap_or_else(|| PathBuf::from(path))
+}
+
+/// doctor の診断結果を表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DoctorCheck {
+    status: DoctorCheckStatus,
+    name: String,
+    message: String,
+}
+
+impl DoctorCheck {
+    /// 正常な診断結果を生成する
+    fn ok(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            status: DoctorCheckStatus::Ok,
+            name: name.into(),
+            message: message.into(),
+        }
+    }
+
+    /// 注意が必要な診断結果を生成する
+    fn warning(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            status: DoctorCheckStatus::Warning,
+            name: name.into(),
+            message: message.into(),
+        }
+    }
+
+    /// 失敗した診断結果を生成する
+    fn error(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            status: DoctorCheckStatus::Error,
+            name: name.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// doctor の診断結果種別を表現する
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorCheckStatus {
+    Ok,
+    Warning,
+    Error,
+}
+
+/// doctor の診断結果種別を表示ラベルへ変換する
+fn doctor_status_label(status: DoctorCheckStatus) -> &'static str {
+    match status {
+        DoctorCheckStatus::Ok => "[OK]",
+        DoctorCheckStatus::Warning => "[WARN]",
+        DoctorCheckStatus::Error => "[ERROR]",
+    }
 }
 
 /// 設定が不正な場合に検証エラーを表示する
@@ -1244,12 +1909,76 @@ fn prompt_tunnel_config(config: &EffectiveConfig) -> Result<TunnelConfig, CliErr
     })
 }
 
+/// 既存値を初期値としてトンネル設定を対話的に更新する
+fn prompt_tunnel_config_update(
+    config: &EffectiveConfig,
+    current: &TunnelConfig,
+) -> Result<TunnelConfig, CliError> {
+    let id = prompt_available_tunnel_id_for_update(config, &current.id)?;
+    let description =
+        prompt_existing_optional_text("Description:", current.description.as_deref())?;
+    let tags = prompt_existing_tags(&current.tags)?;
+    let local_host = prompt_existing_local_host(current)?;
+    let local_port =
+        prompt_available_local_port_for_update(config, &current.id, current.local_port)?;
+    let remote_host = prompt_existing_required_text("Remote host:", &current.remote_host)?;
+    let remote_port = prompt_existing_port("Remote port:", current.remote_port)?;
+    let ssh_user = prompt_existing_required_text("SSH user:", &current.ssh_user)?;
+    let ssh_host = prompt_existing_required_text("SSH host:", &current.ssh_host)?;
+    let ssh_port = prompt_existing_optional_port("SSH port:", current.ssh_port)?;
+    let identity_file =
+        prompt_existing_optional_text("Identity file:", current.identity_file.as_deref())?;
+
+    Ok(TunnelConfig {
+        id,
+        description,
+        tags,
+        local_host,
+        local_port,
+        remote_host,
+        remote_port,
+        ssh_user,
+        ssh_host,
+        ssh_port,
+        identity_file,
+        timeouts: current.timeouts.clone(),
+    })
+}
+
 /// 既存設定と重複しないトンネル ID の入力を受け取る
 fn prompt_available_tunnel_id(config: &EffectiveConfig) -> Result<String, CliError> {
     loop {
         let id = prompt_required_text("Tunnel id:")?;
 
         if let Some(conflict) = find_tunnel_id_conflict(config, &id) {
+            eprintln!(
+                "{}",
+                red(
+                    &format!(
+                        "Tunnel id is already used: {} ({}: {})",
+                        conflict.tunnel.id,
+                        conflict.source.kind,
+                        conflict.source.path.display()
+                    ),
+                    OutputStream::Stderr
+                )
+            );
+            continue;
+        }
+
+        return Ok(id);
+    }
+}
+
+/// 更新対象を除いて重複しないトンネル ID の入力を受け取る
+fn prompt_available_tunnel_id_for_update(
+    config: &EffectiveConfig,
+    current_id: &str,
+) -> Result<String, CliError> {
+    loop {
+        let id = prompt_existing_required_text("Tunnel id:", current_id)?;
+
+        if let Some(conflict) = find_tunnel_id_conflict_for_update(config, current_id, &id) {
             eprintln!(
                 "{}",
                 red(
@@ -1280,12 +2009,53 @@ fn find_tunnel_id_conflict<'a>(
         .find(|resolved| resolved.tunnel.id == tunnel_id)
 }
 
+/// 更新対象を除いてトンネル ID が重複する既存トンネルを取得する
+fn find_tunnel_id_conflict_for_update<'a>(
+    config: &'a EffectiveConfig,
+    current_id: &str,
+    tunnel_id: &str,
+) -> Option<&'a ResolvedTunnelConfig> {
+    config
+        .tunnels
+        .iter()
+        .find(|resolved| resolved.tunnel.id != current_id && resolved.tunnel.id == tunnel_id)
+}
+
 /// 既存設定と重複しない local_port の入力を受け取る
 fn prompt_available_local_port(config: &EffectiveConfig, tunnel_id: &str) -> Result<u16, CliError> {
     loop {
         let local_port = prompt_port("Local port:", None)?;
 
         if let Some(conflict) = find_local_port_conflict(config, tunnel_id, local_port) {
+            eprintln!(
+                "{}",
+                red(
+                    &format!(
+                        "Local port is already used by tunnel: {} ({}:{})",
+                        conflict.tunnel.id,
+                        conflict.tunnel.effective_local_host(),
+                        conflict.tunnel.local_port
+                    ),
+                    OutputStream::Stderr
+                )
+            );
+            continue;
+        }
+
+        return Ok(local_port);
+    }
+}
+
+/// 更新対象を除いて重複しない local_port の入力を受け取る
+fn prompt_available_local_port_for_update(
+    config: &EffectiveConfig,
+    current_id: &str,
+    current_port: u16,
+) -> Result<u16, CliError> {
+    loop {
+        let local_port = prompt_existing_port("Local port:", current_port)?;
+
+        if let Some(conflict) = find_local_port_conflict(config, current_id, local_port) {
             eprintln!(
                 "{}",
                 red(
@@ -1326,6 +2096,24 @@ fn prompt_tunnel_to_remove(tunnels: &[TunnelConfig]) -> Result<RemoveChoice, Inq
     Select::new("Select a tunnel to remove:", choices).prompt()
 }
 
+/// 既存値を初期値として空文字列を許容しない入力を受け取る
+fn prompt_existing_required_text(label: &str, current: &str) -> Result<String, CliError> {
+    loop {
+        let value = Text::new(label).with_initial_value(current).prompt()?;
+        let trimmed = value.trim();
+
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_owned());
+        }
+
+        if !current.trim().is_empty() {
+            return Ok(current.trim().to_owned());
+        }
+
+        eprintln!("{}", red("Value cannot be empty.", OutputStream::Stderr));
+    }
+}
+
 /// 空文字列を許容しない入力を受け取る
 fn prompt_required_text(label: &str) -> Result<String, CliError> {
     loop {
@@ -1349,6 +2137,46 @@ fn prompt_optional_text(label: &str) -> Result<Option<String>, CliError> {
         Ok(None)
     } else {
         Ok(Some(trimmed.to_owned()))
+    }
+}
+
+/// 既存値を初期値として任意入力値を受け取る
+fn prompt_existing_optional_text(
+    label: &str,
+    current: Option<&str>,
+) -> Result<Option<String>, CliError> {
+    let mut prompt = Text::new(label);
+    if let Some(current) = current {
+        prompt = prompt.with_initial_value(current);
+    }
+
+    let value = prompt.prompt()?;
+    let trimmed = value.trim();
+
+    if trimmed.is_empty() {
+        Ok(current.map(ToOwned::to_owned))
+    } else {
+        Ok(Some(trimmed.to_owned()))
+    }
+}
+
+/// 既存値を初期値としてタグ一覧の入力を受け取る
+fn prompt_existing_tags(current: &[String]) -> Result<Vec<String>, CliError> {
+    loop {
+        let value = Text::new("Tags (comma-separated):")
+            .with_initial_value(&current.join(","))
+            .prompt()?;
+
+        if value.trim().is_empty() {
+            return Ok(current.to_vec());
+        }
+
+        match parse_tag_list(&value) {
+            Ok(tags) => return Ok(tags),
+            Err(error) => {
+                eprintln!("{}", red(&error.to_string(), OutputStream::Stderr));
+            }
+        }
     }
 }
 
@@ -1376,6 +2204,30 @@ fn parse_tag_list(value: &str) -> Result<Vec<String>, CliError> {
         .split(',')
         .map(normalize_tag_input)
         .collect::<Result<Vec<_>, _>>()
+}
+
+/// 既存値を初期値として local_host の入力を受け取る
+fn prompt_existing_local_host(current: &TunnelConfig) -> Result<Option<String>, CliError> {
+    loop {
+        let local_host =
+            prompt_existing_required_text("Local host:", current.effective_local_host())?;
+
+        if !local_host.chars().any(char::is_whitespace) {
+            if current.local_host.is_none() && local_host == DEFAULT_LOCAL_HOST {
+                return Ok(None);
+            }
+
+            return Ok(Some(local_host));
+        }
+
+        eprintln!(
+            "{}",
+            red(
+                "Local host cannot contain whitespace.",
+                OutputStream::Stderr
+            )
+        );
+    }
 }
 
 /// local_host の入力を受け取る
@@ -1406,6 +2258,71 @@ fn prompt_text_with_default(label: &str, default: &str) -> Result<String, CliErr
         Ok(default.to_owned())
     } else {
         Ok(trimmed.to_owned())
+    }
+}
+
+/// 既存値を初期値としてポート番号の入力を受け取る
+fn prompt_existing_port(label: &str, current: u16) -> Result<u16, CliError> {
+    loop {
+        let initial_value = current.to_string();
+        let value = Text::new(label)
+            .with_initial_value(&initial_value)
+            .prompt()?;
+        let candidate = if value.trim().is_empty() {
+            initial_value
+        } else {
+            value.trim().to_owned()
+        };
+
+        if let Ok(port) = candidate.parse::<u16>()
+            && port > 0
+        {
+            return Ok(port);
+        }
+
+        eprintln!(
+            "{}",
+            red(
+                "Port must be a number between 1 and 65535.",
+                OutputStream::Stderr
+            )
+        );
+    }
+}
+
+/// 既存値を初期値として任意のポート番号入力を受け取る
+fn prompt_existing_optional_port(
+    label: &str,
+    current: Option<u16>,
+) -> Result<Option<u16>, CliError> {
+    loop {
+        let mut prompt = Text::new(label);
+        let initial_value;
+        if let Some(current) = current {
+            initial_value = current.to_string();
+            prompt = prompt.with_initial_value(&initial_value);
+        }
+
+        let value = prompt.prompt()?;
+        let trimmed = value.trim();
+
+        if trimmed.is_empty() {
+            return Ok(current);
+        }
+
+        if let Ok(port) = trimmed.parse::<u16>()
+            && port > 0
+        {
+            return Ok(Some(port));
+        }
+
+        eprintln!(
+            "{}",
+            red(
+                "Port must be a number between 1 and 65535.",
+                OutputStream::Stderr
+            )
+        );
     }
 }
 
@@ -1935,6 +2852,307 @@ fn process_state_plain_label(process_state: ProcessState) -> &'static str {
     }
 }
 
+/// JSON 出力を標準出力へ書き込む
+fn print_json<T: Serialize>(value: &T) -> Result<(), CliError> {
+    serde_json::to_writer_pretty(io::stdout(), value)?;
+    println!();
+
+    Ok(())
+}
+
+/// list の JSON 出力を表現する
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ListJson {
+    has_config: bool,
+    tunnels: Vec<TunnelJson>,
+}
+
+impl ListJson {
+    /// 設定ファイルがない場合の JSON 出力を生成する
+    fn empty() -> Self {
+        Self {
+            has_config: false,
+            tunnels: Vec::new(),
+        }
+    }
+
+    /// 統合済みトンネル一覧から JSON 出力を生成する
+    fn from_tunnels(tunnels: &[&ResolvedTunnelConfig]) -> Self {
+        Self {
+            has_config: true,
+            tunnels: tunnels
+                .iter()
+                .map(|resolved| TunnelJson::from_resolved_tunnel(resolved))
+                .collect(),
+        }
+    }
+}
+
+/// show の JSON 出力を表現する
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShowJson {
+    tunnel: TunnelJson,
+}
+
+impl ShowJson {
+    /// 統合済みトンネルから JSON 出力を生成する
+    fn from_tunnel(resolved: &ResolvedTunnelConfig) -> Self {
+        Self {
+            tunnel: TunnelJson::from_resolved_tunnel(resolved),
+        }
+    }
+}
+
+/// トンネル設定の JSON 表現を保持する
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TunnelJson {
+    id: String,
+    description: Option<String>,
+    tags: Vec<String>,
+    local_host: String,
+    local_port: u16,
+    local: String,
+    remote_host: String,
+    remote_port: u16,
+    remote: String,
+    ssh_user: String,
+    ssh_host: String,
+    ssh_port: Option<u16>,
+    ssh: String,
+    identity_file: Option<String>,
+    source: String,
+    source_path: String,
+    timeouts: TimeoutJson,
+}
+
+impl TunnelJson {
+    /// 統合済みトンネルから JSON 用の値を生成する
+    fn from_resolved_tunnel(resolved: &ResolvedTunnelConfig) -> Self {
+        let tunnel = &resolved.tunnel;
+
+        Self {
+            id: tunnel.id.clone(),
+            description: tunnel.description.clone(),
+            tags: tunnel.tags.clone(),
+            local_host: tunnel.effective_local_host().to_owned(),
+            local_port: tunnel.local_port,
+            local: format_local_endpoint(tunnel),
+            remote_host: tunnel.remote_host.clone(),
+            remote_port: tunnel.remote_port,
+            remote: format_remote_endpoint(tunnel),
+            ssh_user: tunnel.ssh_user.clone(),
+            ssh_host: tunnel.ssh_host.clone(),
+            ssh_port: tunnel.ssh_port,
+            ssh: format_ssh_endpoint(tunnel),
+            identity_file: tunnel.identity_file.clone(),
+            source: resolved.source.kind.to_string(),
+            source_path: resolved.source.path.display().to_string(),
+            timeouts: TimeoutJson::from_timeouts(resolved.timeouts),
+        }
+    }
+}
+
+/// タイムアウト設定の JSON 表現を保持する
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TimeoutJson {
+    connect_timeout_seconds: u32,
+    server_alive_interval_seconds: u32,
+    server_alive_count_max: u32,
+    start_grace_milliseconds: u64,
+}
+
+impl TimeoutJson {
+    /// 解決済みタイムアウトから JSON 用の値を生成する
+    fn from_timeouts(timeouts: ResolvedTimeoutConfig) -> Self {
+        Self {
+            connect_timeout_seconds: timeouts.connect_timeout_seconds,
+            server_alive_interval_seconds: timeouts.server_alive_interval_seconds,
+            server_alive_count_max: timeouts.server_alive_count_max,
+            start_grace_milliseconds: timeouts.start_grace_milliseconds,
+        }
+    }
+}
+
+/// start --dry-run の JSON 出力を表現する
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartDryRunJson {
+    dry_run: bool,
+    state_file: String,
+    tunnels: Vec<StartDryRunTunnelJson>,
+}
+
+impl StartDryRunJson {
+    /// 開始予定トンネルから JSON 出力を生成する
+    fn from_tunnels(tunnels: &[&ResolvedTunnelConfig], state_path: &Path) -> Self {
+        Self {
+            dry_run: true,
+            state_file: state_path.display().to_string(),
+            tunnels: tunnels
+                .iter()
+                .map(|resolved| StartDryRunTunnelJson::from_resolved_tunnel(resolved))
+                .collect(),
+        }
+    }
+}
+
+/// start --dry-run のトンネル単位 JSON 表現を保持する
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartDryRunTunnelJson {
+    tunnel: TunnelJson,
+    command: String,
+    args: Vec<String>,
+}
+
+impl StartDryRunTunnelJson {
+    /// 統合済みトンネルから開始予定の JSON 表現を生成する
+    fn from_resolved_tunnel(resolved: &ResolvedTunnelConfig) -> Self {
+        let args = build_ssh_command_args(resolved);
+
+        Self {
+            tunnel: TunnelJson::from_resolved_tunnel(resolved),
+            command: format_ssh_command(&args),
+            args,
+        }
+    }
+}
+
+/// status の JSON 出力を表現する
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusJson {
+    state_file: String,
+    statuses: Vec<StatusTunnelJson>,
+}
+
+impl StatusJson {
+    /// 実行状態一覧から JSON 出力を生成する
+    fn from_statuses(state_path: &Path, statuses: &[&TunnelRuntimeStatus], now: u64) -> Self {
+        Self {
+            state_file: state_path.display().to_string(),
+            statuses: statuses
+                .iter()
+                .map(|status| StatusTunnelJson::from_status(status, now))
+                .collect(),
+        }
+    }
+}
+
+/// status のトンネル単位 JSON 表現を保持する
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusTunnelJson {
+    id: String,
+    pid: u32,
+    process_state: String,
+    local_host: String,
+    local_port: u16,
+    local: String,
+    remote_host: String,
+    remote_port: u16,
+    remote: String,
+    ssh_user: String,
+    ssh_host: String,
+    ssh_port: Option<u16>,
+    source: String,
+    source_path: String,
+    started_at_unix_seconds: u64,
+    started: String,
+}
+
+impl StatusTunnelJson {
+    /// 実行状態から JSON 用の値を生成する
+    fn from_status(status: &TunnelRuntimeStatus, now: u64) -> Self {
+        let state = &status.state;
+
+        Self {
+            id: state.id.clone(),
+            pid: state.pid,
+            process_state: process_state_plain_label(status.process_state).to_ascii_lowercase(),
+            local_host: state.local_host.clone(),
+            local_port: state.local_port,
+            local: format_status_local_endpoint(state),
+            remote_host: state.remote_host.clone(),
+            remote_port: state.remote_port,
+            remote: format_status_remote_endpoint(state),
+            ssh_user: state.ssh_user.clone(),
+            ssh_host: state.ssh_host.clone(),
+            ssh_port: state.ssh_port,
+            source: state.source_kind.to_string(),
+            source_path: state.source_path.display().to_string(),
+            started_at_unix_seconds: state.started_at_unix_seconds,
+            started: relative_time_label(state.started_at_unix_seconds, now),
+        }
+    }
+}
+
+/// validate の JSON 出力を表現する
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidationJson {
+    has_config: bool,
+    is_valid: bool,
+    errors: Vec<ValidationIssueJson>,
+    warnings: Vec<ValidationIssueJson>,
+}
+
+impl ValidationJson {
+    /// 検証結果から JSON 出力を生成する
+    fn from_report(has_config: bool, report: &ValidationReport) -> Self {
+        Self {
+            has_config,
+            is_valid: has_config && report.is_valid(),
+            errors: report
+                .errors
+                .iter()
+                .map(ValidationIssueJson::from_error)
+                .collect(),
+            warnings: report
+                .warnings
+                .iter()
+                .map(ValidationIssueJson::from_warning)
+                .collect(),
+        }
+    }
+}
+
+/// validate の issue JSON 表現を保持する
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidationIssueJson {
+    source: String,
+    path: String,
+    tunnel_id: Option<String>,
+    message: String,
+}
+
+impl ValidationIssueJson {
+    /// 検証エラーから JSON 用の値を生成する
+    fn from_error(error: &fwd_deck_core::ValidationError) -> Self {
+        Self {
+            source: error.source.kind.to_string(),
+            path: error.source.path.display().to_string(),
+            tunnel_id: error.tunnel_id.clone(),
+            message: error.message.clone(),
+        }
+    }
+
+    /// 検証警告から JSON 用の値を生成する
+    fn from_warning(warning: &fwd_deck_core::ValidationWarning) -> Self {
+        Self {
+            source: warning.source.kind.to_string(),
+            path: warning.source.path.display().to_string(),
+            tunnel_id: warning.tunnel_id.clone(),
+            message: warning.message.clone(),
+        }
+    }
+}
+
 /// 失敗有無から終了コードを取得する
 fn exit_code_from_failure(failed: bool) -> ExitCode {
     if failed {
@@ -1942,6 +3160,21 @@ fn exit_code_from_failure(failed: bool) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// 設定検証の結果を表示する
+fn validate_command(config: &EffectiveConfig, json: bool) -> Result<ExitCode, CliError> {
+    if json {
+        let report = validate_config(config);
+        print_json(&ValidationJson::from_report(config.has_sources(), &report))?;
+        return Ok(if config.has_sources() && report.is_valid() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
+    Ok(print_validation(config))
 }
 
 /// 設定検証の結果を表示する
@@ -2036,6 +3269,29 @@ impl ScopeChoice {
 }
 
 impl Display for ScopeChoice {
+    /// 選択肢の表示文字列を出力する
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.label)
+    }
+}
+
+/// 編集対象の選択肢を表現する
+#[derive(Debug, Clone)]
+struct EditTargetChoice {
+    target: ConfigEditTarget,
+    label: String,
+}
+
+impl EditTargetChoice {
+    /// 編集対象から選択肢を生成する
+    fn new(target: ConfigEditTarget) -> Self {
+        let label = format!("{} ({})", target.scope, target.path.display());
+
+        Self { target, label }
+    }
+}
+
+impl Display for EditTargetChoice {
     /// 選択肢の表示文字列を出力する
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.label)

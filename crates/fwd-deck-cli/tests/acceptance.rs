@@ -58,6 +58,21 @@ fn list_query_matches_description() {
     output.assert_stdout_not_contains("dev-db");
 }
 
+/// list --json が設定済みトンネルを JSON で表示することを検証する
+#[test]
+fn list_json_outputs_configured_tunnels() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(valid_config());
+
+    let output = workspace.run(["--json", "list", "--query", "cache"]);
+
+    assert!(output.status.success());
+    let json = output.stdout_json();
+    assert_eq!(json["hasConfig"], true);
+    assert_eq!(json["tunnels"][0]["id"], "prod-cache");
+    assert_eq!(json["tunnels"][0]["localPort"], 16379);
+}
+
 /// list --wide が REMOTE の省略有無を切り替えることを検証する
 #[test]
 fn list_wide_displays_full_remote_host() {
@@ -119,6 +134,26 @@ fn validate_succeeds_for_valid_config() {
     output.assert_stdout_contains("Configuration is valid.");
 }
 
+/// validate --json が検証結果を JSON で表示することを検証する
+#[test]
+fn validate_json_outputs_validation_report() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(valid_config());
+
+    let output = workspace.run(["--json", "validate"]);
+
+    assert!(output.status.success());
+    let json = output.stdout_json();
+    assert_eq!(json["hasConfig"], true);
+    assert_eq!(json["isValid"], true);
+    assert!(
+        json["errors"]
+            .as_array()
+            .expect("errors is array")
+            .is_empty()
+    );
+}
+
 /// validate が重複 local_port を失敗として扱うことを検証する
 #[test]
 fn validate_fails_for_duplicate_local_port() {
@@ -153,6 +188,34 @@ fn start_dry_run_prints_plan_without_writing_state() {
     assert!(!workspace.state_path().exists());
 }
 
+/// start --dry-run --json が開始予定を JSON で表示することを検証する
+#[test]
+fn start_dry_run_json_outputs_plan_without_writing_state() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(valid_config());
+
+    let output = workspace.run([
+        "--state",
+        workspace.state_path_str(),
+        "--json",
+        "start",
+        "dev-db",
+        "--dry-run",
+    ]);
+
+    assert!(output.status.success());
+    let json = output.stdout_json();
+    assert_eq!(json["dryRun"], true);
+    assert_eq!(json["tunnels"][0]["tunnel"]["id"], "dev-db");
+    assert!(
+        json["tunnels"][0]["command"]
+            .as_str()
+            .expect("command is string")
+            .starts_with("ssh ")
+    );
+    assert!(!workspace.state_path().exists());
+}
+
 /// start --all --dry-run が ID 昇順で開始予定を表示することを検証する
 #[test]
 fn start_all_dry_run_sorts_tunnels_by_id() {
@@ -184,6 +247,74 @@ fn start_fails_when_id_and_tag_are_combined() {
 
     assert!(!output.status.success());
     output.assert_stderr_contains("Cannot combine tunnel IDs with --tag.");
+}
+
+/// --help が日本語の概要、主要コマンド、代表例を表示することを検証する
+#[test]
+fn help_displays_japanese_overview_commands_and_examples() {
+    let workspace = TestWorkspace::new();
+
+    let output = workspace.run(["--help"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("設定ファイルに定義したポートフォワーディングを操作する");
+    output.assert_stdout_contains("設定済みトンネルを一覧表示する");
+    output.assert_stdout_contains("設定ファイルを検証する");
+    output.assert_stdout_contains("fwd-deck start dev-db --dry-run");
+}
+
+/// start --help が対話選択、排他制約、dry-run の説明を表示することを検証する
+#[test]
+fn start_help_displays_selection_constraints_and_dry_run_note() {
+    let workspace = TestWorkspace::new();
+
+    let output = workspace.run(["start", "--help"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("ID を省略すると対話選択を表示します。");
+    output.assert_stdout_contains("--all、ID、--tag は同時に指定できません。");
+    output.assert_stdout_contains("--dry-run は SSH を起動せず、状態ファイルも更新しません。");
+}
+
+/// list --help が tag、query、wide の説明を表示することを検証する
+#[test]
+fn list_help_displays_filter_and_wide_notes() {
+    let workspace = TestWorkspace::new();
+
+    let output = workspace.run(["list", "--help"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("--tag は複数指定でき");
+    output.assert_stdout_contains("--query は ID と description");
+    output.assert_stdout_contains("--wide は REMOTE の host 部分を省略せずに表示します。");
+}
+
+/// config add --help が scope 省略時の対話選択を表示することを検証する
+#[test]
+fn config_add_help_displays_scope_selection_note() {
+    let workspace = TestWorkspace::new();
+
+    let output = workspace.run(["config", "add", "--help"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains(
+        "--scope を省略すると、編集する local または global 設定を対話選択します。",
+    );
+    output.assert_stdout_contains(
+        "local は ./fwd-deck.toml、global は ~/.config/fwd-deck/config.toml",
+    );
+}
+
+/// doctor が設定ファイルなしを失敗として診断することを検証する
+#[test]
+fn doctor_fails_when_configuration_is_missing() {
+    let workspace = TestWorkspace::new();
+
+    let output = workspace.run(["--state", workspace.state_path_str(), "doctor"]);
+
+    assert!(!output.status.success());
+    output.assert_stdout_contains("Doctor report");
+    output.assert_stdout_contains("[ERROR] Configuration files");
 }
 
 struct TestWorkspace {
@@ -299,6 +430,16 @@ impl CommandOutput {
 
             offset += index + expected.len();
         }
+    }
+
+    /// stdout を JSON として解析する
+    fn stdout_json(&self) -> serde_json::Value {
+        serde_json::from_str(&self.stdout).unwrap_or_else(|error| {
+            panic!(
+                "stdout was not valid JSON: {error}\nstdout:\n{}\nstderr:\n{}",
+                self.stdout, self.stderr
+            )
+        })
     }
 }
 

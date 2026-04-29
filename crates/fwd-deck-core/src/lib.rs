@@ -12,7 +12,7 @@ pub use config::{
     ValidationReport, ValidationWarning, add_tunnel_to_config_file, default_global_config_path,
     default_local_config_path, filter_tunnels_by_tags, load_effective_config, normalize_tag,
     normalize_tags, read_config_file, remove_tunnel_from_config_file, tag_is_valid,
-    tunnel_matches_tags, validate_config,
+    tunnel_matches_tags, update_tunnel_in_config_file, validate_config,
 };
 pub use state::{StateFileError, TunnelState, TunnelStateFile, default_state_file_path};
 pub use tunnel::{

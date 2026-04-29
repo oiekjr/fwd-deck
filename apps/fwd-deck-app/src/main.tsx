@@ -35,6 +35,7 @@ import {
   ListFilter,
   Loader2,
   Minus,
+  Pencil,
   Play,
   RefreshCw,
   Rows3,
@@ -92,6 +93,7 @@ type AppCommand =
   | "start_tunnels"
   | "stop_tunnels"
   | "add_tunnel_entry"
+  | "update_tunnel_entry"
   | "remove_tunnel_entry"
   | "remove_workspace_history_entry"
   | "refresh_tray_menu";
@@ -151,9 +153,17 @@ interface TunnelView {
   id: string;
   description: string | null;
   tags: string[];
+  localHost: string;
+  localPort: number;
   local: string;
+  remoteHost: string;
+  remotePort: number;
   remote: string;
+  sshUser: string;
+  sshHost: string;
+  sshPort: number | null;
   ssh: string;
+  identityFile: string | null;
   source: ConfigScope;
   sourcePath: string;
   timeouts: TimeoutView;
@@ -371,6 +381,8 @@ function App(): ReactElement {
   const [settingsDraft, setSettingsDraft] = useState<WorkspaceSelection | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<TunnelView | null>(null);
+  const [editTarget, setEditTarget] = useState<TunnelView | null>(null);
+  const [editForm, setEditForm] = useState<TunnelFormState>(initialForm);
   const [message, setMessage] = useState<AppMessage | null>(null);
   const [operationToast, setOperationToast] = useState<OperationToastMessage | null>(null);
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
@@ -843,6 +855,50 @@ function App(): ReactElement {
   }
 
   /**
+   * 設定ファイル内の既存トンネルを更新する
+   */
+  async function submitEditedTunnel(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+
+    if (editTarget === null) {
+      return;
+    }
+
+    let tunnel: TunnelInput;
+    try {
+      tunnel = formToTunnelInput(editForm);
+    } catch (error) {
+      showOperationToast({ kind: "error", summary: stringifyError(error) });
+      return;
+    }
+
+    setIsBusy(true);
+
+    try {
+      const loaded = await invokeCommand<DashboardState>("update_tunnel_entry", {
+        paths: normalizeWorkspaceSelection(paths),
+        scope: editTarget.source,
+        id: editTarget.id,
+        tunnel,
+      });
+
+      if (hasActiveTunnelFilters(filters)) {
+        captureResultScrollPosition();
+      }
+
+      setDashboard(loaded);
+      setPaths(loaded.paths);
+      setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
+      setEditTarget(null);
+      showOperationToast({ kind: "success", summary: `${tunnel.id} を設定に反映しました` });
+    } catch (error) {
+      showOperationToast({ kind: "error", summary: stringifyError(error) });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  /**
    * 設定ファイルからトンネルを削除する
    */
   async function removeTunnel(tunnel: TunnelView): Promise<void> {
@@ -1086,6 +1142,27 @@ function App(): ReactElement {
   }
 
   /**
+   * ファイル選択ダイアログの結果を編集フォームの identity_file 入力へ反映する
+   */
+  async function browseEditIdentityFile(): Promise<void> {
+    try {
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        defaultPath: await identityFileDialogDefaultPath(),
+      });
+
+      if (typeof selected !== "string") {
+        return;
+      }
+
+      updateEditForm("identityFile", selected);
+    } catch (error) {
+      showOperationToast({ kind: "error", summary: stringifyError(error) });
+    }
+  }
+
+  /**
    * 履歴から選択したワークスペースを未適用入力へ反映する
    */
   function selectWorkspaceFromHistory(workspacePath: string): void {
@@ -1119,6 +1196,21 @@ function App(): ReactElement {
    */
   function updateForm(field: keyof TunnelFormState, value: string): void {
     setForm((current) => ({ ...current, [field]: value }));
+  }
+
+  /**
+   * 編集フォームの変更を反映する
+   */
+  function updateEditForm(field: keyof TunnelFormState, value: string): void {
+    setEditForm((current) => ({ ...current, [field]: value }));
+  }
+
+  /**
+   * 指定トンネルを編集対象として開く
+   */
+  function openEditTunnel(tunnel: TunnelView): void {
+    setEditTarget(tunnel);
+    setEditForm(formFromTunnel(tunnel));
   }
 
   /**
@@ -1222,6 +1314,7 @@ function App(): ReactElement {
               onStartTunnel={(id) => void startSelected([id])}
               onStopTunnel={(id) => void stopSelected([id])}
               onStopTracked={(target) => void stopTracked(target)}
+              onEditTunnel={openEditTunnel}
               onRemoveTunnel={setDeleteTarget}
               onAddTunnel={() => setActiveView("add")}
             />
@@ -1255,6 +1348,15 @@ function App(): ReactElement {
         isBusy={isBusy}
         onCancel={() => setDeleteTarget(null)}
         onConfirm={(tunnel) => void removeTunnel(tunnel)}
+      />
+      <EditTunnelModal
+        tunnel={editTarget}
+        form={editForm}
+        isBusy={isBusy}
+        onChange={updateEditForm}
+        onCancel={() => setEditTarget(null)}
+        onSubmit={(event) => void submitEditedTunnel(event)}
+        onBrowseIdentityFile={() => void browseEditIdentityFile()}
       />
       <ToastViewport toast={operationToast} onDismiss={dismissOperationToast} />
     </main>
@@ -1674,6 +1776,7 @@ interface DashboardViewProps {
   onStartTunnel: (id: string) => void;
   onStopTunnel: (id: string) => void;
   onStopTracked: (target: OperationTarget) => void;
+  onEditTunnel: (tunnel: TunnelView) => void;
   onRemoveTunnel: (tunnel: TunnelView) => void;
   onAddTunnel: () => void;
 }
@@ -1709,6 +1812,7 @@ function DashboardView({
   onStartTunnel,
   onStopTunnel,
   onStopTracked,
+  onEditTunnel,
   onRemoveTunnel,
   onAddTunnel,
 }: DashboardViewProps): ReactElement {
@@ -1767,6 +1871,7 @@ function DashboardView({
         onToggle={onToggleSelection}
         onStart={onStartTunnel}
         onStop={onStopTunnel}
+        onEdit={onEditTunnel}
         onRemove={onRemoveTunnel}
         onAddTunnel={onAddTunnel}
         onResetFilters={onResetFilters}
@@ -2793,6 +2898,7 @@ interface TunnelDeckProps {
   onToggle: (id: string) => void;
   onStart: (id: string) => void;
   onStop: (id: string) => void;
+  onEdit: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
   onAddTunnel: () => void;
   onResetFilters: () => void;
@@ -2813,6 +2919,7 @@ function TunnelDeck({
   onToggle,
   onStart,
   onStop,
+  onEdit,
   onRemove,
   onAddTunnel,
   onResetFilters,
@@ -2871,6 +2978,7 @@ function TunnelDeck({
         onToggle={onToggle}
         onStart={onStart}
         onStop={onStop}
+        onEdit={onEdit}
         onRemove={onRemove}
       />
     );
@@ -2888,6 +2996,7 @@ function TunnelDeck({
           onToggle={onToggle}
           onStart={onStart}
           onStop={onStop}
+          onEdit={onEdit}
           onRemove={onRemove}
         />
       ))}
@@ -2903,6 +3012,7 @@ interface TunnelSlimListProps {
   onToggle: (id: string) => void;
   onStart: (id: string) => void;
   onStop: (id: string) => void;
+  onEdit: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
 }
 
@@ -2917,6 +3027,7 @@ function TunnelSlimList({
   onToggle,
   onStart,
   onStop,
+  onEdit,
   onRemove,
 }: TunnelSlimListProps): ReactElement {
   return (
@@ -2945,6 +3056,7 @@ function TunnelSlimList({
                   onToggle={onToggle}
                   onStart={onStart}
                   onStop={onStop}
+                  onEdit={onEdit}
                   onRemove={onRemove}
                 />
               ))}
@@ -2964,6 +3076,7 @@ interface TunnelSlimRowProps {
   onToggle: (id: string) => void;
   onStart: (id: string) => void;
   onStop: (id: string) => void;
+  onEdit: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
 }
 
@@ -2978,6 +3091,7 @@ function TunnelSlimRow({
   onToggle,
   onStart,
   onStop,
+  onEdit,
   onRemove,
 }: TunnelSlimRowProps): ReactElement {
   const running = tunnel.status?.state === "running";
@@ -3042,6 +3156,14 @@ function TunnelSlimRow({
             Stop
           </HeroButton>
           <IconButton
+            label="設定を編集"
+            variant="ghost"
+            onPress={() => onEdit(tunnel)}
+            disabled={isBusy}
+          >
+            <Pencil size={14} />
+          </IconButton>
+          <IconButton
             label="設定から削除"
             variant="danger-soft"
             onPress={() => onRemove(tunnel)}
@@ -3087,6 +3209,7 @@ interface TunnelCardProps {
   onToggle: (id: string) => void;
   onStart: (id: string) => void;
   onStop: (id: string) => void;
+  onEdit: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
 }
 
@@ -3101,6 +3224,7 @@ function TunnelCard({
   onToggle,
   onStart,
   onStop,
+  onEdit,
   onRemove,
 }: TunnelCardProps): ReactElement {
   const running = tunnel.status?.state === "running";
@@ -3177,6 +3301,14 @@ function TunnelCard({
             <CircleStop size={15} />
             Stop
           </HeroButton>
+          <IconButton
+            label="設定を編集"
+            variant="ghost"
+            onPress={() => onEdit(tunnel)}
+            disabled={isBusy}
+          >
+            <Pencil size={16} />
+          </IconButton>
           <IconButton
             label="設定から削除"
             variant="danger-soft"
@@ -3758,6 +3890,192 @@ interface ConfirmRemoveModalProps {
   onConfirm: (tunnel: TunnelView) => void;
 }
 
+interface EditTunnelModalProps {
+  tunnel: TunnelView | null;
+  form: TunnelFormState;
+  isBusy: boolean;
+  onChange: (field: keyof TunnelFormState, value: string) => void;
+  onCancel: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onBrowseIdentityFile: () => void;
+}
+
+/**
+ * 既存トンネル設定の編集モーダルを表示する
+ */
+function EditTunnelModal({
+  tunnel,
+  form,
+  isBusy,
+  onChange,
+  onCancel,
+  onSubmit,
+  onBrowseIdentityFile,
+}: EditTunnelModalProps): ReactElement | null {
+  if (tunnel === null) {
+    return null;
+  }
+
+  return (
+    <Modal
+      isOpen
+      onOpenChange={(open) => {
+        if (!open && !isBusy) {
+          onCancel();
+        }
+      }}
+    >
+      <Modal.Backdrop variant="blur" isDismissable={!isBusy}>
+        <Modal.Container placement="center" scroll="inside" size="lg" className="px-4 py-4 sm:px-6">
+          <Modal.Dialog className="w-full max-w-5xl overflow-hidden border border-border bg-card p-0">
+            <form onSubmit={onSubmit}>
+              <div className="flex flex-col gap-3 border-b border-border px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <Pencil className="text-primary" size={18} />
+                    <h3 className="text-base font-semibold">Edit tunnel</h3>
+                    <Chip color="accent" size="sm" variant="soft">
+                      {tunnel.source}
+                    </Chip>
+                  </div>
+                  <p className="mt-1 truncate font-mono text-xs text-foreground/55">
+                    {tunnel.sourcePath}
+                  </p>
+                </div>
+              </div>
+
+              <div className="max-h-[calc(100vh-13rem)] overflow-y-auto bg-background/70 p-4">
+                <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+                  <TunnelDraftSummary form={form} />
+                  <section className="flex flex-col gap-3">
+                    <h4 className="text-xs font-bold uppercase tracking-wide text-foreground/50">
+                      Identity
+                    </h4>
+                    <TextField
+                      label="ID"
+                      value={form.id}
+                      onChange={(value) => onChange("id", value)}
+                      required
+                    />
+                    <TextField
+                      label="Description"
+                      value={form.description}
+                      onChange={(value) => onChange("description", value)}
+                    />
+                    <TextField
+                      label="Tags"
+                      value={form.tags}
+                      onChange={(value) => onChange("tags", value)}
+                      placeholder="dev,project-a"
+                    />
+                  </section>
+
+                  <section className="flex flex-col gap-3 border-t border-border pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-4">
+                    <h4 className="text-xs font-bold uppercase tracking-wide text-foreground/50">
+                      Routing
+                    </h4>
+                    <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+                      <TextField
+                        label="Local host"
+                        value={form.localHost}
+                        onChange={(value) => onChange("localHost", value)}
+                        required
+                      />
+                      <TextField
+                        label="Local port"
+                        value={form.localPort}
+                        onChange={(value) => onChange("localPort", value)}
+                        inputMode="numeric"
+                        required
+                      />
+                    </div>
+                    <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+                      <TextField
+                        label="Remote host"
+                        value={form.remoteHost}
+                        onChange={(value) => onChange("remoteHost", value)}
+                        required
+                      />
+                      <TextField
+                        label="Remote port"
+                        value={form.remotePort}
+                        onChange={(value) => onChange("remotePort", value)}
+                        inputMode="numeric"
+                        required
+                      />
+                    </div>
+                  </section>
+
+                  <section className="flex flex-col gap-3 border-t border-border pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-4">
+                    <h4 className="text-xs font-bold uppercase tracking-wide text-foreground/50">
+                      SSH
+                    </h4>
+                    <TextField
+                      label="SSH user"
+                      value={form.sshUser}
+                      onChange={(value) => onChange("sshUser", value)}
+                      required
+                    />
+                    <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+                      <TextField
+                        label="SSH host"
+                        value={form.sshHost}
+                        onChange={(value) => onChange("sshHost", value)}
+                        required
+                      />
+                      <TextField
+                        label="SSH port"
+                        value={form.sshPort}
+                        onChange={(value) => onChange("sshPort", value)}
+                        inputMode="numeric"
+                      />
+                    </div>
+                    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
+                      <TextField
+                        label="Identity file"
+                        value={form.identityFile}
+                        onChange={(value) => onChange("identityFile", value)}
+                        placeholder="~/.ssh/id_ed25519"
+                      />
+                      <HeroButton
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="mb-0"
+                        onPress={onBrowseIdentityFile}
+                        isDisabled={isBusy}
+                      >
+                        <FolderOpen size={15} />
+                        Browse
+                      </HeroButton>
+                    </div>
+                  </section>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 border-t border-border px-5 py-4">
+                <HeroButton
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onPress={onCancel}
+                  isDisabled={isBusy}
+                >
+                  Cancel
+                </HeroButton>
+                <HeroButton type="submit" variant="primary" size="sm" isDisabled={isBusy}>
+                  <Pencil size={16} />
+                  Save
+                </HeroButton>
+              </div>
+            </form>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+    </Modal>
+  );
+}
+
 /**
  * トンネル設定削除の確認モーダルを表示する
  */
@@ -4053,6 +4371,26 @@ function formToTunnelInput(form: TunnelFormState): TunnelInput {
     sshHost: requireText(form.sshHost, "SSH host"),
     sshPort: parsePort(form.sshPort, "SSH port", false),
     identityFile: optionalText(form.identityFile),
+  };
+}
+
+/**
+ * 表示用トンネルを編集フォームの初期値へ変換する
+ */
+function formFromTunnel(tunnel: TunnelView): TunnelFormState {
+  return {
+    scope: tunnel.source,
+    id: tunnel.id,
+    description: tunnel.description ?? "",
+    tags: tunnel.tags.join(","),
+    localHost: tunnel.localHost,
+    localPort: tunnel.localPort.toString(),
+    remoteHost: tunnel.remoteHost,
+    remotePort: tunnel.remotePort.toString(),
+    sshUser: tunnel.sshUser,
+    sshHost: tunnel.sshHost,
+    sshPort: tunnel.sshPort?.toString() ?? "",
+    identityFile: tunnel.identityFile ?? "",
   };
 }
 

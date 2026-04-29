@@ -57,9 +57,11 @@ cp fwd-deck.example.toml fwd-deck.toml
 
 ```sh
 fwd-deck validate
+fwd-deck doctor
 ```
 
 エラーが表示された場合は、対象のフィールドを修正してから再度検証します。  
+`doctor` は設定だけでなく、SSHコマンド、状態ファイル、秘密鍵、local endpoint の状態も確認します。  
 
 ## List Tunnels
 

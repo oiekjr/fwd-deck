@@ -9,6 +9,7 @@ license.workspace = true
 tauri-build.workspace = true
 
 [dependencies]
+fwd-deck-cli = { path = "../../../crates/fwd-deck-cli" }
 fwd-deck-core = { path = "../../../crates/fwd-deck-core" }
 serde.workspace = true
 tauri = { workspace = true, features = ["image-png", "tray-icon"] }

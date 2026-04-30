@@ -1070,6 +1070,7 @@ dependencies = [
 name = "fwd-deck-app"
 version = "0.3.4"
 dependencies = [
+ "fwd-deck-cli",
  "fwd-deck-core",
  "objc2",
  "objc2-app-kit",

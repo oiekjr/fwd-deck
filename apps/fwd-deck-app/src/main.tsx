@@ -33,6 +33,7 @@ import {
   Gauge,
   KeyRound,
   LayoutGrid,
+  Link2,
   ListFilter,
   Loader2,
   Minus,
@@ -45,6 +46,8 @@ import {
   Settings2,
   Star,
   Trash2,
+  Terminal,
+  Unlink,
   X,
 } from "lucide-react";
 import {
@@ -88,6 +91,13 @@ type HeroButtonSize = "lg" | "md" | "sm";
 
 type AlertStatus = "accent" | "danger" | "success" | "warning";
 
+type CliIntegrationStatus =
+  | "installed"
+  | "missing"
+  | "conflict"
+  | "unavailable"
+  | "permissionDenied";
+
 type AppCommand =
   | "load_dashboard"
   | "switch_workspace"
@@ -100,6 +110,9 @@ type AppCommand =
   | "set_tunnel_favorite"
   | "set_tunnel_auto_recover"
   | "remove_workspace_history_entry"
+  | "load_cli_integration"
+  | "install_cli_integration"
+  | "remove_cli_integration"
   | "refresh_tray_menu";
 
 interface WorkspaceSelection {
@@ -141,6 +154,17 @@ interface DashboardState {
 interface WorkspaceSwitchResult {
   dashboard: DashboardState;
   stoppedCount: number;
+}
+
+interface CliIntegrationState {
+  status: CliIntegrationStatus;
+  installPath: string;
+  targetPath: string;
+  message: string;
+  canInstall: boolean;
+  canRemove: boolean;
+  manualInstallCommand: string | null;
+  manualRemoveCommand: string | null;
 }
 
 interface ValidationView {
@@ -472,10 +496,12 @@ function App(): ReactElement {
   const [duplicateFormFeedback, setDuplicateFormFeedback] = useState<AppMessage | null>(null);
   const [message, setMessage] = useState<AppMessage | null>(null);
   const [operationToast, setOperationToast] = useState<OperationToastMessage | null>(null);
+  const [cliIntegration, setCliIntegration] = useState<CliIntegrationState | null>(null);
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
   const [runtimeNowUnixSeconds, setRuntimeNowUnixSeconds] = useState<number>(0);
   const [favoriteUpdatingIds, setFavoriteUpdatingIds] = useState<Set<string>>(new Set());
   const [autoRecoverUpdatingIds, setAutoRecoverUpdatingIds] = useState<Set<string>>(new Set());
+  const [isCliIntegrationBusy, setIsCliIntegrationBusy] = useState<boolean>(false);
   const [isBusy, setIsBusy] = useState<boolean>(false);
   const [hasCompletedInitialLoad, setHasCompletedInitialLoad] = useState<boolean>(false);
   const autoRefreshInFlightRef = useRef<boolean>(false);
@@ -524,6 +550,84 @@ function App(): ReactElement {
   const dismissOperationToast = useCallback((): void => {
     setOperationToast(null);
   }, []);
+
+  /**
+   * CLI integration の状態を読み込む
+   */
+  const loadCliIntegration = useCallback(
+    async (silent = false): Promise<CliIntegrationState | null> => {
+      if (!isTauriRuntimeAvailable()) {
+        return null;
+      }
+
+      if (!silent) {
+        setIsCliIntegrationBusy(true);
+      }
+
+      try {
+        const loaded = await invokeCommand<CliIntegrationState>("load_cli_integration", {});
+        setCliIntegration(loaded);
+        return loaded;
+      } catch (error) {
+        if (!silent) {
+          showOperationToast({ kind: "error", summary: stringifyError(error) });
+        }
+
+        return null;
+      } finally {
+        if (!silent) {
+          setIsCliIntegrationBusy(false);
+        }
+      }
+    },
+    [showOperationToast],
+  );
+
+  /**
+   * CLI integration の変更操作を実行する
+   */
+  const runCliIntegrationCommand = useCallback(
+    async (command: "install_cli_integration" | "remove_cli_integration"): Promise<void> => {
+      if (!isTauriRuntimeAvailable() || isCliIntegrationBusy) {
+        return;
+      }
+
+      setIsCliIntegrationBusy(true);
+
+      try {
+        const loaded = await invokeCommand<CliIntegrationState>(command, {});
+        setCliIntegration(loaded);
+
+        if (loaded.status === "permissionDenied") {
+          showOperationToast({ kind: "info", summary: loaded.message });
+        } else if (loaded.status === "conflict" || loaded.status === "unavailable") {
+          showOperationToast({ kind: "error", summary: loaded.message });
+        } else {
+          showOperationToast({ kind: "success", summary: loaded.message });
+        }
+      } catch (error) {
+        showOperationToast({ kind: "error", summary: stringifyError(error) });
+      } finally {
+        setIsCliIntegrationBusy(false);
+      }
+    },
+    [isCliIntegrationBusy, showOperationToast],
+  );
+
+  /**
+   * CLI integration の手動コマンドをクリップボードへコピーする
+   */
+  const copyCliIntegrationCommand = useCallback(
+    async (command: string): Promise<void> => {
+      try {
+        await navigator.clipboard.writeText(command);
+        showOperationToast({ kind: "success", summary: "CLI command をコピーしました" });
+      } catch (error) {
+        showOperationToast({ kind: "error", summary: stringifyError(error) });
+      }
+    },
+    [showOperationToast],
+  );
 
   const captureResultScrollPosition = useCallback((): void => {
     resultScrollSnapshotRef.current = createViewportScrollSnapshot();
@@ -606,6 +710,7 @@ function App(): ReactElement {
       if (isSettingsKeyboardShortcut(event)) {
         event.preventDefault();
         setSettingsDraft((current) => current ?? paths);
+        void loadCliIntegration(true);
         return;
       }
 
@@ -630,7 +735,7 @@ function App(): ReactElement {
     window.addEventListener("keydown", handleKeyDown);
 
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeView, deleteTarget, editTarget, isBusy, paths, settingsDraft]);
+  }, [activeView, deleteTarget, editTarget, isBusy, loadCliIntegration, paths, settingsDraft]);
 
   useEffect(() => {
     if (operationToast === null) {
@@ -698,6 +803,7 @@ function App(): ReactElement {
 
     void listen<void>(openSettingsEventName, () => {
       setSettingsDraft((current) => current ?? paths);
+      void loadCliIntegration(true);
     })
       .then((nextUnlisten) => {
         if (isDisposed) {
@@ -713,7 +819,7 @@ function App(): ReactElement {
       isDisposed = true;
       unlisten?.();
     };
-  }, [paths]);
+  }, [loadCliIntegration, paths]);
 
   /**
    * 現在のパス設定に基づいてダッシュボードを再取得する
@@ -1323,6 +1429,7 @@ function App(): ReactElement {
    */
   function openSettings(): void {
     setSettingsDraft((current) => current ?? paths);
+    void loadCliIntegration(true);
   }
 
   /**
@@ -1672,6 +1779,18 @@ function App(): ReactElement {
   const handleRemoveWorkspaceHistoryEntry = useStableEvent((workspacePath: string): void => {
     void removeWorkspaceHistoryEntry(workspacePath);
   });
+  const handleRefreshCliIntegration = useStableEvent((): void => {
+    void loadCliIntegration();
+  });
+  const handleInstallCliIntegration = useStableEvent((): void => {
+    void runCliIntegrationCommand("install_cli_integration");
+  });
+  const handleRemoveCliIntegration = useStableEvent((): void => {
+    void runCliIntegrationCommand("remove_cli_integration");
+  });
+  const handleCopyCliIntegrationCommand = useStableEvent((command: string): void => {
+    void copyCliIntegrationCommand(command);
+  });
   const handleRemoveTunnel = useStableEvent((tunnel: TunnelView): void => {
     void removeTunnel(tunnel);
   });
@@ -1768,8 +1887,10 @@ function App(): ReactElement {
       <SettingsModal
         isOpen={settingsDraft !== null}
         paths={settingsDraft ?? paths}
+        cliIntegration={cliIntegration}
         homePath={homePath}
         isBusy={isBusy}
+        isCliIntegrationBusy={isCliIntegrationBusy}
         onCancel={closeSettings}
         onApply={handleApplySettings}
         onChange={updateSettingsDraft}
@@ -1777,6 +1898,10 @@ function App(): ReactElement {
         onBrowseGlobalConfig={handleBrowseGlobalConfig}
         onSelectWorkspace={selectWorkspaceFromHistory}
         onRemoveWorkspace={handleRemoveWorkspaceHistoryEntry}
+        onRefreshCliIntegration={handleRefreshCliIntegration}
+        onInstallCliIntegration={handleInstallCliIntegration}
+        onRemoveCliIntegration={handleRemoveCliIntegration}
+        onCopyCliIntegrationCommand={handleCopyCliIntegrationCommand}
       />
       <ConfirmRemoveModal
         tunnel={deleteTarget}
@@ -2461,8 +2586,10 @@ function AddTunnelView({
 interface SettingsModalProps {
   isOpen: boolean;
   paths: WorkspaceSelection;
+  cliIntegration: CliIntegrationState | null;
   homePath: string | null;
   isBusy: boolean;
+  isCliIntegrationBusy: boolean;
   onChange: (field: keyof WorkspaceSelection, value: string | boolean) => void;
   onApply: () => void;
   onCancel: () => void;
@@ -2470,6 +2597,10 @@ interface SettingsModalProps {
   onBrowseGlobalConfig: () => void;
   onSelectWorkspace: (workspacePath: string) => void;
   onRemoveWorkspace: (workspacePath: string) => void;
+  onRefreshCliIntegration: () => void;
+  onInstallCliIntegration: () => void;
+  onRemoveCliIntegration: () => void;
+  onCopyCliIntegrationCommand: (command: string) => void;
 }
 
 /**
@@ -2478,8 +2609,10 @@ interface SettingsModalProps {
 function SettingsModal({
   isOpen,
   paths,
+  cliIntegration,
   homePath,
   isBusy,
+  isCliIntegrationBusy,
   onChange,
   onApply,
   onCancel,
@@ -2487,6 +2620,10 @@ function SettingsModal({
   onBrowseGlobalConfig,
   onSelectWorkspace,
   onRemoveWorkspace,
+  onRefreshCliIntegration,
+  onInstallCliIntegration,
+  onRemoveCliIntegration,
+  onCopyCliIntegrationCommand,
 }: SettingsModalProps): ReactElement | null {
   if (!isOpen) {
     return null;
@@ -2527,13 +2664,19 @@ function SettingsModal({
             <div className="max-h-[calc(100vh-13rem)] overflow-y-auto bg-muted/25 px-5 py-4">
               <PathPanel
                 paths={paths}
+                cliIntegration={cliIntegration}
                 homePath={homePath}
                 isBusy={isBusy}
+                isCliIntegrationBusy={isCliIntegrationBusy}
                 onChange={onChange}
                 onBrowseWorkspace={onBrowseWorkspace}
                 onBrowseGlobalConfig={onBrowseGlobalConfig}
                 onSelectWorkspace={onSelectWorkspace}
                 onRemoveWorkspace={onRemoveWorkspace}
+                onRefreshCliIntegration={onRefreshCliIntegration}
+                onInstallCliIntegration={onInstallCliIntegration}
+                onRemoveCliIntegration={onRemoveCliIntegration}
+                onCopyCliIntegrationCommand={onCopyCliIntegrationCommand}
               />
             </div>
 
@@ -2561,13 +2704,19 @@ function SettingsModal({
 
 interface PathPanelProps {
   paths: WorkspaceSelection;
+  cliIntegration: CliIntegrationState | null;
   homePath: string | null;
   isBusy: boolean;
+  isCliIntegrationBusy: boolean;
   onChange: (field: keyof WorkspaceSelection, value: string | boolean) => void;
   onBrowseWorkspace: () => void;
   onBrowseGlobalConfig: () => void;
   onSelectWorkspace: (workspacePath: string) => void;
   onRemoveWorkspace: (workspacePath: string) => void;
+  onRefreshCliIntegration: () => void;
+  onInstallCliIntegration: () => void;
+  onRemoveCliIntegration: () => void;
+  onCopyCliIntegrationCommand: (command: string) => void;
 }
 
 /**
@@ -2575,13 +2724,19 @@ interface PathPanelProps {
  */
 function PathPanel({
   paths,
+  cliIntegration,
   homePath,
   isBusy,
+  isCliIntegrationBusy,
   onChange,
   onBrowseWorkspace,
   onBrowseGlobalConfig,
   onSelectWorkspace,
   onRemoveWorkspace,
+  onRefreshCliIntegration,
+  onInstallCliIntegration,
+  onRemoveCliIntegration,
+  onCopyCliIntegrationCommand,
 }: PathPanelProps): ReactElement {
   return (
     <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
@@ -2741,6 +2896,15 @@ function PathPanel({
         </div>
       </Card>
 
+      <CliIntegrationPanel
+        state={cliIntegration}
+        isBusy={isBusy || isCliIntegrationBusy}
+        onRefresh={onRefreshCliIntegration}
+        onInstall={onInstallCliIntegration}
+        onRemove={onRemoveCliIntegration}
+        onCopyCommand={onCopyCliIntegrationCommand}
+      />
+
       <Card variant="secondary" className="flex flex-col gap-3 p-4 lg:col-span-2">
         <div className="flex items-center gap-2">
           <Activity className="text-foreground/70" size={17} />
@@ -2753,6 +2917,188 @@ function PathPanel({
       </Card>
     </div>
   );
+}
+
+interface CliIntegrationPanelProps {
+  state: CliIntegrationState | null;
+  isBusy: boolean;
+  onRefresh: () => void;
+  onInstall: () => void;
+  onRemove: () => void;
+  onCopyCommand: (command: string) => void;
+}
+
+interface CliIntegrationCommandBoxProps {
+  label: string;
+  command: string;
+  isBusy: boolean;
+  onCopy: (command: string) => void;
+}
+
+/**
+ * Terminal 用 CLI integration の状態と操作を表示する
+ */
+function CliIntegrationPanel({
+  state,
+  isBusy,
+  onRefresh,
+  onInstall,
+  onRemove,
+  onCopyCommand,
+}: CliIntegrationPanelProps): ReactElement {
+  const status = state?.status ?? "unavailable";
+  const statusLabel = cliIntegrationStatusLabel(status);
+  const statusColor = cliIntegrationStatusColor(status);
+  const message = state?.message ?? "CLI integration の状態を読み込んでいます";
+
+  return (
+    <Card variant="secondary" className="flex flex-col gap-3 p-4 lg:col-span-2">
+      <div className="flex items-center gap-2">
+        <Terminal className="text-foreground/70" size={17} />
+        <h3 className="text-sm font-bold">CLI Integration</h3>
+        <Chip color="warning" size="sm" variant="soft">
+          Experimental
+        </Chip>
+      </div>
+      <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <Chip color={statusColor} size="sm" variant="soft">
+                {statusLabel}
+              </Chip>
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">{message}</p>
+            {state?.installPath ? (
+              <p
+                className="mt-1 truncate font-mono text-xs text-foreground/55"
+                title={state.installPath}
+              >
+                {state.installPath}
+              </p>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <HeroButton
+              type="button"
+              variant="ghost"
+              size="sm"
+              onPress={onRefresh}
+              isDisabled={isBusy}
+            >
+              <RefreshCw size={15} />
+              Refresh
+            </HeroButton>
+            <HeroButton
+              type="button"
+              variant="outline"
+              size="sm"
+              onPress={onInstall}
+              isDisabled={isBusy || state?.canInstall !== true}
+            >
+              <Link2 size={15} />
+              Install
+            </HeroButton>
+            <HeroButton
+              type="button"
+              variant="danger-soft"
+              size="sm"
+              onPress={onRemove}
+              isDisabled={isBusy || state?.canRemove !== true}
+            >
+              <Unlink size={15} />
+              Remove
+            </HeroButton>
+          </div>
+        </div>
+        {state?.manualInstallCommand ? (
+          <CliIntegrationCommandBox
+            label="Manual install"
+            command={state.manualInstallCommand}
+            isBusy={isBusy}
+            onCopy={onCopyCommand}
+          />
+        ) : null}
+        {state?.manualRemoveCommand ? (
+          <CliIntegrationCommandBox
+            label="Manual remove"
+            command={state.manualRemoveCommand}
+            isBusy={isBusy}
+            onCopy={onCopyCommand}
+          />
+        ) : null}
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * CLI integration の手動コマンドを表示する
+ */
+function CliIntegrationCommandBox({
+  label,
+  command,
+  isBusy,
+  onCopy,
+}: CliIntegrationCommandBoxProps): ReactElement {
+  return (
+    <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-t border-border pt-3">
+      <div className="min-w-0">
+        <div className="text-xs font-medium text-muted-foreground">{label}</div>
+        <code className="block truncate rounded-md bg-background px-2 py-1.5 font-mono text-xs text-foreground">
+          {command}
+        </code>
+      </div>
+      <HeroButton
+        type="button"
+        variant="ghost"
+        size="sm"
+        isIconOnly
+        onPress={() => onCopy(command)}
+        isDisabled={isBusy}
+        aria-label={`${label} をコピー`}
+      >
+        <Copy size={15} />
+      </HeroButton>
+    </div>
+  );
+}
+
+type CliIntegrationChipColor = "danger" | "default" | "success" | "warning";
+
+/**
+ * CLI integration 状態の表示ラベルを取得する
+ */
+function cliIntegrationStatusLabel(status: CliIntegrationStatus): string {
+  switch (status) {
+    case "installed":
+      return "Installed";
+    case "missing":
+      return "Not installed";
+    case "conflict":
+      return "Conflict";
+    case "permissionDenied":
+      return "Permission required";
+    case "unavailable":
+      return "Unavailable";
+  }
+}
+
+/**
+ * CLI integration 状態の表示色を取得する
+ */
+function cliIntegrationStatusColor(status: CliIntegrationStatus): CliIntegrationChipColor {
+  switch (status) {
+    case "installed":
+      return "success";
+    case "missing":
+      return "default";
+    case "conflict":
+    case "permissionDenied":
+      return "warning";
+    case "unavailable":
+      return "danger";
+  }
 }
 
 interface PathValueProps {

@@ -1899,7 +1899,14 @@ where
             );
             let status = status_by_key.get(&runtime_key).copied();
             let sort_key = tray_tunnel_sort_key(resolved, &runtime_id);
-            let item = tray_tunnel_menu_item(menu_id_prefix, index, resolved, status, can_start);
+            let item = tray_tunnel_menu_item(
+                menu_id_prefix,
+                index,
+                resolved,
+                &runtime_id,
+                status,
+                can_start,
+            );
 
             Some((sort_key, item))
         })
@@ -1959,6 +1966,7 @@ fn tray_tunnel_menu_item(
     menu_id_prefix: &str,
     index: usize,
     resolved: &ResolvedTunnelConfig,
+    runtime_id: &str,
     status: Option<&ScopedRuntimeStatus>,
     can_start: bool,
 ) -> TrayTunnelMenuItem {
@@ -1978,7 +1986,6 @@ fn tray_tunnel_menu_item(
         TrayTunnelOperation::Stop => status.map(|status| status.runtime_scope),
         TrayTunnelOperation::SetAutoRecover { .. } => None,
     };
-    let runtime_id = runtime_id_for_resolved_tunnel(resolved);
 
     TrayTunnelMenuItem {
         menu_id: format!("{menu_id_prefix}{index}"),
@@ -1987,7 +1994,7 @@ fn tray_tunnel_menu_item(
         enabled: is_running || can_start,
         action: TrayTunnelAction {
             id: resolved.tunnel.name.clone(),
-            runtime_id: Some(runtime_id),
+            runtime_id: Some(runtime_id.to_owned()),
             runtime_scope,
             operation,
         },
@@ -4238,6 +4245,7 @@ fn build_dashboard_state(
             );
             tunnel_view(
                 resolved,
+                &runtime_id,
                 favorite_runtime_ids.contains(runtime_id.as_str()),
                 auto_recover_runtime_ids.contains(runtime_id.as_str()),
                 status_by_key.get(&runtime_key).copied(),
@@ -4510,6 +4518,7 @@ fn validation_view(report: ValidationReport) -> ValidationView {
 /// 設定済みトンネルを表示用へ変換する
 fn tunnel_view(
     resolved: &ResolvedTunnelConfig,
+    runtime_id: &str,
     is_favorite: bool,
     auto_recover_enabled: bool,
     status: Option<&ScopedRuntimeStatus>,
@@ -4518,7 +4527,7 @@ fn tunnel_view(
 
     TunnelView {
         id: tunnel.name.clone(),
-        runtime_id: runtime_id_for_resolved_tunnel(resolved),
+        runtime_id: runtime_id.to_owned(),
         is_favorite,
         auto_recover_enabled,
         description: tunnel.description.clone(),

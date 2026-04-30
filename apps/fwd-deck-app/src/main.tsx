@@ -650,9 +650,9 @@ function App(): ReactElement {
         captureResultScrollPosition();
       }
 
-      setDashboard(loaded);
+      setDashboard((current) => reconcileDashboardState(current, loaded));
       setRuntimeNowUnixSeconds(currentUnixSeconds());
-      setPaths(loaded.paths);
+      setPaths((current) => reconcileWorkspaceSelection(current, loaded.paths));
       setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
     },
     [captureResultScrollPosition, filters],
@@ -918,9 +918,9 @@ function App(): ReactElement {
           paths: null,
         });
 
-        setDashboard(loaded);
+        setDashboard((current) => reconcileDashboardState(current, loaded));
         setRuntimeNowUnixSeconds(currentUnixSeconds());
-        setPaths(loaded.paths);
+        setPaths((current) => reconcileWorkspaceSelection(current, loaded.paths));
         setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
         setMessage(null);
       } catch (error) {
@@ -1095,9 +1095,9 @@ function App(): ReactElement {
         tunnel,
       });
 
-      setDashboard(loaded);
+      setDashboard((current) => reconcileDashboardState(current, loaded));
       setRuntimeNowUnixSeconds(currentUnixSeconds());
-      setPaths(loaded.paths);
+      setPaths((current) => reconcileWorkspaceSelection(current, loaded.paths));
       setForm({ ...initialForm, scope: form.scope });
       setFormFeedback(null);
       showOperationToast({ kind: "success", summary: `${tunnel.id} を設定に追加しました` });
@@ -1142,8 +1142,8 @@ function App(): ReactElement {
         captureResultScrollPosition();
       }
 
-      setDashboard(loaded);
-      setPaths(loaded.paths);
+      setDashboard((current) => reconcileDashboardState(current, loaded));
+      setPaths((current) => reconcileWorkspaceSelection(current, loaded.paths));
       setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
       setDuplicateTarget(null);
       setDuplicateForm(initialDuplicateForm);
@@ -1189,9 +1189,9 @@ function App(): ReactElement {
         captureResultScrollPosition();
       }
 
-      setDashboard(loaded);
+      setDashboard((current) => reconcileDashboardState(current, loaded));
       setRuntimeNowUnixSeconds(currentUnixSeconds());
-      setPaths(loaded.paths);
+      setPaths((current) => reconcileWorkspaceSelection(current, loaded.paths));
       setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
       setEditTarget(null);
       setEditFormFeedback(null);
@@ -1221,9 +1221,9 @@ function App(): ReactElement {
         captureResultScrollPosition();
       }
 
-      setDashboard(loaded);
+      setDashboard((current) => reconcileDashboardState(current, loaded));
       setRuntimeNowUnixSeconds(currentUnixSeconds());
-      setPaths(loaded.paths);
+      setPaths((current) => reconcileWorkspaceSelection(current, loaded.paths));
       setSelectedIds((current) => removeSelection(current, tunnel.runtimeId));
       showOperationToast({ kind: "success", summary: `${tunnel.id} を設定から削除しました` });
     } catch (error) {
@@ -1259,7 +1259,7 @@ function App(): ReactElement {
         isFavorite: nextIsFavorite,
       });
 
-      setPaths(loadedPaths);
+      setPaths((current) => reconcileWorkspaceSelection(current, loadedPaths));
     } catch (error) {
       setDashboard((current) =>
         updateTunnelFavoriteInDashboard(current, tunnel.runtimeId, tunnel.isFavorite),
@@ -1292,7 +1292,7 @@ function App(): ReactElement {
         enabled: nextEnabled,
       });
 
-      setPaths(loadedPaths);
+      setPaths((current) => reconcileWorkspaceSelection(current, loadedPaths));
     } catch (error) {
       setDashboard((current) =>
         updateTunnelAutoRecoverInDashboard(current, tunnel.runtimeId, tunnel.autoRecoverEnabled),
@@ -5769,6 +5769,10 @@ function areRuntimeSummaryPropsEqual(
  * トンネル表示モデルの値が一致するか判定する
  */
 function tunnelViewEquals(left: TunnelView, right: TunnelView): boolean {
+  if (left === right) {
+    return true;
+  }
+
   return (
     left.id === right.id &&
     left.runtimeId === right.runtimeId &&
@@ -5801,6 +5805,10 @@ function runtimeStatusViewEquals(
   left: RuntimeStatusView | null,
   right: RuntimeStatusView | null,
 ): boolean {
+  if (left === right) {
+    return true;
+  }
+
   if (left === null || right === null) {
     return left === right;
   }
@@ -5844,6 +5852,10 @@ function runtimeSummaryOutputEquals(
  * タイムアウト表示モデルの値が一致するか判定する
  */
 function timeoutViewEquals(left: TimeoutView, right: TimeoutView): boolean {
+  if (left === right) {
+    return true;
+  }
+
   return (
     left.connectTimeoutSeconds === right.connectTimeoutSeconds &&
     left.serverAliveIntervalSeconds === right.serverAliveIntervalSeconds &&
@@ -5856,7 +5868,146 @@ function timeoutViewEquals(left: TimeoutView, right: TimeoutView): boolean {
  * 文字列配列の内容が一致するか判定する
  */
 function stringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  if (left === right) {
+    return true;
+  }
+
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+/**
+ * 同じダッシュボード内容では既存参照を再利用する
+ */
+function reconcileDashboardState(
+  current: DashboardState | null,
+  next: DashboardState,
+): DashboardState {
+  if (current !== null && dashboardStateEquals(current, next)) {
+    return current;
+  }
+
+  return next;
+}
+
+/**
+ * ダッシュボード表示モデルの値が一致するか判定する
+ */
+function dashboardStateEquals(left: DashboardState, right: DashboardState): boolean {
+  if (left === right) {
+    return true;
+  }
+
+  return (
+    workspaceSelectionEquals(left.paths, right.paths) &&
+    left.hasConfig === right.hasConfig &&
+    validationViewEquals(left.validation, right.validation) &&
+    arrayItemsEqual(left.tunnels, right.tunnels, tunnelViewEquals) &&
+    arrayItemsEqual(left.trackedTunnels, right.trackedTunnels, trackedTunnelViewEquals)
+  );
+}
+
+/**
+ * 同じパス設定内容では既存参照を再利用する
+ */
+function reconcileWorkspaceSelection(
+  current: WorkspaceSelection,
+  next: WorkspaceSelection,
+): WorkspaceSelection {
+  if (workspaceSelectionEquals(current, next)) {
+    return current;
+  }
+
+  return next;
+}
+
+/**
+ * ワークスペース選択表示の値が一致するか判定する
+ */
+function workspaceSelectionEquals(left: WorkspaceSelection, right: WorkspaceSelection): boolean {
+  if (left === right) {
+    return true;
+  }
+
+  return (
+    left.workspacePath === right.workspacePath &&
+    stringArraysEqual(left.workspaceHistory, right.workspaceHistory) &&
+    left.localConfigPath === right.localConfigPath &&
+    left.globalConfigPath === right.globalConfigPath &&
+    left.useGlobal === right.useGlobal &&
+    left.globalStatePath === right.globalStatePath &&
+    left.workspaceStatePath === right.workspaceStatePath &&
+    left.hideDockIconWhenWindowHidden === right.hideDockIconWhenWindowHidden &&
+    left.autoStopTunnelsOnQuit === right.autoStopTunnelsOnQuit &&
+    left.showTrackedRuntimeBar === right.showTrackedRuntimeBar
+  );
+}
+
+/**
+ * 設定検証表示の値が一致するか判定する
+ */
+function validationViewEquals(left: ValidationView, right: ValidationView): boolean {
+  if (left === right) {
+    return true;
+  }
+
+  return (
+    left.isValid === right.isValid &&
+    arrayItemsEqual(left.errors, right.errors, validationIssueViewEquals) &&
+    arrayItemsEqual(left.warnings, right.warnings, validationIssueViewEquals)
+  );
+}
+
+/**
+ * 設定検証項目の値が一致するか判定する
+ */
+function validationIssueViewEquals(left: ValidationIssueView, right: ValidationIssueView): boolean {
+  if (left === right) {
+    return true;
+  }
+
+  return (
+    left.source === right.source &&
+    left.path === right.path &&
+    left.tunnelName === right.tunnelName &&
+    left.message === right.message
+  );
+}
+
+/**
+ * 追跡中 runtime 表示モデルの値が一致するか判定する
+ */
+function trackedTunnelViewEquals(left: TrackedTunnelView, right: TrackedTunnelView): boolean {
+  if (left === right) {
+    return true;
+  }
+
+  return (
+    left.id === right.id &&
+    left.runtimeId === right.runtimeId &&
+    left.runtimeScope === right.runtimeScope &&
+    left.runtimeKey === right.runtimeKey &&
+    left.local === right.local &&
+    left.remote === right.remote &&
+    left.ssh === right.ssh &&
+    runtimeStatusViewEquals(left.status, right.status)
+  );
+}
+
+/**
+ * 配列要素の値が順序込みで一致するか判定する
+ */
+function arrayItemsEqual<Item>(
+  left: readonly Item[],
+  right: readonly Item[],
+  itemEquals: (left: Item, right: Item) => boolean,
+): boolean {
+  if (left === right) {
+    return true;
+  }
+
+  return (
+    left.length === right.length && left.every((item, index) => itemEquals(item, right[index]))
+  );
 }
 
 /**

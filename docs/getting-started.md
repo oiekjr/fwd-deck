@@ -29,6 +29,7 @@ fwd-deck --help
 ```
 
 macOSアプリだけを導入した場合は、アプリの Settings > CLI Integration から `/usr/local/bin/fwd-deck` を追加できます。  
+Homebrew で CLI を導入済みの場合、この追加操作は不要です。  
 権限が足りない場合、アプリは Terminal で実行する手動コマンドを表示します。  
 
 Rust toolchain がある環境では、開発用に `cargo` から直接インストールできます。  

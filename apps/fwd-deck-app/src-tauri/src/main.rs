@@ -86,6 +86,7 @@ const QUIT_DIALOG_CANCEL_LABEL: &str = "キャンセル";
 const QUIT_ERROR_TITLE: &str = "ポートフォワーディングを停止できませんでした";
 const QUIT_STALE_CLEANUP_ERROR_TITLE: &str = "stale 状態を削除できませんでした";
 const CLI_INSTALL_LINK_PATH: &str = "/usr/local/bin/fwd-deck";
+const HOMEBREW_CLI_PATHS: [&str; 2] = ["/opt/homebrew/bin/fwd-deck", "/usr/local/bin/fwd-deck"];
 
 /// Tauri アプリを起動する
 fn main() -> ExitCode {
@@ -981,6 +982,7 @@ fn resolve_cli_integration_paths() -> CliIntegrationPaths {
     CliIntegrationPaths {
         install_path: PathBuf::from(CLI_INSTALL_LINK_PATH),
         target_path: resolve_cli_integration_target_path(),
+        external_cli_path: resolve_external_cli_path(),
     }
 }
 
@@ -1000,9 +1002,7 @@ fn resolve_cli_integration_target_path() -> Option<PathBuf> {
 
 /// CLI integration の表示状態を構築する
 fn cli_integration_view(paths: &CliIntegrationPaths) -> CliIntegrationView {
-    let (status, message) = cli_integration_status(paths);
-
-    cli_integration_view_from_parts(paths, status, message, None, None)
+    cli_integration_view_from_check(paths, cli_integration_check(paths))
 }
 
 /// CLI integration の表示状態を指定値から構築する
@@ -1013,77 +1013,89 @@ fn cli_integration_view_from_parts(
     manual_install_command: Option<String>,
     manual_remove_command: Option<String>,
 ) -> CliIntegrationView {
-    let default_manual_install_command = if matches!(
-        status,
-        CliIntegrationStatus::Missing | CliIntegrationStatus::PermissionDenied
-    ) {
-        cli_manual_install_command(paths)
-    } else {
-        None
-    };
-    let default_manual_remove_command = if matches!(status, CliIntegrationStatus::Installed) {
-        Some(format!("sudo rm {}", shell_quote_path(&paths.install_path)))
-    } else {
-        None
-    };
+    cli_integration_view_from_check(
+        paths,
+        CliIntegrationCheck {
+            status,
+            install_path: paths.install_path.clone(),
+            message,
+            can_install: matches!(status, CliIntegrationStatus::Missing),
+            can_remove: matches!(status, CliIntegrationStatus::Installed),
+            manual_install_command: manual_install_command.or_else(|| {
+                if matches!(
+                    status,
+                    CliIntegrationStatus::Missing | CliIntegrationStatus::PermissionDenied
+                ) {
+                    cli_manual_install_command(paths)
+                } else {
+                    None
+                }
+            }),
+            manual_remove_command: manual_remove_command.or_else(|| {
+                if matches!(status, CliIntegrationStatus::Installed) {
+                    Some(format!("sudo rm {}", shell_quote_path(&paths.install_path)))
+                } else {
+                    None
+                }
+            }),
+        },
+    )
+}
 
+/// CLI integration の表示状態を判定結果から構築する
+fn cli_integration_view_from_check(
+    paths: &CliIntegrationPaths,
+    check: CliIntegrationCheck,
+) -> CliIntegrationView {
     CliIntegrationView {
-        status,
-        install_path: format_path_for_display(&paths.install_path),
+        status: check.status,
+        install_path: format_path_for_display(&check.install_path),
         target_path: paths
             .target_path
             .as_deref()
             .map(format_path_for_display)
             .unwrap_or_default(),
-        message,
-        can_install: matches!(status, CliIntegrationStatus::Missing),
-        can_remove: matches!(status, CliIntegrationStatus::Installed),
-        manual_install_command: manual_install_command.or(default_manual_install_command),
-        manual_remove_command: manual_remove_command.or(default_manual_remove_command),
+        message: check.message,
+        can_install: check.can_install,
+        can_remove: check.can_remove,
+        manual_install_command: check.manual_install_command,
+        manual_remove_command: check.manual_remove_command,
     }
 }
 
 /// CLI integration の現在状態を判定する
-fn cli_integration_status(paths: &CliIntegrationPaths) -> (CliIntegrationStatus, String) {
-    let Some(target_path) = &paths.target_path else {
-        return (
-            CliIntegrationStatus::Unavailable,
-            "現在の起動状態では CLIコマンドを追加できません。Fwd Deck を開き直してからもう一度お試しください"
-                .to_owned(),
-        );
-    };
-
-    if !is_executable_file(target_path) {
-        return (
-            CliIntegrationStatus::Unavailable,
-            "アプリ本体を確認できないため、CLIコマンドを追加できません".to_owned(),
-        );
-    }
+fn cli_integration_check(paths: &CliIntegrationPaths) -> CliIntegrationCheck {
+    let target_path = paths
+        .target_path
+        .as_deref()
+        .filter(|target_path| is_executable_file(target_path));
 
     match fs::symlink_metadata(&paths.install_path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             match fs::read_link(&paths.install_path) {
                 Ok(link_target)
-                    if symlink_points_to_target(&paths.install_path, &link_target, target_path) =>
+                    if target_path.is_some_and(|target_path| {
+                        symlink_points_to_target(&paths.install_path, &link_target, target_path)
+                    }) =>
                 {
-                    (
-                        CliIntegrationStatus::Installed,
-                        "Terminal から fwd-deck を実行できます".to_owned(),
-                    )
+                    cli_integration_managed_installed_check(paths)
                 }
-                Ok(_) => (
-                    CliIntegrationStatus::Conflict,
+                Ok(_) => cli_integration_existing_external_or_conflict_check(
+                    paths,
                     format!(
                         "{} は別の symlink を指しています",
                         format_path_for_display(&paths.install_path)
                     ),
                 ),
-                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => (
-                    CliIntegrationStatus::PermissionDenied,
-                    "CLI integration の symlink を読み取る権限がありません".to_owned(),
-                ),
-                Err(error) => (
-                    CliIntegrationStatus::Conflict,
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                    cli_integration_default_check(
+                        paths,
+                        CliIntegrationStatus::PermissionDenied,
+                        "CLI integration の symlink を読み取る権限がありません".to_owned(),
+                    )
+                }
+                Err(error) => cli_integration_existing_external_or_conflict_check(
+                    paths,
                     format!(
                         "{} を symlink として読み取れませんでした: {error}",
                         format_path_for_display(&paths.install_path)
@@ -1091,22 +1103,39 @@ fn cli_integration_status(paths: &CliIntegrationPaths) -> (CliIntegrationStatus,
                 ),
             }
         }
-        Ok(_) => (
-            CliIntegrationStatus::Conflict,
+        Ok(_) => cli_integration_existing_external_or_conflict_check(
+            paths,
             format!(
                 "{} には既存のファイルがあります",
                 format_path_for_display(&paths.install_path)
             ),
         ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
-            CliIntegrationStatus::Missing,
-            "Terminal 用の fwd-deck コマンドは未設定です".to_owned(),
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => (
-            CliIntegrationStatus::PermissionDenied,
-            "CLI integration の設置先を確認する権限がありません".to_owned(),
-        ),
-        Err(error) => (
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(external_cli_path) = paths.external_cli_path.as_deref()
+                && is_executable_file(external_cli_path)
+            {
+                return cli_integration_external_installed_check(external_cli_path);
+            }
+
+            if target_path.is_none() {
+                return cli_integration_target_unavailable_check(paths);
+            }
+
+            cli_integration_default_check(
+                paths,
+                CliIntegrationStatus::Missing,
+                "Terminal 用の fwd-deck コマンドは未設定です".to_owned(),
+            )
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            cli_integration_default_check(
+                paths,
+                CliIntegrationStatus::PermissionDenied,
+                "CLI integration の設置先を確認する権限がありません".to_owned(),
+            )
+        }
+        Err(error) => cli_integration_default_check(
+            paths,
             CliIntegrationStatus::Unavailable,
             format!(
                 "{} の状態を確認できませんでした: {error}",
@@ -1116,11 +1145,90 @@ fn cli_integration_status(paths: &CliIntegrationPaths) -> (CliIntegrationStatus,
     }
 }
 
+/// CLI integration の symlink 先が使えない場合の判定結果を構築する
+fn cli_integration_target_unavailable_check(paths: &CliIntegrationPaths) -> CliIntegrationCheck {
+    let message = if paths.target_path.is_some() {
+        "アプリ本体を確認できないため、CLIコマンドを追加できません".to_owned()
+    } else {
+        "現在の起動状態では CLIコマンドを追加できません。Fwd Deck を開き直してからもう一度お試しください"
+            .to_owned()
+    };
+
+    cli_integration_default_check(paths, CliIntegrationStatus::Unavailable, message)
+}
+
+/// 既存の外部 CLI を優先してから conflict として扱う
+fn cli_integration_existing_external_or_conflict_check(
+    paths: &CliIntegrationPaths,
+    conflict_message: String,
+) -> CliIntegrationCheck {
+    if let Some(external_cli_path) = paths.external_cli_path.as_deref()
+        && is_executable_file(external_cli_path)
+    {
+        return cli_integration_external_installed_check(external_cli_path);
+    }
+
+    cli_integration_default_check(paths, CliIntegrationStatus::Conflict, conflict_message)
+}
+
+/// 管理 symlink が設定済みの場合の判定結果を構築する
+fn cli_integration_managed_installed_check(paths: &CliIntegrationPaths) -> CliIntegrationCheck {
+    CliIntegrationCheck {
+        status: CliIntegrationStatus::Installed,
+        install_path: paths.install_path.clone(),
+        message: "Terminal から fwd-deck を実行できます".to_owned(),
+        can_install: false,
+        can_remove: true,
+        manual_install_command: None,
+        manual_remove_command: Some(format!("sudo rm {}", shell_quote_path(&paths.install_path))),
+    }
+}
+
+/// 外部 CLI が設定済みの場合の判定結果を構築する
+fn cli_integration_external_installed_check(external_cli_path: &Path) -> CliIntegrationCheck {
+    CliIntegrationCheck {
+        status: CliIntegrationStatus::Installed,
+        install_path: external_cli_path.to_path_buf(),
+        message: format!(
+            "Terminal から fwd-deck を実行できます（{}）",
+            format_path_for_display(external_cli_path)
+        ),
+        can_install: false,
+        can_remove: false,
+        manual_install_command: None,
+        manual_remove_command: None,
+    }
+}
+
+/// 標準的な CLI integration 判定結果を構築する
+fn cli_integration_default_check(
+    paths: &CliIntegrationPaths,
+    status: CliIntegrationStatus,
+    message: String,
+) -> CliIntegrationCheck {
+    CliIntegrationCheck {
+        status,
+        install_path: paths.install_path.clone(),
+        message,
+        can_install: matches!(status, CliIntegrationStatus::Missing),
+        can_remove: false,
+        manual_install_command: if matches!(
+            status,
+            CliIntegrationStatus::Missing | CliIntegrationStatus::PermissionDenied
+        ) {
+            cli_manual_install_command(paths)
+        } else {
+            None
+        },
+        manual_remove_command: None,
+    }
+}
+
 /// CLI integration の symlink を作成する
 fn install_cli_integration_for_paths(paths: &CliIntegrationPaths) -> CliIntegrationView {
-    let (status, message) = cli_integration_status(paths);
-    if !matches!(status, CliIntegrationStatus::Missing) {
-        return cli_integration_view_from_parts(paths, status, message, None, None);
+    let check = cli_integration_check(paths);
+    if !matches!(check.status, CliIntegrationStatus::Missing) {
+        return cli_integration_view_from_check(paths, check);
     }
 
     let Some(target_path) = &paths.target_path else {
@@ -1175,9 +1283,9 @@ fn install_cli_integration_for_paths(paths: &CliIntegrationPaths) -> CliIntegrat
 
 /// CLI integration の symlink を削除する
 fn remove_cli_integration_for_paths(paths: &CliIntegrationPaths) -> CliIntegrationView {
-    let (status, message) = cli_integration_status(paths);
-    if !matches!(status, CliIntegrationStatus::Installed) {
-        return cli_integration_view_from_parts(paths, status, message, None, None);
+    let check = cli_integration_check(paths);
+    if !matches!(check.status, CliIntegrationStatus::Installed) || !check.can_remove {
+        return cli_integration_view_from_check(paths, check);
     }
 
     match fs::remove_file(&paths.install_path) {
@@ -1234,6 +1342,34 @@ fn cli_manual_install_command_for_paths(target_path: &Path, install_path: &Path)
         shell_quote_path(target_path),
         shell_quote_path(install_path)
     )
+}
+
+/// 実行可能な外部 CLI パスを解決する
+fn resolve_external_cli_path() -> Option<PathBuf> {
+    let path_candidates = std::env::var_os("PATH")
+        .as_deref()
+        .map(cli_path_candidates)
+        .unwrap_or_default();
+
+    find_external_cli_path(
+        path_candidates
+            .into_iter()
+            .chain(HOMEBREW_CLI_PATHS.map(PathBuf::from)),
+    )
+}
+
+/// PATH 環境変数から CLI 候補パスを生成する
+fn cli_path_candidates(path_env: &std::ffi::OsStr) -> Vec<PathBuf> {
+    std::env::split_paths(path_env)
+        .map(|path| path.join("fwd-deck"))
+        .collect()
+}
+
+/// CLI 候補から最初の実行可能ファイルを取得する
+fn find_external_cli_path(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .find(|candidate| is_executable_file(candidate))
 }
 
 /// shell に貼り付けるための単一引用符表現を生成する
@@ -2512,6 +2648,19 @@ struct CliIntegrationView {
 struct CliIntegrationPaths {
     install_path: PathBuf,
     target_path: Option<PathBuf>,
+    external_cli_path: Option<PathBuf>,
+}
+
+/// CLI integration の内部判定結果を表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CliIntegrationCheck {
+    status: CliIntegrationStatus,
+    install_path: PathBuf,
+    message: String,
+    can_install: bool,
+    can_remove: bool,
+    manual_install_command: Option<String>,
+    manual_remove_command: Option<String>,
 }
 
 /// ダッシュボード表示に必要な状態を表現する
@@ -5578,6 +5727,31 @@ mod tests {
         assert!(!view.can_install);
     }
 
+    /// CLI integration が Homebrew 形式の外部 symlink を installed として扱うことを検証する
+    #[cfg(unix)]
+    #[test]
+    fn cli_integration_reports_installed_for_external_homebrew_symlink() {
+        let fixture = CliIntegrationFixture::new();
+        let external_cli_path = fixture.create_external_homebrew_symlink();
+
+        let view =
+            cli_integration_view(&fixture.paths_with_external_cli(Some(external_cli_path.clone())));
+
+        assert_eq!(view.status, CliIntegrationStatus::Installed);
+        assert_eq!(
+            view.install_path,
+            format_path_for_display(&external_cli_path)
+        );
+        assert!(!view.can_install);
+        assert!(!view.can_remove);
+        assert!(view.manual_install_command.is_none());
+        assert!(view.manual_remove_command.is_none());
+        assert!(
+            view.message
+                .contains(&format_path_for_display(&external_cli_path))
+        );
+    }
+
     /// CLI integration が既存ファイルを conflict として扱うことを検証する
     #[cfg(unix)]
     #[test]
@@ -5590,6 +5764,19 @@ mod tests {
         assert_eq!(view.status, CliIntegrationStatus::Conflict);
         assert!(!view.can_install);
         assert!(!view.can_remove);
+    }
+
+    /// 外部 CLI 検出が候補順を優先することを検証する
+    #[cfg(unix)]
+    #[test]
+    fn cli_integration_external_cli_detection_prefers_candidate_order() {
+        let fixture = CliIntegrationFixture::new();
+        let first_cli_path = fixture.create_executable_file("first-bin/fwd-deck");
+        let second_cli_path = fixture.create_executable_file("second-bin/fwd-deck");
+
+        let detected = find_external_cli_path(vec![first_cli_path.clone(), second_cli_path]);
+
+        assert_eq!(detected, Some(first_cli_path));
     }
 
     /// CLI integration install が symlink を作成することを検証する
@@ -5618,6 +5805,23 @@ mod tests {
         let view = remove_cli_integration_for_paths(&fixture.paths());
 
         assert_eq!(view.status, CliIntegrationStatus::Missing);
+        assert!(fs::symlink_metadata(&fixture.install_path).is_err());
+    }
+
+    /// CLI integration remove が外部 CLI を削除しないことを検証する
+    #[cfg(unix)]
+    #[test]
+    fn cli_integration_remove_keeps_external_cli() {
+        let fixture = CliIntegrationFixture::new();
+        let external_cli_path = fixture.create_external_homebrew_symlink();
+
+        let view = remove_cli_integration_for_paths(
+            &fixture.paths_with_external_cli(Some(external_cli_path.clone())),
+        );
+
+        assert_eq!(view.status, CliIntegrationStatus::Installed);
+        assert!(!view.can_remove);
+        assert!(fs::symlink_metadata(&external_cli_path).is_ok());
         assert!(fs::symlink_metadata(&fixture.install_path).is_err());
     }
 
@@ -7725,8 +7929,6 @@ use_global = true
     impl CliIntegrationFixture {
         /// CLI integration テスト用のファイル構成を初期化する
         fn new() -> Self {
-            use std::os::unix::fs::PermissionsExt;
-
             let temp_dir = TempDir::new().expect("create a temporary directory");
             let install_dir = temp_dir.path().join("bin");
             let target_dir = temp_dir
@@ -7740,12 +7942,7 @@ use_global = true
             fs::create_dir_all(&install_dir).expect("create install directory");
             fs::create_dir_all(&target_dir).expect("create target directory");
             fs::write(&target_path, "#!/bin/sh\n").expect("write target executable");
-
-            let mut permissions = fs::metadata(&target_path)
-                .expect("read target metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&target_path, permissions).expect("set target executable mode");
+            set_executable_permission(&target_path);
 
             Self {
                 _temp_dir: temp_dir,
@@ -7759,6 +7956,19 @@ use_global = true
             CliIntegrationPaths {
                 install_path: self.install_path.clone(),
                 target_path: Some(self.target_path.clone()),
+                external_cli_path: None,
+            }
+        }
+
+        /// 外部 CLI path を含む CLI integration テスト用の path セットを生成する
+        fn paths_with_external_cli(
+            &self,
+            external_cli_path: Option<PathBuf>,
+        ) -> CliIntegrationPaths {
+            CliIntegrationPaths {
+                install_path: self.install_path.clone(),
+                target_path: Some(self.target_path.clone()),
+                external_cli_path,
             }
         }
 
@@ -7767,6 +7977,56 @@ use_global = true
             std::os::unix::fs::symlink(&self.target_path, &self.install_path)
                 .expect("create install symlink");
         }
+
+        /// Homebrew 形式の外部 CLI symlink を作成する
+        fn create_external_homebrew_symlink(&self) -> PathBuf {
+            let homebrew_prefix = self._temp_dir.path().join("homebrew");
+            let homebrew_bin_dir = homebrew_prefix.join("bin");
+            let cellar_bin_dir = homebrew_prefix
+                .join("Cellar")
+                .join("fwd-deck")
+                .join("0.3.5")
+                .join("bin");
+            let cellar_cli_path = cellar_bin_dir.join("fwd-deck");
+            let homebrew_cli_path = homebrew_bin_dir.join("fwd-deck");
+
+            fs::create_dir_all(&homebrew_bin_dir).expect("create homebrew bin directory");
+            fs::create_dir_all(&cellar_bin_dir).expect("create homebrew cellar directory");
+            fs::write(&cellar_cli_path, "#!/bin/sh\n").expect("write homebrew cli executable");
+            set_executable_permission(&cellar_cli_path);
+
+            std::os::unix::fs::symlink(
+                Path::new("../Cellar/fwd-deck/0.3.5/bin/fwd-deck"),
+                &homebrew_cli_path,
+            )
+            .expect("create homebrew cli symlink");
+
+            homebrew_cli_path
+        }
+
+        /// テスト用の実行可能ファイルを作成する
+        fn create_executable_file(&self, relative_path: &str) -> PathBuf {
+            let path = self._temp_dir.path().join(relative_path);
+            let parent = path.parent().expect("test executable should have parent");
+
+            fs::create_dir_all(parent).expect("create executable parent directory");
+            fs::write(&path, "#!/bin/sh\n").expect("write executable file");
+            set_executable_permission(&path);
+
+            path
+        }
+    }
+
+    /// テスト用ファイルに実行権限を付与する
+    #[cfg(unix)]
+    fn set_executable_permission(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path)
+            .expect("read executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("set executable mode");
     }
 
     /// テスト用の短命な子プロセスを保持する

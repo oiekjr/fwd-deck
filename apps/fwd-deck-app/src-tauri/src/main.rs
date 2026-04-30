@@ -41,7 +41,7 @@ use tauri_plugin_dialog::{
 use thiserror::Error;
 
 const APP_PREFERENCES_FILE_NAME: &str = "preferences.toml";
-const APP_PREFERENCES_VERSION: u32 = 5;
+const APP_PREFERENCES_VERSION: u32 = 6;
 const WORKSPACE_HISTORY_LIMIT: usize = 10;
 const WORKSPACE_STATES_DIR: &str = "workspace-states";
 const STATE_FILE_NAME: &str = "state.toml";
@@ -2013,6 +2013,7 @@ struct WorkspaceSelection {
     use_global: Option<bool>,
     hide_dock_icon_when_window_hidden: Option<bool>,
     auto_stop_tunnels_on_quit: Option<bool>,
+    show_tracked_runtime_bar: Option<bool>,
 }
 
 /// アプリ固有の設定を表現する
@@ -2026,6 +2027,7 @@ struct AppPreferences {
     global_config_path: Option<PathBuf>,
     hide_dock_icon_when_window_hidden: bool,
     auto_stop_tunnels_on_quit: bool,
+    show_tracked_runtime_bar: bool,
     favorite_tunnel_runtime_ids: Vec<String>,
     auto_recover_tunnel_runtime_ids: Vec<String>,
 }
@@ -2041,6 +2043,7 @@ impl Default for AppPreferences {
             global_config_path: None,
             hide_dock_icon_when_window_hidden: false,
             auto_stop_tunnels_on_quit: false,
+            show_tracked_runtime_bar: true,
             favorite_tunnel_runtime_ids: Vec::new(),
             auto_recover_tunnel_runtime_ids: Vec::new(),
         }
@@ -2071,6 +2074,7 @@ struct PathView {
     workspace_state_path: String,
     hide_dock_icon_when_window_hidden: bool,
     auto_stop_tunnels_on_quit: bool,
+    show_tracked_runtime_bar: bool,
 }
 
 /// ダッシュボード表示に必要な状態を表現する
@@ -3338,6 +3342,10 @@ fn apply_workspace_selection(
         preferences.auto_stop_tunnels_on_quit = auto_stop_tunnels_on_quit;
     }
 
+    if let Some(show_tracked_runtime_bar) = selection.show_tracked_runtime_bar {
+        preferences.show_tracked_runtime_bar = show_tracked_runtime_bar;
+    }
+
     Ok(())
 }
 
@@ -3882,6 +3890,7 @@ fn path_view(paths: &RuntimePaths) -> PathView {
             .unwrap_or_default(),
         hide_dock_icon_when_window_hidden: paths.preferences.hide_dock_icon_when_window_hidden,
         auto_stop_tunnels_on_quit: paths.preferences.auto_stop_tunnels_on_quit,
+        show_tracked_runtime_bar: paths.preferences.show_tracked_runtime_bar,
     }
 }
 
@@ -5091,6 +5100,7 @@ use_global = true
         assert_eq!(preferences.version, APP_PREFERENCES_VERSION);
         assert!(!preferences.hide_dock_icon_when_window_hidden);
         assert!(!preferences.auto_stop_tunnels_on_quit);
+        assert!(preferences.show_tracked_runtime_bar);
         assert!(preferences.favorite_tunnel_runtime_ids.is_empty());
         assert!(preferences.auto_recover_tunnel_runtime_ids.is_empty());
     }
@@ -5125,6 +5135,22 @@ use_global = true
         let persisted = read_preferences_file(&path).expect("read preferences");
 
         assert!(persisted.auto_stop_tunnels_on_quit);
+    }
+
+    /// Tracked runtimeバー表示設定が preferences に保存されることを検証する
+    #[test]
+    fn tracked_runtime_bar_preference_is_persisted() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("preferences.toml");
+        let preferences = AppPreferences {
+            show_tracked_runtime_bar: false,
+            ..AppPreferences::default()
+        };
+
+        write_preferences_file(&path, &preferences).expect("write preferences");
+        let persisted = read_preferences_file(&path).expect("read preferences");
+
+        assert!(!persisted.show_tracked_runtime_bar);
     }
 
     /// お気に入り runtime ID が preferences に保存されることを検証する
@@ -5211,6 +5237,7 @@ use_global = true
                 use_global: None,
                 hide_dock_icon_when_window_hidden: Some(true),
                 auto_stop_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("apply dock visibility preference");
@@ -5231,11 +5258,33 @@ use_global = true
                 use_global: None,
                 hide_dock_icon_when_window_hidden: None,
                 auto_stop_tunnels_on_quit: Some(true),
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("apply quit auto-stop preference");
 
         assert!(preferences.auto_stop_tunnels_on_quit);
+    }
+
+    /// ワークスペース選択入力から Tracked runtimeバー表示設定が反映されることを検証する
+    #[test]
+    fn workspace_selection_updates_tracked_runtime_bar_preference() {
+        let mut preferences = AppPreferences::default();
+
+        apply_workspace_selection(
+            &mut preferences,
+            WorkspaceSelection {
+                workspace_path: None,
+                global_config_path: None,
+                use_global: None,
+                hide_dock_icon_when_window_hidden: None,
+                auto_stop_tunnels_on_quit: None,
+                show_tracked_runtime_bar: Some(false),
+            },
+        )
+        .expect("apply tracked runtime bar preference");
+
+        assert!(!preferences.show_tracked_runtime_bar);
     }
 
     /// ワークスペース選択時に履歴が先頭へ移動し重複しないことを検証する
@@ -5253,6 +5302,7 @@ use_global = true
                 use_global: None,
                 hide_dock_icon_when_window_hidden: None,
                 auto_stop_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("select first workspace");
@@ -5264,6 +5314,7 @@ use_global = true
                 use_global: None,
                 hide_dock_icon_when_window_hidden: None,
                 auto_stop_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("select second workspace");
@@ -5275,6 +5326,7 @@ use_global = true
                 use_global: None,
                 hide_dock_icon_when_window_hidden: None,
                 auto_stop_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("select first workspace again");
@@ -5311,6 +5363,7 @@ use_global = true
                     use_global: None,
                     hide_dock_icon_when_window_hidden: None,
                     auto_stop_tunnels_on_quit: None,
+                    show_tracked_runtime_bar: None,
                 },
             )
             .expect("select workspace");
@@ -5359,6 +5412,7 @@ use_global = true
                 use_global: None,
                 hide_dock_icon_when_window_hidden: None,
                 auto_stop_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("select workspace");
@@ -5372,6 +5426,7 @@ use_global = true
                 use_global: None,
                 hide_dock_icon_when_window_hidden: None,
                 auto_stop_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("apply unchanged workspace");
@@ -5401,6 +5456,7 @@ use_global = true
                 use_global: None,
                 hide_dock_icon_when_window_hidden: None,
                 auto_stop_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("select first workspace");
@@ -5414,6 +5470,7 @@ use_global = true
                 use_global: None,
                 hide_dock_icon_when_window_hidden: None,
                 auto_stop_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("select second workspace");

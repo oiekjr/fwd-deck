@@ -115,6 +115,7 @@ interface WorkspaceSelection {
   workspaceStatePath: string;
   hideDockIconWhenWindowHidden: boolean;
   autoStopTunnelsOnQuit: boolean;
+  showTrackedRuntimeBar: boolean;
 }
 
 interface WorkspaceSelectionInput {
@@ -123,6 +124,7 @@ interface WorkspaceSelectionInput {
   useGlobal: boolean;
   hideDockIconWhenWindowHidden: boolean;
   autoStopTunnelsOnQuit: boolean;
+  showTrackedRuntimeBar: boolean;
 }
 
 interface OperationTarget {
@@ -356,6 +358,7 @@ const initialPaths: WorkspaceSelection = {
   workspaceStatePath: "",
   hideDockIconWhenWindowHidden: false,
   autoStopTunnelsOnQuit: false,
+  showTrackedRuntimeBar: true,
 };
 
 const initialForm: TunnelFormState = {
@@ -2192,13 +2195,15 @@ function DashboardView({
 }: DashboardViewProps): ReactElement {
   const [isTrackedPanelCollapsed, setIsTrackedPanelCollapsed] = useState<boolean>(true);
   const hasTrackedRuntime = (dashboard?.trackedTunnels.length ?? 0) > 0;
+  const shouldShowTrackedPanel =
+    (dashboard?.paths.showTrackedRuntimeBar ?? true) && hasTrackedRuntime;
   const hasSelection = selectedCount > 0;
   const shouldShowSelectionActionBar = hasSelection || filteredTunnels.length > 0;
   const [selectionBarRef, selectionBarHeight] = useMeasuredElementHeight<HTMLDivElement>(
     shouldShowSelectionActionBar,
   );
   const [trackedPanelRef, trackedPanelHeight] =
-    useMeasuredElementHeight<HTMLDivElement>(hasTrackedRuntime);
+    useMeasuredElementHeight<HTMLDivElement>(shouldShowTrackedPanel);
   const bottomPaddingPixels = dashboardBottomPaddingPixels(trackedPanelHeight, selectionBarHeight);
 
   return (
@@ -2247,16 +2252,18 @@ function DashboardView({
         onResetFilters={onResetFilters}
       />
       <FloatingPanelStack>
-        <TrackedPanel
-          dashboard={dashboard}
-          runtimeNowUnixSeconds={runtimeNowUnixSeconds}
-          isCollapsed={isTrackedPanelCollapsed}
-          panelRef={trackedPanelRef}
-          isBusy={isBusy}
-          onToggleCollapsed={() => setIsTrackedPanelCollapsed((current) => !current)}
-          onStart={onStartTracked}
-          onStop={onStopTracked}
-        />
+        {shouldShowTrackedPanel ? (
+          <TrackedPanel
+            dashboard={dashboard}
+            runtimeNowUnixSeconds={runtimeNowUnixSeconds}
+            isCollapsed={isTrackedPanelCollapsed}
+            panelRef={trackedPanelRef}
+            isBusy={isBusy}
+            onToggleCollapsed={() => setIsTrackedPanelCollapsed((current) => !current)}
+            onStart={onStartTracked}
+            onStop={onStopTracked}
+          />
+        ) : null}
         <SelectionActionBar
           isVisible={shouldShowSelectionActionBar}
           selectedCount={selectedCount}
@@ -2576,6 +2583,21 @@ function PathPanel({
           >
             <Switch.Content>
               <span className="text-sm font-semibold">Auto-stop tunnels on quit</span>
+            </Switch.Content>
+            <Switch.Control>
+              <Switch.Thumb />
+            </Switch.Control>
+          </Switch>
+        </div>
+        <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
+          <Switch
+            size="sm"
+            isSelected={paths.showTrackedRuntimeBar}
+            onChange={(selected) => onChange("showTrackedRuntimeBar", selected)}
+            className="w-full justify-between"
+          >
+            <Switch.Content>
+              <span className="text-sm font-semibold">Show Tracked runtime bar</span>
             </Switch.Content>
             <Switch.Control>
               <Switch.Thumb />
@@ -5692,6 +5714,7 @@ function normalizeWorkspaceSelection(paths: WorkspaceSelection): WorkspaceSelect
     useGlobal: paths.useGlobal,
     hideDockIconWhenWindowHidden: paths.hideDockIconWhenWindowHidden,
     autoStopTunnelsOnQuit: paths.autoStopTunnelsOnQuit,
+    showTrackedRuntimeBar: paths.showTrackedRuntimeBar,
   };
 }
 

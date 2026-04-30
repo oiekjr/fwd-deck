@@ -2197,21 +2197,6 @@ function DashboardView({
         onResetFilters={onResetFilters}
         onDisplayModeChange={onDisplayModeChange}
       />
-      <SelectionActionBar
-        isVisible={shouldShowSelectionActionBar}
-        selectedCount={selectedCount}
-        visibleCount={filteredTunnels.length}
-        selectedVisibleCount={selectedVisibleCount}
-        trackedPanelHeight={trackedPanelHeight}
-        panelRef={selectionBarRef}
-        operationProgress={operationProgress}
-        isBusy={isBusy}
-        onSelectVisible={onSelectVisible}
-        onDeselectVisible={onDeselectVisible}
-        onStart={onStartSelected}
-        onStop={onStopSelected}
-        onClear={onClearSelection}
-      />
       <TunnelDeck
         dashboard={dashboard}
         hasCompletedInitialLoad={hasCompletedInitialLoad}
@@ -2239,16 +2224,32 @@ function DashboardView({
         onAddTunnel={onAddTunnel}
         onResetFilters={onResetFilters}
       />
-      <TrackedPanel
-        dashboard={dashboard}
-        runtimeNowUnixSeconds={runtimeNowUnixSeconds}
-        isCollapsed={isTrackedPanelCollapsed}
-        panelRef={trackedPanelRef}
-        isBusy={isBusy}
-        onToggleCollapsed={() => setIsTrackedPanelCollapsed((current) => !current)}
-        onStart={onStartTracked}
-        onStop={onStopTracked}
-      />
+      <FloatingPanelStack>
+        <TrackedPanel
+          dashboard={dashboard}
+          runtimeNowUnixSeconds={runtimeNowUnixSeconds}
+          isCollapsed={isTrackedPanelCollapsed}
+          panelRef={trackedPanelRef}
+          isBusy={isBusy}
+          onToggleCollapsed={() => setIsTrackedPanelCollapsed((current) => !current)}
+          onStart={onStartTracked}
+          onStop={onStopTracked}
+        />
+        <SelectionActionBar
+          isVisible={shouldShowSelectionActionBar}
+          selectedCount={selectedCount}
+          visibleCount={filteredTunnels.length}
+          selectedVisibleCount={selectedVisibleCount}
+          panelRef={selectionBarRef}
+          operationProgress={operationProgress}
+          isBusy={isBusy}
+          onSelectVisible={onSelectVisible}
+          onDeselectVisible={onDeselectVisible}
+          onStart={onStartSelected}
+          onStop={onStopSelected}
+          onClear={onClearSelection}
+        />
+      </FloatingPanelStack>
     </section>
   );
 }
@@ -3000,12 +3001,26 @@ function FilterChip({ label, onRemove }: FilterChipProps): ReactElement {
   );
 }
 
+interface FloatingPanelStackProps {
+  children: ReactNode;
+}
+
+/**
+ * 下部固定パネルを同一スタック内で重ならない順序に配置する
+ */
+function FloatingPanelStack({ children }: FloatingPanelStackProps): ReactElement {
+  return (
+    <section className="pointer-events-none fixed right-4 bottom-4 left-4 z-50 flex max-h-[calc(100vh-2rem)] flex-col gap-3">
+      {children}
+    </section>
+  );
+}
+
 interface SelectionActionBarProps {
   isVisible: boolean;
   selectedCount: number;
   visibleCount: number;
   selectedVisibleCount: number;
-  trackedPanelHeight: number;
   panelRef: RefObject<HTMLDivElement | null>;
   operationProgress: OperationProgress | null;
   isBusy: boolean;
@@ -3024,7 +3039,6 @@ function SelectionActionBar({
   selectedCount,
   visibleCount,
   selectedVisibleCount,
-  trackedPanelHeight,
   panelRef,
   operationProgress,
   isBusy,
@@ -3039,21 +3053,16 @@ function SelectionActionBar({
   }
 
   const hiddenSelectedCount = selectedCount - selectedVisibleCount;
-  const bottomPixels = selectionActionBarBottomPixels(trackedPanelHeight);
   const selectedInViewLabel =
     selectedCount === 0
       ? `${visibleCount} visible results`
       : `${selectedVisibleCount} in current view`;
 
   return (
-    <section
-      className="pointer-events-none fixed right-4 left-4 z-50"
-      style={{ bottom: bottomPixels }}
-      aria-live="polite"
-    >
+    <section className="pointer-events-none relative z-10 min-h-0" aria-live="polite">
       <div
         ref={panelRef}
-        className="pointer-events-auto mx-auto flex max-h-[min(16rem,calc(100vh-2rem))] w-full max-w-[96rem] flex-col gap-2 overflow-auto rounded-xl border border-border bg-card/95 px-3 py-2 shadow-2xl backdrop-blur xl:flex-row xl:items-center xl:justify-between"
+        className="pointer-events-auto mx-auto flex max-h-[min(16rem,100%)] w-full max-w-[96rem] flex-col gap-2 overflow-auto rounded-xl border border-border bg-card/95 px-3 py-2 shadow-2xl backdrop-blur xl:flex-row xl:items-center xl:justify-between"
       >
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -3157,20 +3166,6 @@ function dashboardBottomPaddingPixels(
   }
 
   return viewportMarginPixels + floatingPanelsHeight + contentMarginPixels;
-}
-
-/**
- * tracked runtime パネルとの重なりを避けるための固定位置を算出する
- */
-function selectionActionBarBottomPixels(trackedPanelHeight: number): number {
-  const viewportMarginPixels = 16;
-  const floatingPanelGapPixels = 12;
-
-  if (trackedPanelHeight === 0) {
-    return viewportMarginPixels;
-  }
-
-  return viewportMarginPixels + trackedPanelHeight + floatingPanelGapPixels;
 }
 
 interface MessagePanelProps {
@@ -4171,16 +4166,16 @@ function TrackedPanel({
   }
 
   return (
-    <section className="pointer-events-none fixed right-4 bottom-4 left-4 z-40">
+    <section className="pointer-events-none relative z-0 min-h-0">
       <div
         ref={panelRef}
-        className="pointer-events-auto mx-auto w-full max-w-[96rem] overflow-hidden rounded-xl border border-foreground/15 bg-card shadow-2xl ring-1 ring-foreground/5 backdrop-blur"
+        className="pointer-events-auto mx-auto flex max-h-full w-full max-w-[96rem] flex-col overflow-hidden rounded-xl border border-foreground/15 bg-card shadow-2xl ring-1 ring-foreground/5 backdrop-blur"
       >
         <HeroButton
           type="button"
           variant="ghost"
           fullWidth
-          className="h-auto justify-between gap-3 rounded-none bg-card px-3 py-2.5 text-left hover:bg-muted/60"
+          className="h-auto shrink-0 justify-between gap-3 rounded-none bg-card px-3 py-2.5 text-left hover:bg-muted/60"
           onPress={onToggleCollapsed}
           aria-expanded={!isCollapsed}
         >
@@ -4205,7 +4200,7 @@ function TrackedPanel({
         </HeroButton>
 
         {!isCollapsed ? (
-          <div className="max-h-44 overflow-auto border-t border-border bg-card">
+          <div className="min-h-0 max-h-44 overflow-auto border-t border-border bg-card">
             <Table variant="secondary">
               <Table.ScrollContainer>
                 <Table.Content aria-label="Tracked runtime tunnels">

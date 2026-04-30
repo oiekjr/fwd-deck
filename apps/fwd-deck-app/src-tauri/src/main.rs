@@ -30,7 +30,7 @@ use tauri::{
     Emitter, Manager,
     image::Image,
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
-    tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
+    tray::{TrayIcon, TrayIconBuilder},
 };
 use tauri_plugin_dialog::{
     DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
@@ -145,8 +145,10 @@ struct AutoRecoverState(Mutex<AutoRecoverWorkerState>);
 #[derive(Default)]
 struct TrayState {
     icon: Mutex<Option<TrayIcon>>,
+    icon_kind: Mutex<Option<TrayIconKind>>,
     tunnel_actions: Mutex<HashMap<String, TrayTunnelAction>>,
     workspace_actions: Mutex<HashMap<String, TrayWorkspaceAction>>,
+    tunnel_items: Mutex<HashMap<String, CheckMenuItem<tauri::Wry>>>,
 }
 
 impl TrayState {
@@ -166,6 +168,22 @@ impl TrayState {
             .clone()
     }
 
+    /// トレイアイコン種別を保存する
+    fn set_icon_kind(&self, icon_kind: TrayIconKind) {
+        *self
+            .icon_kind
+            .lock()
+            .expect("tray icon kind state should not be poisoned") = Some(icon_kind);
+    }
+
+    /// トレイアイコン種別を取得する
+    fn icon_kind(&self) -> Option<TrayIconKind> {
+        *self
+            .icon_kind
+            .lock()
+            .expect("tray icon kind state should not be poisoned")
+    }
+
     /// トレイメニューの動的操作を差し替える
     fn set_tunnel_actions(&self, tunnel_actions: HashMap<String, TrayTunnelAction>) {
         *self
@@ -182,6 +200,43 @@ impl TrayState {
             .lock()
             .expect("tray workspace action state should not be poisoned") =
             actions.workspace_actions;
+    }
+
+    /// トレイメニューの動的項目ハンドルを差し替える
+    fn set_item_handles(&self, item_handles: TrayMenuItemHandles) {
+        *self
+            .tunnel_items
+            .lock()
+            .expect("tray item state should not be poisoned") = item_handles.tunnel_items;
+    }
+
+    /// 既存のトンネル項目へ状態を反映する
+    fn update_tunnel_items_in_place(
+        &self,
+        items: &[TrayTunnelMenuItem],
+    ) -> Result<TrayInPlaceMenuUpdate, AppError> {
+        let item_handles = self
+            .tunnel_items
+            .lock()
+            .expect("tray item state should not be poisoned")
+            .clone();
+        let item_ids = item_handles.keys().cloned().collect();
+
+        if tray_in_place_menu_update(item_ids, items) == TrayInPlaceMenuUpdate::RebuildRequired {
+            return Ok(TrayInPlaceMenuUpdate::RebuildRequired);
+        }
+
+        for item in items {
+            if let Some(menu_item) = item_handles.get(&item.menu_id) {
+                menu_item.set_text(&item.label)?;
+                menu_item.set_enabled(item.enabled)?;
+                menu_item.set_checked(item.checked)?;
+            }
+        }
+
+        self.set_tunnel_actions(tray_tunnel_actions_from_items(items));
+
+        Ok(TrayInPlaceMenuUpdate::Apply)
     }
 
     /// トレイメニュー ID に対応する操作を取得する
@@ -237,11 +292,24 @@ struct TrayMenuActions {
     workspace_actions: HashMap<String, TrayWorkspaceAction>,
 }
 
+/// トレイメニューの動的項目ハンドルを保持する
+#[derive(Clone, Default)]
+struct TrayMenuItemHandles {
+    tunnel_items: HashMap<String, CheckMenuItem<tauri::Wry>>,
+}
+
 /// トレイアイコンへ反映する接続状態を表現する
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrayIconKind {
     Idle,
     Active,
+}
+
+/// トレイメニューのインプレース更新可否を表現する
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayInPlaceMenuUpdate {
+    Apply,
+    RebuildRequired,
 }
 
 /// トレイから実行するワークスペース操作を表現する
@@ -258,6 +326,17 @@ struct TrayWorkspaceMenuItem {
     checked: bool,
     enabled: bool,
     action: Option<TrayWorkspaceAction>,
+}
+
+/// トレイメニュー生成に必要な表示モデルを保持する
+#[derive(Debug, Clone)]
+struct TrayMenuModel {
+    tunnel_items: Vec<TrayTunnelMenuItem>,
+    favorite_tunnel_items: Vec<TrayTunnelMenuItem>,
+    auto_recover_tunnel_items: Vec<TrayTunnelMenuItem>,
+    workspace_items: Vec<TrayWorkspaceMenuItem>,
+    icon_kind: TrayIconKind,
+    config_is_valid: bool,
 }
 
 /// トレイ操作結果をフロントエンドへ通知する
@@ -359,7 +438,7 @@ fn set_runtime_dock_icon() {}
 
 /// トレイアイコンと初期メニューを作成する
 fn initialize_tray(app: &tauri::AppHandle) -> Result<(), AppError> {
-    let (menu, actions, icon_kind) = build_tray_menu(app)?;
+    let (menu, actions, item_handles, icon_kind) = build_tray_menu(app)?;
     let tray_icon_image = tray_icon_image(icon_kind)?;
     let builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
@@ -367,27 +446,16 @@ fn initialize_tray(app: &tauri::AppHandle) -> Result<(), AppError> {
         .icon_as_template(true)
         .tooltip(APP_DISPLAY_NAME)
         .show_menu_on_left_click(true)
-        .on_menu_event(handle_tray_menu_event)
-        .on_tray_icon_event(handle_tray_icon_event);
+        .on_menu_event(handle_tray_menu_event);
 
     let tray_icon = builder.build(app)?;
     let tray_state = app.state::<TrayState>();
     tray_state.set_actions(actions);
+    tray_state.set_item_handles(item_handles);
+    tray_state.set_icon_kind(icon_kind);
     tray_state.set_icon(tray_icon);
 
     Ok(())
-}
-
-/// トレイアイコン操作時にメニュー状態を更新する
-fn handle_tray_icon_event(tray: &TrayIcon, event: TrayIconEvent) {
-    if let TrayIconEvent::Click {
-        button: MouseButton::Left,
-        button_state: MouseButtonState::Up,
-        ..
-    } = event
-    {
-        let _ = rebuild_tray_menu(tray.app_handle());
-    }
 }
 
 /// トレイメニューの選択を実行する
@@ -420,7 +488,7 @@ fn handle_tray_tunnel_action(app: &tauri::AppHandle, action: TrayTunnelAction) {
         run_tray_tunnel_action(app, action.clone())
     });
 
-    let _ = rebuild_tray_menu(app);
+    let _ = refresh_tray_menu_in_place(app);
 
     match result {
         Ok(report) => emit_tray_operation_report(app, report),
@@ -654,14 +722,14 @@ fn refresh_tray_menu(app: tauri::AppHandle) -> Result<(), String> {
 
 /// トレイメニューを現在の設定と状態で再構築する
 fn rebuild_tray_menu(app: &tauri::AppHandle) -> Result<(), AppError> {
-    let (menu, actions, icon_kind) = build_tray_menu(app)?;
-    let tray_icon_image = tray_icon_image(icon_kind)?;
-    app.state::<TrayState>().set_actions(actions);
+    let (menu, actions, item_handles, icon_kind) = build_tray_menu(app)?;
+    let tray_state = app.state::<TrayState>();
+    tray_state.set_actions(actions);
+    tray_state.set_item_handles(item_handles);
 
-    if let Some(icon) = app.state::<TrayState>().icon() {
+    if let Some(icon) = tray_state.icon() {
         icon.set_menu(Some(menu))?;
-        icon.set_icon(Some(tray_icon_image))?;
-        icon.set_icon_as_template(true)?;
+        update_tray_icon_if_changed(app, icon_kind)?;
     }
 
     Ok(())
@@ -670,24 +738,19 @@ fn rebuild_tray_menu(app: &tauri::AppHandle) -> Result<(), AppError> {
 /// トレイメニューと動的項目の対応表を生成する
 fn build_tray_menu(
     app: &tauri::AppHandle,
-) -> Result<(Menu<tauri::Wry>, TrayMenuActions, TrayIconKind), AppError> {
-    let runtime_paths = resolve_runtime_paths(app, None)?;
-    let config = load_effective_config(&runtime_paths.config_paths)?;
-    let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
-    let validation = validate_config(&config);
-    let tunnel_items = tray_tunnel_menu_items(&config, &statuses, &validation);
-    let favorite_tunnel_items = tray_favorite_tunnel_menu_items(
-        &config,
-        &statuses,
-        &validation,
-        &runtime_paths.preferences,
-    );
-    let auto_recover_tunnel_items =
-        tray_auto_recover_tunnel_menu_items(&config, &runtime_paths.preferences);
-    let workspace_items = tray_workspace_menu_items(&runtime_paths.preferences);
-    let icon_kind = tray_icon_kind(&statuses);
+) -> Result<
+    (
+        Menu<tauri::Wry>,
+        TrayMenuActions,
+        TrayMenuItemHandles,
+        TrayIconKind,
+    ),
+    AppError,
+> {
+    let model = load_tray_menu_model(app)?;
+    let icon_kind = model.icon_kind;
+    let mut item_handles = TrayMenuItemHandles::default();
     let mut actions = TrayMenuActions::default();
-
     let menu = Menu::new(app)?;
     let show = MenuItem::with_id(app, TRAY_MENU_SHOW, "Open Fwd Deck", true, None::<&str>)?;
     let settings = MenuItem::with_id(
@@ -708,7 +771,8 @@ fn build_tray_menu(
         app,
         &favorites,
         &mut actions,
-        favorite_tunnel_items,
+        &mut item_handles,
+        model.favorite_tunnel_items,
         TRAY_MENU_NO_FAVORITE_TUNNELS,
         "No favorite tunnels",
     )?;
@@ -716,7 +780,8 @@ fn build_tray_menu(
         app,
         &tunnels,
         &mut actions,
-        tunnel_items,
+        &mut item_handles,
+        model.tunnel_items,
         TRAY_MENU_NO_TUNNELS,
         "No tunnels configured",
     )?;
@@ -724,12 +789,13 @@ fn build_tray_menu(
         app,
         &auto_recover,
         &mut actions,
-        auto_recover_tunnel_items,
+        &mut item_handles,
+        model.auto_recover_tunnel_items,
         TRAY_MENU_NO_AUTO_RECOVER_TUNNELS,
         "No tunnels configured",
     )?;
 
-    if !validation.is_valid() {
+    if !model.config_is_valid {
         let invalid = MenuItem::with_id(
             app,
             TRAY_MENU_INVALID_CONFIG,
@@ -741,7 +807,7 @@ fn build_tray_menu(
         tunnels.append(&invalid)?;
     }
 
-    for item in workspace_items {
+    for item in model.workspace_items {
         let menu_item = CheckMenuItem::with_id(
             app,
             item.menu_id.clone(),
@@ -780,7 +846,118 @@ fn build_tray_menu(
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&quit)?;
 
-    Ok((menu, actions, icon_kind))
+    Ok((menu, actions, item_handles, icon_kind))
+}
+
+/// トレイメニュー生成に必要な表示モデルを読み込む
+fn load_tray_menu_model(app: &tauri::AppHandle) -> Result<TrayMenuModel, AppError> {
+    let runtime_paths = resolve_runtime_paths(app, None)?;
+    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
+    let validation = validate_config(&config);
+    let tunnel_items = tray_tunnel_menu_items(&config, &statuses, &validation);
+    let favorite_tunnel_items = tray_favorite_tunnel_menu_items(
+        &config,
+        &statuses,
+        &validation,
+        &runtime_paths.preferences,
+    );
+    let auto_recover_tunnel_items =
+        tray_auto_recover_tunnel_menu_items(&config, &runtime_paths.preferences);
+    let workspace_items = tray_workspace_menu_items(&runtime_paths.preferences);
+    let icon_kind = tray_icon_kind(&statuses);
+
+    Ok(TrayMenuModel {
+        tunnel_items,
+        favorite_tunnel_items,
+        auto_recover_tunnel_items,
+        workspace_items,
+        icon_kind,
+        config_is_valid: validation.is_valid(),
+    })
+}
+
+/// トレイメニューの表示中に変更可能な状態だけを反映する
+fn refresh_tray_menu_in_place(app: &tauri::AppHandle) -> Result<(), AppError> {
+    let model = load_tray_menu_model(app)?;
+    let tunnel_items = tray_menu_model_tunnel_items(&model);
+
+    update_tray_icon_if_changed(app, model.icon_kind)?;
+    let _ = app
+        .state::<TrayState>()
+        .update_tunnel_items_in_place(&tunnel_items)?;
+
+    Ok(())
+}
+
+/// 必要な場合だけトレイアイコン画像を差し替える
+fn update_tray_icon_if_changed(
+    app: &tauri::AppHandle,
+    next_icon_kind: TrayIconKind,
+) -> Result<(), AppError> {
+    let tray_state = app.state::<TrayState>();
+    if tray_icon_update(tray_state.icon_kind(), next_icon_kind).is_none() {
+        return Ok(());
+    }
+
+    if let Some(icon) = tray_state.icon() {
+        icon.set_icon(Some(tray_icon_image(next_icon_kind)?))?;
+        icon.set_icon_as_template(true)?;
+    }
+
+    tray_state.set_icon_kind(next_icon_kind);
+
+    Ok(())
+}
+
+/// トレイアイコン差し替えが必要な場合だけ次の種別を返す
+fn tray_icon_update(
+    current_icon_kind: Option<TrayIconKind>,
+    next_icon_kind: TrayIconKind,
+) -> Option<TrayIconKind> {
+    if current_icon_kind == Some(next_icon_kind) {
+        None
+    } else {
+        Some(next_icon_kind)
+    }
+}
+
+/// トレイメニューのトンネル関連項目を表示順でまとめる
+fn tray_menu_model_tunnel_items(model: &TrayMenuModel) -> Vec<TrayTunnelMenuItem> {
+    model
+        .favorite_tunnel_items
+        .iter()
+        .chain(model.tunnel_items.iter())
+        .chain(model.auto_recover_tunnel_items.iter())
+        .cloned()
+        .collect()
+}
+
+/// トレイメニュー項目から操作対応表を生成する
+fn tray_tunnel_actions_from_items(
+    items: &[TrayTunnelMenuItem],
+) -> HashMap<String, TrayTunnelAction> {
+    items
+        .iter()
+        .map(|item| (item.menu_id.clone(), item.action.clone()))
+        .collect()
+}
+
+/// 既存メニュー構造のまま項目を更新できるか判定する
+fn tray_in_place_menu_update(
+    current_item_ids: HashSet<String>,
+    next_items: &[TrayTunnelMenuItem],
+) -> TrayInPlaceMenuUpdate {
+    let next_item_ids = next_items
+        .iter()
+        .map(|item| item.menu_id.clone())
+        .collect::<HashSet<_>>();
+
+    if current_item_ids == next_item_ids {
+        TrayInPlaceMenuUpdate::Apply
+    } else {
+        TrayInPlaceMenuUpdate::RebuildRequired
+    }
 }
 
 /// トレイのトンネルサブメニューへ項目を追加する
@@ -788,6 +965,7 @@ fn append_tray_tunnel_menu_items(
     app: &tauri::AppHandle,
     submenu: &Submenu<tauri::Wry>,
     actions: &mut TrayMenuActions,
+    item_handles: &mut TrayMenuItemHandles,
     items: Vec<TrayTunnelMenuItem>,
     empty_menu_id: &str,
     empty_label: &str,
@@ -807,7 +985,12 @@ fn append_tray_tunnel_menu_items(
             item.checked,
             None::<&str>,
         )?;
-        actions.tunnel_actions.insert(item.menu_id, item.action);
+        actions
+            .tunnel_actions
+            .insert(item.menu_id.clone(), item.action);
+        item_handles
+            .tunnel_items
+            .insert(item.menu_id, menu_item.clone());
         submenu.append(&menu_item)?;
     }
 
@@ -4015,7 +4198,7 @@ fn run_auto_recover_worker_cycle(app: &tauri::AppHandle) {
         auto_recover_current_stale_tunnels(app, &mut worker_state, now)
     });
 
-    let _ = rebuild_tray_menu(app);
+    let _ = refresh_tray_menu_in_place(app);
 
     let mut worker_state = auto_recover_state
         .0
@@ -5592,6 +5775,55 @@ use_global = true
         assert_eq!(tray_icon_kind(&[running_status]), TrayIconKind::Active);
     }
 
+    /// トレイアイコン種別が変わる場合だけ更新対象になることを検証する
+    #[test]
+    fn tray_icon_update_skips_unchanged_kind() {
+        assert_eq!(
+            tray_icon_update(None, TrayIconKind::Idle),
+            Some(TrayIconKind::Idle)
+        );
+        assert_eq!(
+            tray_icon_update(Some(TrayIconKind::Idle), TrayIconKind::Idle),
+            None
+        );
+        assert_eq!(
+            tray_icon_update(Some(TrayIconKind::Idle), TrayIconKind::Active),
+            Some(TrayIconKind::Active)
+        );
+    }
+
+    /// 周期更新が同一構造のトレイ項目だけをインプレース更新対象にすることを検証する
+    #[test]
+    fn tray_in_place_menu_update_requires_same_item_ids() {
+        let running =
+            resolved_tunnel_with_port("running-db", PathBuf::from("fwd-deck.toml"), 15432);
+        let extra = resolved_tunnel_with_port("extra-db", PathBuf::from("fwd-deck.toml"), 15433);
+        let config = EffectiveConfig::new(Vec::new(), vec![running.clone()]);
+        let expanded_config = EffectiveConfig::new(Vec::new(), vec![running.clone(), extra]);
+        let validation = validate_config(&config);
+        let expanded_validation = validate_config(&expanded_config);
+        let idle_items = tray_tunnel_menu_items(&config, &[], &validation);
+        let running_items = tray_tunnel_menu_items(
+            &config,
+            &[scoped_runtime_status(
+                &running,
+                RuntimeScope::Workspace,
+                ProcessState::Running,
+            )],
+            &validation,
+        );
+        let expanded_items = tray_tunnel_menu_items(&expanded_config, &[], &expanded_validation);
+
+        assert_eq!(
+            tray_in_place_menu_update(tray_item_ids(&idle_items), &running_items),
+            TrayInPlaceMenuUpdate::Apply
+        );
+        assert_eq!(
+            tray_in_place_menu_update(tray_item_ids(&idle_items), &expanded_items),
+            TrayInPlaceMenuUpdate::RebuildRequired
+        );
+    }
+
     /// 設定エラー時は開始系のトレイ項目だけが無効化されることを検証する
     #[test]
     fn tray_menu_items_disable_start_actions_when_config_is_invalid() {
@@ -6572,6 +6804,11 @@ use_global = true
             .iter()
             .find(|item| item.action.id == id)
             .expect("tray item should exist")
+    }
+
+    /// テスト用のトレイ項目 ID セットを生成する
+    fn tray_item_ids(items: &[TrayTunnelMenuItem]) -> HashSet<String> {
+        items.iter().map(|item| item.menu_id.clone()).collect()
     }
 
     /// テスト用のワークスペース項目を path で取得する

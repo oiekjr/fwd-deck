@@ -28,6 +28,7 @@ import {
   CirclePlus,
   CircleStop,
   Clock3,
+  Copy,
   FolderOpen,
   Gauge,
   KeyRound,
@@ -93,6 +94,7 @@ type AppCommand =
   | "start_tunnels"
   | "stop_tunnels"
   | "add_tunnel_entry"
+  | "duplicate_tunnel_entry"
   | "update_tunnel_entry"
   | "remove_tunnel_entry"
   | "remove_workspace_history_entry"
@@ -245,6 +247,10 @@ interface TunnelInput {
   identityFile: string | null;
 }
 
+type DuplicateTunnelFormState = TunnelFormState;
+type DuplicateTunnelInput = TunnelInput;
+type DuplicateTunnelEditableField = Exclude<keyof DuplicateTunnelFormState, "scope">;
+
 type AppMessageKind = "success" | "error" | "info";
 
 interface AppMessage {
@@ -356,6 +362,8 @@ const initialForm: TunnelFormState = {
   identityFile: "",
 };
 
+const initialDuplicateForm: DuplicateTunnelFormState = initialForm;
+
 const initialFilters: TunnelFilters = {
   query: "",
   status: "all",
@@ -416,8 +424,12 @@ function App(): ReactElement {
   const [deleteTarget, setDeleteTarget] = useState<TunnelView | null>(null);
   const [editTarget, setEditTarget] = useState<TunnelView | null>(null);
   const [editForm, setEditForm] = useState<TunnelFormState>(initialForm);
+  const [duplicateTarget, setDuplicateTarget] = useState<TunnelView | null>(null);
+  const [duplicateForm, setDuplicateForm] =
+    useState<DuplicateTunnelFormState>(initialDuplicateForm);
   const [formFeedback, setFormFeedback] = useState<AppMessage | null>(null);
   const [editFormFeedback, setEditFormFeedback] = useState<AppMessage | null>(null);
+  const [duplicateFormFeedback, setDuplicateFormFeedback] = useState<AppMessage | null>(null);
   const [message, setMessage] = useState<AppMessage | null>(null);
   const [operationToast, setOperationToast] = useState<OperationToastMessage | null>(null);
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
@@ -937,6 +949,53 @@ function App(): ReactElement {
   }
 
   /**
+   * 既存トンネルを複製して設定ファイルへ追加する
+   */
+  async function submitDuplicatedTunnel(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+
+    if (duplicateTarget === null) {
+      return;
+    }
+
+    let duplicate: DuplicateTunnelInput;
+    try {
+      duplicate = duplicateFormToInput(duplicateForm);
+    } catch (error) {
+      setDuplicateFormFeedback({ kind: "error", text: stringifyError(error) });
+      return;
+    }
+
+    setDuplicateFormFeedback(null);
+    setIsBusy(true);
+
+    try {
+      const loaded = await invokeCommand<DashboardState>("duplicate_tunnel_entry", {
+        paths: normalizeWorkspaceSelection(paths),
+        scope: duplicateTarget.source,
+        sourceId: duplicateTarget.id,
+        duplicate,
+      });
+
+      if (hasActiveTunnelFilters(filters)) {
+        captureResultScrollPosition();
+      }
+
+      setDashboard(loaded);
+      setPaths(loaded.paths);
+      setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
+      setDuplicateTarget(null);
+      setDuplicateForm(initialDuplicateForm);
+      setDuplicateFormFeedback(null);
+      showOperationToast({ kind: "success", summary: `${duplicate.id} を設定に複製しました` });
+    } catch (error) {
+      setDuplicateFormFeedback({ kind: "error", text: stringifyError(error) });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  /**
    * 設定ファイル内の既存トンネルを更新する
    */
   async function submitEditedTunnel(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -1249,6 +1308,27 @@ function App(): ReactElement {
   }
 
   /**
+   * ファイル選択ダイアログの結果を複製フォームの identity_file 入力へ反映する
+   */
+  async function browseDuplicateIdentityFile(): Promise<void> {
+    try {
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        defaultPath: await identityFileDialogDefaultPath(),
+      });
+
+      if (typeof selected !== "string") {
+        return;
+      }
+
+      updateDuplicateForm("identityFile", selected);
+    } catch (error) {
+      showOperationToast({ kind: "error", summary: stringifyError(error) });
+    }
+  }
+
+  /**
    * 履歴から選択したワークスペースを未適用入力へ反映する
    */
   function selectWorkspaceFromHistory(workspacePath: string): void {
@@ -1294,12 +1374,29 @@ function App(): ReactElement {
   }
 
   /**
+   * 複製フォームの変更を反映する
+   */
+  function updateDuplicateForm(field: DuplicateTunnelEditableField, value: string): void {
+    setDuplicateFormFeedback(null);
+    setDuplicateForm((current) => ({ ...current, [field]: value }));
+  }
+
+  /**
    * 指定トンネルを編集対象として開く
    */
   function openEditTunnel(tunnel: TunnelView): void {
     setEditTarget(tunnel);
     setEditForm(formFromTunnel(tunnel));
     setEditFormFeedback(null);
+  }
+
+  /**
+   * 指定トンネルを複製対象として開く
+   */
+  function openDuplicateTunnel(tunnel: TunnelView): void {
+    setDuplicateTarget(tunnel);
+    setDuplicateForm(duplicateFormFromTunnel(tunnel, dashboard?.tunnels ?? []));
+    setDuplicateFormFeedback(null);
   }
 
   /**
@@ -1413,6 +1510,7 @@ function App(): ReactElement {
               onStartTracked={(id) => void startSelected([id])}
               onStopTracked={(target) => void stopTracked(target)}
               onEditTunnel={openEditTunnel}
+              onDuplicateTunnel={openDuplicateTunnel}
               onRemoveTunnel={setDeleteTarget}
               onAddTunnel={() => setActiveView("add")}
             />
@@ -1462,6 +1560,21 @@ function App(): ReactElement {
         }}
         onSubmit={(event) => void submitEditedTunnel(event)}
         onBrowseIdentityFile={() => void browseEditIdentityFile()}
+      />
+      <DuplicateTunnelModal
+        tunnel={duplicateTarget}
+        form={duplicateForm}
+        homePath={homePath}
+        feedback={duplicateFormFeedback}
+        isBusy={isBusy}
+        onChange={updateDuplicateForm}
+        onCancel={() => {
+          setDuplicateTarget(null);
+          setDuplicateForm(initialDuplicateForm);
+          setDuplicateFormFeedback(null);
+        }}
+        onSubmit={(event) => void submitDuplicatedTunnel(event)}
+        onBrowseIdentityFile={() => void browseDuplicateIdentityFile()}
       />
       <ToastViewport toast={operationToast} onDismiss={dismissOperationToast} />
     </main>
@@ -1899,6 +2012,7 @@ interface DashboardViewProps {
   onStartTracked: (id: string) => void;
   onStopTracked: (target: OperationTarget) => void;
   onEditTunnel: (tunnel: TunnelView) => void;
+  onDuplicateTunnel: (tunnel: TunnelView) => void;
   onRemoveTunnel: (tunnel: TunnelView) => void;
   onAddTunnel: () => void;
 }
@@ -1939,6 +2053,7 @@ function DashboardView({
   onStartTracked,
   onStopTracked,
   onEditTunnel,
+  onDuplicateTunnel,
   onRemoveTunnel,
   onAddTunnel,
 }: DashboardViewProps): ReactElement {
@@ -2004,6 +2119,7 @@ function DashboardView({
         onStart={onStartTunnel}
         onStop={onStopTunnel}
         onEdit={onEditTunnel}
+        onDuplicate={onDuplicateTunnel}
         onRemove={onRemoveTunnel}
         onAddTunnel={onAddTunnel}
         onResetFilters={onResetFilters}
@@ -3044,6 +3160,7 @@ interface TunnelDeckProps {
   onStart: (id: string) => void;
   onStop: (id: string) => void;
   onEdit: (tunnel: TunnelView) => void;
+  onDuplicate: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
   onAddTunnel: () => void;
   onResetFilters: () => void;
@@ -3070,6 +3187,7 @@ function TunnelDeck({
   onStart,
   onStop,
   onEdit,
+  onDuplicate,
   onRemove,
   onAddTunnel,
   onResetFilters,
@@ -3133,6 +3251,7 @@ function TunnelDeck({
         onStart={onStart}
         onStop={onStop}
         onEdit={onEdit}
+        onDuplicate={onDuplicate}
         onRemove={onRemove}
       />
     );
@@ -3153,6 +3272,7 @@ function TunnelDeck({
           onStart={onStart}
           onStop={onStop}
           onEdit={onEdit}
+          onDuplicate={onDuplicate}
           onRemove={onRemove}
         />
       ))}
@@ -3173,6 +3293,7 @@ interface TunnelSlimListProps {
   onStart: (id: string) => void;
   onStop: (id: string) => void;
   onEdit: (tunnel: TunnelView) => void;
+  onDuplicate: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
 }
 
@@ -3192,6 +3313,7 @@ function TunnelSlimList({
   onStart,
   onStop,
   onEdit,
+  onDuplicate,
   onRemove,
 }: TunnelSlimListProps): ReactElement {
   const visibleCount = tunnels.length;
@@ -3249,6 +3371,7 @@ function TunnelSlimList({
                   onStart={onStart}
                   onStop={onStop}
                   onEdit={onEdit}
+                  onDuplicate={onDuplicate}
                   onRemove={onRemove}
                 />
               ))}
@@ -3270,6 +3393,7 @@ interface TunnelSlimRowProps {
   onStart: (id: string) => void;
   onStop: (id: string) => void;
   onEdit: (tunnel: TunnelView) => void;
+  onDuplicate: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
 }
 
@@ -3286,6 +3410,7 @@ function TunnelSlimRow({
   onStart,
   onStop,
   onEdit,
+  onDuplicate,
   onRemove,
 }: TunnelSlimRowProps): ReactElement {
   const running = tunnel.status?.state === "running";
@@ -3367,6 +3492,14 @@ function TunnelSlimRow({
             <Pencil size={14} />
           </IconButton>
           <IconButton
+            label="設定を複製"
+            variant="ghost"
+            onPress={() => onDuplicate(tunnel)}
+            disabled={isBusy}
+          >
+            <Copy size={14} />
+          </IconButton>
+          <IconButton
             label="設定から削除"
             variant="danger-soft"
             onPress={() => onRemove(tunnel)}
@@ -3415,6 +3548,7 @@ interface TunnelCardProps {
   onStart: (id: string) => void;
   onStop: (id: string) => void;
   onEdit: (tunnel: TunnelView) => void;
+  onDuplicate: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
 }
 
@@ -3432,6 +3566,7 @@ function TunnelCard({
   onStart,
   onStop,
   onEdit,
+  onDuplicate,
   onRemove,
 }: TunnelCardProps): ReactElement {
   const running = tunnel.status?.state === "running";
@@ -3524,6 +3659,14 @@ function TunnelCard({
             disabled={isBusy}
           >
             <Pencil size={16} />
+          </IconButton>
+          <IconButton
+            label="設定を複製"
+            variant="ghost"
+            onPress={() => onDuplicate(tunnel)}
+            disabled={isBusy}
+          >
+            <Copy size={16} />
           </IconButton>
           <IconButton
             label="設定から削除"
@@ -4144,6 +4287,52 @@ function TunnelDraftSummary({ form }: TunnelDraftSummaryProps): ReactElement {
   );
 }
 
+interface DuplicateTunnelDraftSummaryProps {
+  form: DuplicateTunnelFormState;
+}
+
+/**
+ * 複製フォームの入力内容と引き継ぎ先を接続経路として要約する
+ */
+function DuplicateTunnelDraftSummary({ form }: DuplicateTunnelDraftSummaryProps): ReactElement {
+  return (
+    <section className="rounded-lg border border-border bg-card p-3 xl:col-span-3">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-medium text-muted-foreground">Duplicate route</span>
+            <Chip size="sm" variant="soft">
+              {form.scope}
+            </Chip>
+          </div>
+          <h3 className="mt-1 truncate text-sm font-semibold">
+            {form.id.trim() || "Untitled tunnel"}
+          </h3>
+        </div>
+        <div className="grid min-w-0 flex-1 gap-2 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-center">
+          <EndpointNode
+            icon={<Server size={15} />}
+            label="Local"
+            value={formatDraftEndpoint(form.localHost, form.localPort, "local host:port")}
+          />
+          <RouteConnector horizontalAt="lg" />
+          <EndpointNode
+            icon={<ArrowRight size={15} />}
+            label="Remote"
+            value={formatDraftEndpoint(form.remoteHost, form.remotePort, "remote host:port")}
+          />
+          <RouteConnector horizontalAt="lg" />
+          <EndpointNode
+            icon={<KeyRound size={15} />}
+            label="SSH"
+            value={formatDraftEndpoint(form.sshHost, form.sshPort, "ssh host:port")}
+          />
+        </div>
+      </div>
+    </section>
+  );
+}
+
 interface TextFieldProps {
   label: string;
   value: string;
@@ -4376,6 +4565,196 @@ function EditTunnelModal({
                 <HeroButton type="submit" variant="primary" size="sm" isDisabled={isBusy}>
                   <Pencil size={16} />
                   Save
+                </HeroButton>
+              </div>
+            </form>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+    </Modal>
+  );
+}
+
+interface DuplicateTunnelModalProps {
+  tunnel: TunnelView | null;
+  form: DuplicateTunnelFormState;
+  homePath: string | null;
+  feedback: AppMessage | null;
+  isBusy: boolean;
+  onChange: (field: DuplicateTunnelEditableField, value: string) => void;
+  onCancel: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onBrowseIdentityFile: () => void;
+}
+
+/**
+ * 既存トンネル設定の複製モーダルを表示する
+ */
+function DuplicateTunnelModal({
+  tunnel,
+  form,
+  homePath,
+  feedback,
+  isBusy,
+  onChange,
+  onCancel,
+  onSubmit,
+  onBrowseIdentityFile,
+}: DuplicateTunnelModalProps): ReactElement | null {
+  if (tunnel === null) {
+    return null;
+  }
+
+  const sourceDisplayPath = formatPathForDisplay(tunnel.sourcePath, homePath);
+
+  return (
+    <Modal
+      isOpen
+      onOpenChange={(open) => {
+        if (!open && !isBusy) {
+          onCancel();
+        }
+      }}
+    >
+      <Modal.Backdrop variant="blur" isDismissable={!isBusy}>
+        <Modal.Container placement="center" scroll="inside" size="lg" className="px-4 py-4 sm:px-6">
+          <Modal.Dialog className="w-full max-w-4xl overflow-hidden p-0">
+            <form onSubmit={onSubmit}>
+              <div className="flex flex-col gap-3 border-b border-border px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <Copy className="text-foreground/70" size={18} />
+                    <h3 className="text-base font-semibold">Duplicate tunnel</h3>
+                    <Chip color="accent" size="sm" variant="soft">
+                      {tunnel.source}
+                    </Chip>
+                  </div>
+                  <p
+                    className="mt-1 truncate font-mono text-xs text-foreground/55"
+                    title={tunnel.sourcePath}
+                  >
+                    {sourceDisplayPath}
+                  </p>
+                </div>
+              </div>
+
+              <div className="max-h-[calc(100vh-13rem)] overflow-y-auto bg-muted/25 p-4">
+                <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+                  <FormFeedback feedback={feedback} />
+                  <DuplicateTunnelDraftSummary form={form} />
+                  <section className="flex flex-col gap-3">
+                    <h4 className="text-xs font-medium text-muted-foreground">Identity</h4>
+                    <TextField
+                      label="Name"
+                      value={form.id}
+                      onChange={(value) => onChange("id", value)}
+                      required
+                    />
+                    <TextField
+                      label="Description"
+                      value={form.description}
+                      onChange={(value) => onChange("description", value)}
+                    />
+                    <TextField
+                      label="Tags"
+                      value={form.tags}
+                      onChange={(value) => onChange("tags", value)}
+                      placeholder="dev,project-a"
+                    />
+                  </section>
+
+                  <section className="flex flex-col gap-3 border-t border-border pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-4">
+                    <h4 className="text-xs font-medium text-muted-foreground">Routing</h4>
+                    <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+                      <TextField
+                        label="Local host"
+                        value={form.localHost}
+                        onChange={(value) => onChange("localHost", value)}
+                        required
+                      />
+                      <TextField
+                        label="Local port"
+                        value={form.localPort}
+                        onChange={(value) => onChange("localPort", value)}
+                        inputMode="numeric"
+                        required
+                      />
+                    </div>
+                    <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+                      <TextField
+                        label="Remote host"
+                        value={form.remoteHost}
+                        onChange={(value) => onChange("remoteHost", value)}
+                        required
+                      />
+                      <TextField
+                        label="Remote port"
+                        value={form.remotePort}
+                        onChange={(value) => onChange("remotePort", value)}
+                        inputMode="numeric"
+                        required
+                      />
+                    </div>
+                  </section>
+
+                  <section className="flex flex-col gap-3 border-t border-border pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-4">
+                    <h4 className="text-xs font-medium text-muted-foreground">SSH</h4>
+                    <TextField
+                      label="SSH user"
+                      value={form.sshUser}
+                      onChange={(value) => onChange("sshUser", value)}
+                      required
+                    />
+                    <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+                      <TextField
+                        label="SSH host"
+                        value={form.sshHost}
+                        onChange={(value) => onChange("sshHost", value)}
+                        required
+                      />
+                      <TextField
+                        label="SSH port"
+                        value={form.sshPort}
+                        onChange={(value) => onChange("sshPort", value)}
+                        inputMode="numeric"
+                      />
+                    </div>
+                    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
+                      <TextField
+                        label="Identity file"
+                        value={form.identityFile}
+                        onChange={(value) => onChange("identityFile", value)}
+                        placeholder="~/.ssh/id_ed25519"
+                      />
+                      <HeroButton
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="mb-0"
+                        onPress={onBrowseIdentityFile}
+                        isDisabled={isBusy}
+                      >
+                        <FolderOpen size={15} />
+                        Browse
+                      </HeroButton>
+                    </div>
+                  </section>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 border-t border-border px-5 py-4">
+                <HeroButton
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onPress={onCancel}
+                  isDisabled={isBusy}
+                >
+                  Cancel
+                </HeroButton>
+                <HeroButton type="submit" variant="primary" size="sm" isDisabled={isBusy}>
+                  <Copy size={16} />
+                  Duplicate
                 </HeroButton>
               </div>
             </form>
@@ -4799,6 +5178,25 @@ function formToTunnelInput(form: TunnelFormState): TunnelInput {
 }
 
 /**
+ * 複製フォーム入力を command 入力へ変換する
+ */
+function duplicateFormToInput(form: DuplicateTunnelFormState): DuplicateTunnelInput {
+  return {
+    id: requireText(form.id, "Name"),
+    description: optionalText(form.description),
+    tags: parseTags(form.tags),
+    localHost: requireText(form.localHost, "Local host"),
+    localPort: parsePort(form.localPort, "Local port", true),
+    remoteHost: requireText(form.remoteHost, "Remote host"),
+    remotePort: parsePort(form.remotePort, "Remote port", true),
+    sshUser: requireText(form.sshUser, "SSH user"),
+    sshHost: requireText(form.sshHost, "SSH host"),
+    sshPort: parsePort(form.sshPort, "SSH port", false),
+    identityFile: optionalText(form.identityFile),
+  };
+}
+
+/**
  * 表示用トンネルを編集フォームの初期値へ変換する
  */
 function formFromTunnel(tunnel: TunnelView): TunnelFormState {
@@ -4816,6 +5214,59 @@ function formFromTunnel(tunnel: TunnelView): TunnelFormState {
     sshPort: tunnel.sshPort?.toString() ?? "",
     identityFile: tunnel.identityFile ?? "",
   };
+}
+
+/**
+ * 表示用トンネルを複製フォームの初期値へ変換する
+ */
+function duplicateFormFromTunnel(
+  tunnel: TunnelView,
+  tunnels: readonly TunnelView[],
+): DuplicateTunnelFormState {
+  const sameScopeTunnels = tunnels.filter((candidate) => candidate.source === tunnel.source);
+  const inheritedForm = formFromTunnel(tunnel);
+
+  return {
+    ...inheritedForm,
+    id: nextDuplicateTunnelId(tunnel.id, sameScopeTunnels),
+    localPort: nextAvailableLocalPort(tunnel.localPort, sameScopeTunnels).toString(),
+  };
+}
+
+/**
+ * 同一スコープ内で未使用の複製名を生成する
+ */
+function nextDuplicateTunnelId(sourceId: string, tunnels: readonly TunnelView[]): string {
+  const usedIds = new Set(tunnels.map((tunnel) => tunnel.id));
+  const baseId = `${sourceId}-copy`;
+
+  if (!usedIds.has(baseId)) {
+    return baseId;
+  }
+
+  let suffix = 2;
+  while (usedIds.has(`${baseId}-${suffix}`)) {
+    suffix += 1;
+  }
+
+  return `${baseId}-${suffix}`;
+}
+
+/**
+ * 同一スコープ内で未使用の local port を生成する
+ */
+function nextAvailableLocalPort(sourcePort: number, tunnels: readonly TunnelView[]): number {
+  const usedPorts = new Set(tunnels.map((tunnel) => tunnel.localPort));
+  const maximumPort = 65535;
+
+  for (let offset = 1; offset <= maximumPort; offset += 1) {
+    const candidate = ((sourcePort - 1 + offset) % maximumPort) + 1;
+    if (!usedPorts.has(candidate)) {
+      return candidate;
+    }
+  }
+
+  return sourcePort;
 }
 
 /**

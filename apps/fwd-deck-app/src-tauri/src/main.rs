@@ -94,6 +94,7 @@ fn main() {
             start_tunnels,
             stop_tunnels,
             add_tunnel_entry,
+            duplicate_tunnel_entry,
             update_tunnel_entry,
             remove_tunnel_entry,
             remove_workspace_history_entry,
@@ -1750,6 +1751,42 @@ impl TunnelInput {
     }
 }
 
+/// 複製フォームから受け取る差し替え対象のトンネル入力を表現する
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DuplicateTunnelInput {
+    id: String,
+    description: Option<String>,
+    tags: Vec<String>,
+    local_host: String,
+    local_port: u16,
+    remote_host: String,
+    remote_port: u16,
+    ssh_user: String,
+    ssh_host: String,
+    ssh_port: Option<u16>,
+    identity_file: Option<String>,
+}
+
+impl DuplicateTunnelInput {
+    /// 複製元設定へ入力値を適用したトンネル設定を生成する
+    fn into_tunnel_config(self, mut source: TunnelConfig) -> TunnelConfig {
+        source.name = trimmed_required(self.id);
+        source.description = trimmed_optional(self.description);
+        source.tags = self.tags.into_iter().map(trimmed_required).collect();
+        source.local_host = Some(trimmed_required(self.local_host));
+        source.local_port = self.local_port;
+        source.remote_host = trimmed_required(self.remote_host);
+        source.remote_port = self.remote_port;
+        source.ssh_user = trimmed_required(self.ssh_user);
+        source.ssh_host = trimmed_required(self.ssh_host);
+        source.ssh_port = self.ssh_port;
+        source.identity_file = trimmed_optional(self.identity_file);
+
+        source
+    }
+}
+
 /// Tauri command の失敗理由を表現する
 #[derive(Debug, Error)]
 enum AppError {
@@ -1892,6 +1929,21 @@ fn add_tunnel_entry(
     command_result(result)
 }
 
+/// 既存トンネルを複製して設定ファイルへ追加する
+#[tauri::command]
+fn duplicate_tunnel_entry(
+    app: tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    scope: ConfigScopeInput,
+    source_id: String,
+    duplicate: DuplicateTunnelInput,
+) -> Result<DashboardState, String> {
+    let result = duplicate_tunnel_entry_inner(&app, paths, scope, &source_id, duplicate);
+    let _ = rebuild_tray_menu(&app);
+
+    command_result(result)
+}
+
 /// 設定ファイル内の既存トンネルを更新する
 #[tauri::command]
 fn update_tunnel_entry(
@@ -2025,6 +2077,25 @@ fn add_tunnel_entry_inner(
     let tunnel = tunnel.into_tunnel_config();
 
     let kind = ConfigSourceKind::from(scope);
+    validate_new_tunnel(&config, kind, &tunnel)?;
+    let path = config_path_for_scope(&runtime_paths, kind)?;
+    add_tunnel_to_config_file(&path, kind, tunnel)?;
+    load_dashboard_inner(app, paths)
+}
+
+/// 複製元トンネルをもとに設定追加処理を実行する
+fn duplicate_tunnel_entry_inner(
+    app: &tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    scope: ConfigScopeInput,
+    source_id: &str,
+    duplicate: DuplicateTunnelInput,
+) -> Result<DashboardState, AppError> {
+    let runtime_paths = resolve_runtime_paths(app, paths.clone())?;
+    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let kind = ConfigSourceKind::from(scope);
+    let tunnel = duplicate_tunnel_config(&config, kind, source_id, duplicate)?;
+
     validate_new_tunnel(&config, kind, &tunnel)?;
     let path = config_path_for_scope(&runtime_paths, kind)?;
     add_tunnel_to_config_file(&path, kind, tunnel)?;
@@ -2879,6 +2950,24 @@ fn validate_new_tunnel(
     }
 
     Ok(())
+}
+
+/// 複製元トンネルへ入力値を適用した追加候補を生成する
+fn duplicate_tunnel_config(
+    config: &EffectiveConfig,
+    kind: ConfigSourceKind,
+    source_id: &str,
+    duplicate: DuplicateTunnelInput,
+) -> Result<TunnelConfig, AppError> {
+    let source = config
+        .tunnels
+        .iter()
+        .find(|resolved| resolved.source.kind == kind && resolved.tunnel.name == source_id)
+        .ok_or_else(|| {
+            AppError::InvalidInput(format!("複製元トンネルが見つかりません: {source_id}"))
+        })?;
+
+    Ok(duplicate.into_tunnel_config(source.tunnel.clone()))
 }
 
 /// 更新対象トンネルの意味的な不備を検証する
@@ -4229,6 +4318,133 @@ use_global = true
         );
     }
 
+    /// 複製時に編集可能項目を差し替え、非表示設定を保持することを検証する
+    #[test]
+    fn duplicate_tunnel_config_overrides_editable_fields_and_keeps_timeout_settings() {
+        let source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml"));
+        let mut base = tunnel_config("db", 15432);
+        base.description = Some("Database".to_owned());
+        base.tags = vec!["dev".to_owned(), "project-a".to_owned()];
+        base.ssh_user = "deploy".to_owned();
+        base.ssh_host = "bastion.internal".to_owned();
+        base.ssh_port = Some(2222);
+        base.identity_file = Some("~/.ssh/id_ed25519".to_owned());
+        base.timeouts.connect_timeout_seconds = Some(7);
+        let config = EffectiveConfig::new(
+            Vec::new(),
+            vec![ResolvedTunnelConfig::new(source, base.clone())],
+        );
+
+        let duplicated = duplicate_tunnel_config(
+            &config,
+            ConfigSourceKind::Local,
+            "db",
+            DuplicateTunnelInput {
+                id: "db-copy".to_owned(),
+                description: Some("Copied database".to_owned()),
+                tags: vec!["staging".to_owned()],
+                local_host: "0.0.0.0".to_owned(),
+                local_port: 25432,
+                remote_host: "db-copy.internal".to_owned(),
+                remote_port: 15432,
+                ssh_user: "operator".to_owned(),
+                ssh_host: "copy-bastion.internal".to_owned(),
+                ssh_port: Some(2200),
+                identity_file: Some("~/.ssh/id_copy".to_owned()),
+            },
+        )
+        .expect("duplicate tunnel config");
+
+        assert_eq!(duplicated.name, "db-copy");
+        assert_eq!(duplicated.local_host.as_deref(), Some("0.0.0.0"));
+        assert_eq!(duplicated.local_port, 25432);
+        assert_eq!(duplicated.remote_host, "db-copy.internal");
+        assert_eq!(duplicated.remote_port, 15432);
+        assert_eq!(duplicated.description.as_deref(), Some("Copied database"));
+        assert_eq!(duplicated.tags, vec!["staging".to_owned()]);
+        assert_eq!(duplicated.ssh_user, "operator");
+        assert_eq!(duplicated.ssh_host, "copy-bastion.internal");
+        assert_eq!(duplicated.ssh_port, Some(2200));
+        assert_eq!(duplicated.identity_file.as_deref(), Some("~/.ssh/id_copy"));
+        assert_eq!(duplicated.timeouts, base.timeouts);
+    }
+
+    /// 複製後 name の重複が既存検証で拒否されることを検証する
+    #[test]
+    fn duplicate_tunnel_config_rejects_duplicate_name_with_existing_validation() {
+        let source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml"));
+        let config = EffectiveConfig::new(
+            Vec::new(),
+            vec![
+                ResolvedTunnelConfig::new(source.clone(), tunnel_config("db", 15432)),
+                ResolvedTunnelConfig::new(source, tunnel_config("cache", 16379)),
+            ],
+        );
+        let duplicated = duplicate_tunnel_config(
+            &config,
+            ConfigSourceKind::Local,
+            "db",
+            DuplicateTunnelInput {
+                id: "cache".to_owned(),
+                description: None,
+                tags: Vec::new(),
+                local_host: "127.0.0.1".to_owned(),
+                local_port: 25432,
+                remote_host: "db.internal".to_owned(),
+                remote_port: 5432,
+                ssh_user: "user".to_owned(),
+                ssh_host: "bastion.example.com".to_owned(),
+                ssh_port: None,
+                identity_file: None,
+            },
+        )
+        .expect("duplicate tunnel config");
+
+        let result = validate_new_tunnel(&config, ConfigSourceKind::Local, &duplicated);
+
+        assert!(
+            matches!(result, Err(AppError::InvalidInput(message)) if message.contains("同じ name"))
+        );
+    }
+
+    /// 複製後 local_port の重複が既存検証で拒否されることを検証する
+    #[test]
+    fn duplicate_tunnel_config_rejects_duplicate_local_port_with_existing_validation() {
+        let source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml"));
+        let config = EffectiveConfig::new(
+            Vec::new(),
+            vec![
+                ResolvedTunnelConfig::new(source.clone(), tunnel_config("db", 15432)),
+                ResolvedTunnelConfig::new(source, tunnel_config("cache", 16379)),
+            ],
+        );
+        let duplicated = duplicate_tunnel_config(
+            &config,
+            ConfigSourceKind::Local,
+            "db",
+            DuplicateTunnelInput {
+                id: "db-copy".to_owned(),
+                description: None,
+                tags: Vec::new(),
+                local_host: "127.0.0.1".to_owned(),
+                local_port: 16379,
+                remote_host: "db.internal".to_owned(),
+                remote_port: 5432,
+                ssh_user: "user".to_owned(),
+                ssh_host: "bastion.example.com".to_owned(),
+                ssh_port: None,
+                identity_file: None,
+            },
+        )
+        .expect("duplicate tunnel config");
+
+        let result = validate_new_tunnel(&config, ConfigSourceKind::Local, &duplicated);
+
+        assert!(
+            matches!(result, Err(AppError::InvalidInput(message)) if message.contains("local_port"))
+        );
+    }
+
     /// tracked runtime が起動中状態を優先して表示されることを検証する
     #[test]
     fn dashboard_tracked_runtime_prioritizes_running_status() {
@@ -4453,6 +4669,24 @@ use_global = true
             .expect("workspace item should exist")
     }
 
+    /// テスト用のトンネル設定を生成する
+    fn tunnel_config(id: &str, local_port: u16) -> TunnelConfig {
+        TunnelConfig {
+            name: id.to_owned(),
+            description: None,
+            tags: Vec::new(),
+            local_host: None,
+            local_port,
+            remote_host: "127.0.0.1".to_owned(),
+            remote_port: 5432,
+            ssh_user: "user".to_owned(),
+            ssh_host: "bastion.example.com".to_owned(),
+            ssh_port: None,
+            identity_file: None,
+            timeouts: TimeoutConfig::default(),
+        }
+    }
+
     /// テスト用の local port 指定 resolved tunnel を生成する
     fn resolved_tunnel_with_port(
         id: &str,
@@ -4471,20 +4705,7 @@ use_global = true
     ) -> ResolvedTunnelConfig {
         ResolvedTunnelConfig::new(
             ConfigSource::new(source_kind, source_path),
-            TunnelConfig {
-                name: id.to_owned(),
-                description: None,
-                tags: Vec::new(),
-                local_host: None,
-                local_port,
-                remote_host: "127.0.0.1".to_owned(),
-                remote_port: 5432,
-                ssh_user: "user".to_owned(),
-                ssh_host: "bastion.example.com".to_owned(),
-                ssh_port: None,
-                identity_file: None,
-                timeouts: TimeoutConfig::default(),
-            },
+            tunnel_config(id, local_port),
         )
     }
 

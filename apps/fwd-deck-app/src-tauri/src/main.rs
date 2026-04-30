@@ -87,6 +87,7 @@ const QUIT_ERROR_TITLE: &str = "ポートフォワーディングを停止でき
 const QUIT_STALE_CLEANUP_ERROR_TITLE: &str = "stale 状態を削除できませんでした";
 const CLI_INSTALL_LINK_PATH: &str = "/usr/local/bin/fwd-deck";
 const HOMEBREW_CLI_PATHS: [&str; 2] = ["/opt/homebrew/bin/fwd-deck", "/usr/local/bin/fwd-deck"];
+const CLI_INTEGRATION_INSTALLED_MESSAGE: &str = "Terminal から fwd-deck を実行できます";
 
 /// Tauri アプリを起動する
 fn main() -> ExitCode {
@@ -1181,7 +1182,7 @@ fn cli_integration_managed_installed_check(paths: &CliIntegrationPaths) -> CliIn
     CliIntegrationCheck {
         status: CliIntegrationStatus::Installed,
         install_path: paths.install_path.clone(),
-        message: "Terminal から fwd-deck を実行できます".to_owned(),
+        message: CLI_INTEGRATION_INSTALLED_MESSAGE.to_owned(),
         can_install: false,
         can_remove: true,
         manual_install_command: None,
@@ -1194,10 +1195,7 @@ fn cli_integration_external_installed_check(external_cli_path: &Path) -> CliInte
     CliIntegrationCheck {
         status: CliIntegrationStatus::Installed,
         install_path: external_cli_path.to_path_buf(),
-        message: format!(
-            "Terminal から fwd-deck を実行できます（{}）",
-            format_path_for_display(external_cli_path)
-        ),
+        message: CLI_INTEGRATION_INSTALLED_MESSAGE.to_owned(),
         can_install: false,
         can_remove: false,
         manual_install_command: None,
@@ -5743,6 +5741,7 @@ mod tests {
         let view = cli_integration_view(&fixture.paths());
 
         assert_eq!(view.status, CliIntegrationStatus::Installed);
+        assert_eq!(view.message, CLI_INTEGRATION_INSTALLED_MESSAGE);
         assert!(view.can_remove);
         assert!(!view.can_install);
     }
@@ -5766,10 +5765,7 @@ mod tests {
         assert!(!view.can_remove);
         assert!(view.manual_install_command.is_none());
         assert!(view.manual_remove_command.is_none());
-        assert!(
-            view.message
-                .contains(&format_path_for_display(&external_cli_path))
-        );
+        assert_eq!(view.message, CLI_INTEGRATION_INSTALLED_MESSAGE);
     }
 
     /// CLI integration が既存ファイルを conflict として扱うことを検証する

@@ -49,6 +49,7 @@ import {
 } from "lucide-react";
 import {
   StrictMode,
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -412,6 +413,23 @@ const trayOperationResultEventName = "tray-operation-result";
 const openSettingsEventName = "open-settings";
 const missingTauriRuntimeMessage =
   "Tauri 実行環境が見つかりません。アプリの操作確認は npm run tauri dev またはビルド済みアプリから実行してください";
+
+type StableEventHandler<Arguments extends unknown[], Result> = (...args: Arguments) => Result;
+
+/**
+ * 最新の処理を参照する安定イベント関数を生成する
+ */
+function useStableEvent<Arguments extends unknown[], Result>(
+  handler: StableEventHandler<Arguments, Result>,
+): StableEventHandler<Arguments, Result> {
+  const handlerRef = useRef(handler);
+
+  useLayoutEffect(() => {
+    handlerRef.current = handler;
+  });
+
+  return useCallback((...args: Arguments) => handlerRef.current(...args), []);
+}
 
 const statusFilterOptions: ReadonlyArray<{ value: TunnelStatus; label: string }> = [
   { value: "running", label: "Running" },
@@ -1579,6 +1597,97 @@ function App(): ReactElement {
     }));
   }
 
+  const handleBrowseWorkspaceFromToolbar = useStableEvent((): void => {
+    void browseWorkspaceFromToolbar();
+  });
+  const handleSelectWorkspaceFromToolbar = useStableEvent((workspacePath: string): void => {
+    void switchWorkspaceFromToolbar(workspacePath);
+  });
+  const handleRefreshDashboard = useStableEvent((): void => {
+    void refreshDashboard();
+  });
+  const handleClearSelection = useStableEvent((): void => {
+    setSelectedIds(new Set());
+  });
+  const handleSelectVisibleTunnels = useStableEvent((): void => {
+    selectVisibleTunnels();
+  });
+  const handleDeselectVisibleTunnels = useStableEvent((): void => {
+    deselectVisibleTunnels();
+  });
+  const handleToggleSelection = useStableEvent((id: string): void => {
+    toggleSelection(id);
+  });
+  const handleStartSelected = useStableEvent((): void => {
+    void startSelected(selectedIdList, {
+      clearSucceededSelections: true,
+      showSelectionProgress: true,
+    });
+  });
+  const handleStopSelected = useStableEvent((): void => {
+    void stopSelected(selectedIdList, {
+      clearSucceededSelections: true,
+      showSelectionProgress: true,
+    });
+  });
+  const handleStartTunnel = useStableEvent((id: string): void => {
+    void startSelected([id]);
+  });
+  const handleStopTunnel = useStableEvent((id: string): void => {
+    void stopSelected([id]);
+  });
+  const handleStopTracked = useStableEvent((target: OperationTarget): void => {
+    void stopTracked(target);
+  });
+  const handleToggleFavorite = useStableEvent((tunnel: TunnelView): void => {
+    void toggleTunnelFavorite(tunnel);
+  });
+  const handleToggleAutoRecover = useStableEvent((tunnel: TunnelView): void => {
+    void toggleTunnelAutoRecover(tunnel);
+  });
+  const handleEditTunnel = useStableEvent((tunnel: TunnelView): void => {
+    openEditTunnel(tunnel);
+  });
+  const handleDuplicateTunnel = useStableEvent((tunnel: TunnelView): void => {
+    openDuplicateTunnel(tunnel);
+  });
+  const handleAddTunnel = useStableEvent((): void => {
+    setActiveView("add");
+  });
+  const handleSubmitTunnel = useStableEvent((event: FormEvent<HTMLFormElement>): void => {
+    void submitTunnel(event);
+  });
+  const handleBrowseIdentityFile = useStableEvent((): void => {
+    void browseIdentityFile();
+  });
+  const handleApplySettings = useStableEvent((): void => {
+    void applySettings();
+  });
+  const handleBrowseWorkspace = useStableEvent((): void => {
+    void browseWorkspace();
+  });
+  const handleBrowseGlobalConfig = useStableEvent((): void => {
+    void browseGlobalConfig();
+  });
+  const handleRemoveWorkspaceHistoryEntry = useStableEvent((workspacePath: string): void => {
+    void removeWorkspaceHistoryEntry(workspacePath);
+  });
+  const handleRemoveTunnel = useStableEvent((tunnel: TunnelView): void => {
+    void removeTunnel(tunnel);
+  });
+  const handleSubmitEditedTunnel = useStableEvent((event: FormEvent<HTMLFormElement>): void => {
+    void submitEditedTunnel(event);
+  });
+  const handleBrowseEditIdentityFile = useStableEvent((): void => {
+    void browseEditIdentityFile();
+  });
+  const handleSubmitDuplicatedTunnel = useStableEvent((event: FormEvent<HTMLFormElement>): void => {
+    void submitDuplicatedTunnel(event);
+  });
+  const handleBrowseDuplicateIdentityFile = useStableEvent((): void => {
+    void browseDuplicateIdentityFile();
+  });
+
   return (
     <main className="min-h-screen bg-muted/45 text-foreground">
       <div className="flex min-h-screen flex-col">
@@ -1590,9 +1699,9 @@ function App(): ReactElement {
           isBusy={isBusy}
           onViewChange={setActiveView}
           onOpenSettings={openSettings}
-          onBrowseWorkspace={() => void browseWorkspaceFromToolbar()}
-          onSelectWorkspace={(workspacePath) => void switchWorkspaceFromToolbar(workspacePath)}
-          onRefresh={() => void refreshDashboard()}
+          onBrowseWorkspace={handleBrowseWorkspaceFromToolbar}
+          onSelectWorkspace={handleSelectWorkspaceFromToolbar}
+          onRefresh={handleRefreshDashboard}
         />
 
         <div className="mx-auto flex w-full max-w-[96rem] flex-1 flex-col gap-3 px-3 py-3 sm:px-4 lg:px-5">
@@ -1625,32 +1734,22 @@ function App(): ReactElement {
               onToggleTag={toggleTagFilter}
               onResetFilters={resetFilters}
               onDisplayModeChange={setTunnelDisplayMode}
-              onClearSelection={() => setSelectedIds(new Set())}
-              onSelectVisible={selectVisibleTunnels}
-              onDeselectVisible={deselectVisibleTunnels}
-              onToggleSelection={toggleSelection}
-              onStartSelected={() =>
-                void startSelected(selectedIdList, {
-                  clearSucceededSelections: true,
-                  showSelectionProgress: true,
-                })
-              }
-              onStopSelected={() =>
-                void stopSelected(selectedIdList, {
-                  clearSucceededSelections: true,
-                  showSelectionProgress: true,
-                })
-              }
-              onStartTunnel={(id) => void startSelected([id])}
-              onStopTunnel={(id) => void stopSelected([id])}
-              onStartTracked={(id) => void startSelected([id])}
-              onStopTracked={(target) => void stopTracked(target)}
-              onToggleFavorite={(tunnel) => void toggleTunnelFavorite(tunnel)}
-              onToggleAutoRecover={(tunnel) => void toggleTunnelAutoRecover(tunnel)}
-              onEditTunnel={openEditTunnel}
-              onDuplicateTunnel={openDuplicateTunnel}
+              onClearSelection={handleClearSelection}
+              onSelectVisible={handleSelectVisibleTunnels}
+              onDeselectVisible={handleDeselectVisibleTunnels}
+              onToggleSelection={handleToggleSelection}
+              onStartSelected={handleStartSelected}
+              onStopSelected={handleStopSelected}
+              onStartTunnel={handleStartTunnel}
+              onStopTunnel={handleStopTunnel}
+              onStartTracked={handleStartTunnel}
+              onStopTracked={handleStopTracked}
+              onToggleFavorite={handleToggleFavorite}
+              onToggleAutoRecover={handleToggleAutoRecover}
+              onEditTunnel={handleEditTunnel}
+              onDuplicateTunnel={handleDuplicateTunnel}
               onRemoveTunnel={setDeleteTarget}
-              onAddTunnel={() => setActiveView("add")}
+              onAddTunnel={handleAddTunnel}
             />
           ) : activeView === "add" ? (
             <AddTunnelView
@@ -1659,9 +1758,9 @@ function App(): ReactElement {
               canUseLocal={paths.workspacePath.trim().length > 0}
               isBusy={isBusy}
               onChange={updateForm}
-              onSubmit={(event) => void submitTunnel(event)}
+              onSubmit={handleSubmitTunnel}
               onOpenSettings={openSettings}
-              onBrowseIdentityFile={() => void browseIdentityFile()}
+              onBrowseIdentityFile={handleBrowseIdentityFile}
             />
           ) : null}
         </div>
@@ -1672,18 +1771,18 @@ function App(): ReactElement {
         homePath={homePath}
         isBusy={isBusy}
         onCancel={closeSettings}
-        onApply={() => void applySettings()}
+        onApply={handleApplySettings}
         onChange={updateSettingsDraft}
-        onBrowseWorkspace={() => void browseWorkspace()}
-        onBrowseGlobalConfig={() => void browseGlobalConfig()}
+        onBrowseWorkspace={handleBrowseWorkspace}
+        onBrowseGlobalConfig={handleBrowseGlobalConfig}
         onSelectWorkspace={selectWorkspaceFromHistory}
-        onRemoveWorkspace={(workspacePath) => void removeWorkspaceHistoryEntry(workspacePath)}
+        onRemoveWorkspace={handleRemoveWorkspaceHistoryEntry}
       />
       <ConfirmRemoveModal
         tunnel={deleteTarget}
         isBusy={isBusy}
         onCancel={() => setDeleteTarget(null)}
-        onConfirm={(tunnel) => void removeTunnel(tunnel)}
+        onConfirm={handleRemoveTunnel}
       />
       <EditTunnelModal
         tunnel={editTarget}
@@ -1696,8 +1795,8 @@ function App(): ReactElement {
           setEditTarget(null);
           setEditFormFeedback(null);
         }}
-        onSubmit={(event) => void submitEditedTunnel(event)}
-        onBrowseIdentityFile={() => void browseEditIdentityFile()}
+        onSubmit={handleSubmitEditedTunnel}
+        onBrowseIdentityFile={handleBrowseEditIdentityFile}
       />
       <DuplicateTunnelModal
         tunnel={duplicateTarget}
@@ -1711,8 +1810,8 @@ function App(): ReactElement {
           setDuplicateForm(initialDuplicateForm);
           setDuplicateFormFeedback(null);
         }}
-        onSubmit={(event) => void submitDuplicatedTunnel(event)}
-        onBrowseIdentityFile={() => void browseDuplicateIdentityFile()}
+        onSubmit={handleSubmitDuplicatedTunnel}
+        onBrowseIdentityFile={handleBrowseDuplicateIdentityFile}
       />
       <ToastViewport toast={operationToast} onDismiss={dismissOperationToast} />
     </main>
@@ -3720,7 +3819,7 @@ interface TunnelSlimRowProps {
 /**
  * スリム一覧内のトンネル 1 件を表示する
  */
-function TunnelSlimRow({
+const TunnelSlimRow = memo(function TunnelSlimRow({
   tunnel,
   query,
   runtimeNowUnixSeconds,
@@ -3849,7 +3948,7 @@ function TunnelSlimRow({
       </Table.Cell>
     </Table.Row>
   );
-}
+}, areTunnelSlimRowPropsEqual);
 
 interface EmptyStateProps {
   title: string;
@@ -3897,7 +3996,7 @@ interface TunnelCardProps {
 /**
  * トンネル 1 件の操作カードを表示する
  */
-function TunnelCard({
+const TunnelCard = memo(function TunnelCard({
   tunnel,
   query,
   homePath,
@@ -4040,7 +4139,7 @@ function TunnelCard({
       </div>
     </Card>
   );
-}
+}, areTunnelCardPropsEqual);
 
 interface AutoRecoverSwitchProps {
   tunnel: TunnelView;
@@ -4122,7 +4221,7 @@ interface RuntimeSummaryProps {
 /**
  * runtime の PID と起動経過を短い補助情報として表示する
  */
-function RuntimeSummary({
+const RuntimeSummary = memo(function RuntimeSummary({
   status,
   nowUnixSeconds,
   className = "",
@@ -4134,7 +4233,7 @@ function RuntimeSummary({
       {runtimeInfo.value}
     </div>
   );
-}
+}, areRuntimeSummaryPropsEqual);
 
 interface StatusBadgeProps {
   status: TunnelStatus;
@@ -4143,7 +4242,7 @@ interface StatusBadgeProps {
 /**
  * トンネル状態のチップを表示する
  */
-function StatusBadge({ status }: StatusBadgeProps): ReactElement {
+const StatusBadge = memo(function StatusBadge({ status }: StatusBadgeProps): ReactElement {
   const color = status === "running" ? "success" : status === "stale" ? "warning" : "default";
 
   return (
@@ -4151,7 +4250,7 @@ function StatusBadge({ status }: StatusBadgeProps): ReactElement {
       {status}
     </Chip>
   );
-}
+});
 
 interface TagListProps {
   tags: string[];
@@ -4241,7 +4340,10 @@ interface HighlightedTextProps {
 /**
  * 検索語に一致する部分へ強調表示を適用する
  */
-function HighlightedText({ text, query }: HighlightedTextProps): ReactElement {
+const HighlightedText = memo(function HighlightedText({
+  text,
+  query,
+}: HighlightedTextProps): ReactElement {
   const normalizedQuery = query.trim().toLowerCase();
 
   if (normalizedQuery.length === 0) {
@@ -4264,7 +4366,7 @@ function HighlightedText({ text, query }: HighlightedTextProps): ReactElement {
       )}
     </>
   );
-}
+});
 
 interface RouteConnectorProps {
   horizontalAt?: "lg" | "xl";
@@ -5223,6 +5325,181 @@ function ConfirmRemoveModal({
       </Modal.Backdrop>
     </Modal>
   );
+}
+
+/**
+ * スリム行の表示結果が変わらないか判定する
+ */
+function areTunnelSlimRowPropsEqual(
+  previous: Readonly<TunnelSlimRowProps>,
+  next: Readonly<TunnelSlimRowProps>,
+): boolean {
+  return (
+    previous.query === next.query &&
+    previous.isFavoriteUpdating === next.isFavoriteUpdating &&
+    previous.isAutoRecoverUpdating === next.isAutoRecoverUpdating &&
+    previous.checked === next.checked &&
+    previous.isBusy === next.isBusy &&
+    previous.onToggle === next.onToggle &&
+    previous.onStart === next.onStart &&
+    previous.onStop === next.onStop &&
+    previous.onToggleFavorite === next.onToggleFavorite &&
+    previous.onToggleAutoRecover === next.onToggleAutoRecover &&
+    previous.onEdit === next.onEdit &&
+    previous.onDuplicate === next.onDuplicate &&
+    previous.onRemove === next.onRemove &&
+    tunnelViewEquals(previous.tunnel, next.tunnel) &&
+    runtimeSummaryOutputEquals(
+      previous.tunnel.status,
+      next.tunnel.status,
+      previous.runtimeNowUnixSeconds,
+      next.runtimeNowUnixSeconds,
+    )
+  );
+}
+
+/**
+ * カードの表示結果が変わらないか判定する
+ */
+function areTunnelCardPropsEqual(
+  previous: Readonly<TunnelCardProps>,
+  next: Readonly<TunnelCardProps>,
+): boolean {
+  return (
+    previous.query === next.query &&
+    previous.homePath === next.homePath &&
+    previous.isFavoriteUpdating === next.isFavoriteUpdating &&
+    previous.isAutoRecoverUpdating === next.isAutoRecoverUpdating &&
+    previous.checked === next.checked &&
+    previous.isBusy === next.isBusy &&
+    previous.onToggle === next.onToggle &&
+    previous.onStart === next.onStart &&
+    previous.onStop === next.onStop &&
+    previous.onToggleFavorite === next.onToggleFavorite &&
+    previous.onToggleAutoRecover === next.onToggleAutoRecover &&
+    previous.onEdit === next.onEdit &&
+    previous.onDuplicate === next.onDuplicate &&
+    previous.onRemove === next.onRemove &&
+    tunnelViewEquals(previous.tunnel, next.tunnel) &&
+    runtimeSummaryOutputEquals(
+      previous.tunnel.status,
+      next.tunnel.status,
+      previous.runtimeNowUnixSeconds,
+      next.runtimeNowUnixSeconds,
+    )
+  );
+}
+
+/**
+ * runtime 補助表示の描画結果が変わらないか判定する
+ */
+function areRuntimeSummaryPropsEqual(
+  previous: Readonly<RuntimeSummaryProps>,
+  next: Readonly<RuntimeSummaryProps>,
+): boolean {
+  return (
+    previous.className === next.className &&
+    runtimeSummaryOutputEquals(
+      previous.status,
+      next.status,
+      previous.nowUnixSeconds,
+      next.nowUnixSeconds,
+    )
+  );
+}
+
+/**
+ * トンネル表示モデルの値が一致するか判定する
+ */
+function tunnelViewEquals(left: TunnelView, right: TunnelView): boolean {
+  return (
+    left.id === right.id &&
+    left.runtimeId === right.runtimeId &&
+    left.isFavorite === right.isFavorite &&
+    left.autoRecoverEnabled === right.autoRecoverEnabled &&
+    left.description === right.description &&
+    stringArraysEqual(left.tags, right.tags) &&
+    left.localHost === right.localHost &&
+    left.localPort === right.localPort &&
+    left.local === right.local &&
+    left.remoteHost === right.remoteHost &&
+    left.remotePort === right.remotePort &&
+    left.remote === right.remote &&
+    left.sshUser === right.sshUser &&
+    left.sshHost === right.sshHost &&
+    left.sshPort === right.sshPort &&
+    left.ssh === right.ssh &&
+    left.identityFile === right.identityFile &&
+    left.source === right.source &&
+    left.sourcePath === right.sourcePath &&
+    timeoutViewEquals(left.timeouts, right.timeouts) &&
+    runtimeStatusViewEquals(left.status, right.status)
+  );
+}
+
+/**
+ * runtime 状態の値が一致するか判定する
+ */
+function runtimeStatusViewEquals(
+  left: RuntimeStatusView | null,
+  right: RuntimeStatusView | null,
+): boolean {
+  if (left === null || right === null) {
+    return left === right;
+  }
+
+  return (
+    left.runtimeId === right.runtimeId &&
+    left.runtimeScope === right.runtimeScope &&
+    left.runtimeKey === right.runtimeKey &&
+    left.pid === right.pid &&
+    left.state === right.state &&
+    left.source === right.source &&
+    left.sourcePath === right.sourcePath &&
+    left.startedAtUnixSeconds === right.startedAtUnixSeconds
+  );
+}
+
+/**
+ * runtime 補助表示が同じ文字列になるか判定する
+ */
+function runtimeSummaryOutputEquals(
+  previous: RuntimeStatusView | null,
+  next: RuntimeStatusView | null,
+  previousNowUnixSeconds: number,
+  nextNowUnixSeconds: number,
+): boolean {
+  if (!runtimeStatusViewEquals(previous, next)) {
+    return false;
+  }
+
+  if (previous === null || next === null) {
+    return true;
+  }
+
+  return (
+    formatRuntimeAge(previous.startedAtUnixSeconds, previousNowUnixSeconds) ===
+    formatRuntimeAge(next.startedAtUnixSeconds, nextNowUnixSeconds)
+  );
+}
+
+/**
+ * タイムアウト表示モデルの値が一致するか判定する
+ */
+function timeoutViewEquals(left: TimeoutView, right: TimeoutView): boolean {
+  return (
+    left.connectTimeoutSeconds === right.connectTimeoutSeconds &&
+    left.serverAliveIntervalSeconds === right.serverAliveIntervalSeconds &&
+    left.serverAliveCountMax === right.serverAliveCountMax &&
+    left.startGraceMilliseconds === right.startGraceMilliseconds
+  );
+}
+
+/**
+ * 文字列配列の内容が一致するか判定する
+ */
+function stringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 /**

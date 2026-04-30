@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     env,
     fmt::{self, Display},
     io,
@@ -267,12 +268,13 @@ where
 /// トンネル状態の一覧を取得する
 pub fn tunnel_statuses(state_path: &Path) -> Result<Vec<TunnelRuntimeStatus>, TunnelRuntimeError> {
     let state_file = read_state_file(state_path)?;
+    let probe = RuntimeStatusProbe::from_states(&state_file.tunnels);
 
     Ok(state_file
         .tunnels
         .into_iter()
         .map(|state| {
-            let process_state = tunnel_process_state(&state);
+            let process_state = probe.process_state_for(&state);
 
             TunnelRuntimeStatus {
                 state,
@@ -310,14 +312,53 @@ pub fn stop_tunnel(
 
 /// トンネル状態から実行状態を判定する
 fn tunnel_process_state(state: &TunnelState) -> ProcessState {
-    let pid_is_running = process_is_running(state.pid);
-    let local_port_processes = if pid_is_running {
-        find_local_port_processes(state.local_port)
-    } else {
-        LocalPortProcesses::default()
-    };
+    RuntimeStatusProbe::from_states(std::slice::from_ref(state)).process_state_for(state)
+}
 
-    process_state_from_probe(state.pid, pid_is_running, &local_port_processes)
+/// 状態ファイル内の runtime 検査結果を保持する
+#[derive(Debug)]
+struct RuntimeStatusProbe {
+    pid_is_running: HashMap<u32, bool>,
+    local_port_processes: HashMap<u16, LocalPortProcesses>,
+}
+
+impl RuntimeStatusProbe {
+    /// 状態一覧からプロセス状態の検査結果を初期化する
+    fn from_states(states: &[TunnelState]) -> Self {
+        let pid_is_running = states
+            .iter()
+            .map(|state| (state.pid, process_is_running(state.pid)))
+            .collect::<HashMap<_, _>>();
+        let local_ports = states
+            .iter()
+            .filter(|state| pid_is_running.get(&state.pid).copied().unwrap_or(false))
+            .map(|state| state.local_port)
+            .collect::<HashSet<_>>();
+        let local_port_processes = find_local_port_processes_by_ports(&local_ports);
+
+        Self {
+            pid_is_running,
+            local_port_processes,
+        }
+    }
+
+    /// 保存済み runtime の現在状態を判定する
+    fn process_state_for(&self, state: &TunnelState) -> ProcessState {
+        let pid_is_running = self
+            .pid_is_running
+            .get(&state.pid)
+            .copied()
+            .unwrap_or(false);
+        let Some(local_port_processes) = self.local_port_processes.get(&state.local_port) else {
+            return process_state_from_probe(
+                state.pid,
+                pid_is_running,
+                &LocalPortProcesses::default(),
+            );
+        };
+
+        process_state_from_probe(state.pid, pid_is_running, local_port_processes)
+    }
 }
 
 /// トンネルPIDとLISTEN状態が一致するかを判定する
@@ -466,26 +507,44 @@ fn ensure_local_endpoint_available(
 
 /// ローカルポートを使用している LISTEN プロセスを取得する
 fn find_local_port_processes(local_port: u16) -> LocalPortProcesses {
-    let port_selector = format!("-iTCP:{local_port}");
-    let output = Command::new("lsof")
-        .arg("-nP")
-        .arg(port_selector)
+    find_local_port_processes_by_ports(&HashSet::from([local_port]))
+        .remove(&local_port)
+        .unwrap_or_default()
+}
+
+/// 複数ローカルポートの LISTEN プロセスを 1 回の lsof で取得する
+fn find_local_port_processes_by_ports(
+    local_ports: &HashSet<u16>,
+) -> HashMap<u16, LocalPortProcesses> {
+    if local_ports.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut command = Command::new("lsof");
+    command.arg("-nP");
+
+    for local_port in local_ports {
+        command.arg(format!("-iTCP:{local_port}"));
+    }
+
+    command
         .arg("-sTCP:LISTEN")
         .arg("-Fpcn")
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output();
+        .stderr(Stdio::null());
+
+    let output = command.output();
 
     let Ok(output) = output else {
-        return LocalPortProcesses::default();
+        return HashMap::new();
     };
 
     if !output.status.success() {
-        return LocalPortProcesses::default();
+        return HashMap::new();
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_lsof_processes(&stdout)
+    group_local_port_processes_by_port(parse_lsof_processes(&stdout), local_ports)
 }
 
 /// lsof の field 出力からプロセス情報を抽出する
@@ -498,22 +557,60 @@ fn parse_lsof_processes(output: &str) -> LocalPortProcesses {
 
         match field {
             "p" => {
-                if let Some(process) = current.into_process() {
-                    processes.push(process);
-                }
+                processes.extend(current.into_processes());
                 current = LocalPortProcessBuilder::from_pid(value);
             }
             "c" => current.command = non_empty_string(value),
-            "n" => current.endpoint = non_empty_string(value),
+            "n" => {
+                if let Some(endpoint) = non_empty_string(value) {
+                    current.endpoints.push(endpoint);
+                }
+            }
             _ => {}
         }
     }
 
-    if let Some(process) = current.into_process() {
-        processes.push(process);
-    }
+    processes.extend(current.into_processes());
 
     LocalPortProcesses::new(processes)
+}
+
+/// LISTEN プロセスをローカルポートごとに分類する
+fn group_local_port_processes_by_port(
+    processes: LocalPortProcesses,
+    local_ports: &HashSet<u16>,
+) -> HashMap<u16, LocalPortProcesses> {
+    let mut grouped = HashMap::<u16, Vec<LocalPortProcess>>::new();
+
+    for process in processes.0 {
+        let Some(local_port) = process.endpoint.as_deref().and_then(listen_endpoint_port) else {
+            continue;
+        };
+
+        if local_ports.contains(&local_port) {
+            grouped.entry(local_port).or_default().push(process);
+        }
+    }
+
+    grouped
+        .into_iter()
+        .map(|(local_port, processes)| (local_port, LocalPortProcesses::new(processes)))
+        .collect()
+}
+
+/// lsof の endpoint 表記から LISTEN ポートを抽出する
+fn listen_endpoint_port(endpoint: &str) -> Option<u16> {
+    let endpoint = endpoint
+        .trim()
+        .strip_suffix(" (LISTEN)")
+        .unwrap_or(endpoint)
+        .trim();
+    let socket = endpoint
+        .rsplit_once(' ')
+        .map_or(endpoint, |(_protocol, socket)| socket);
+    let (_host, port) = socket.rsplit_once(':')?;
+
+    port.parse().ok()
 }
 
 /// 空ではない文字列を保持する
@@ -530,7 +627,7 @@ fn non_empty_string(value: &str) -> Option<String> {
 struct LocalPortProcessBuilder {
     pid: Option<u32>,
     command: Option<String>,
-    endpoint: Option<String>,
+    endpoints: Vec<String>,
 }
 
 impl LocalPortProcessBuilder {
@@ -539,17 +636,33 @@ impl LocalPortProcessBuilder {
         Self {
             pid: value.parse().ok(),
             command: None,
-            endpoint: None,
+            endpoints: Vec::new(),
         }
     }
 
     /// 組み立て済みプロセス情報へ変換する
-    fn into_process(self) -> Option<LocalPortProcess> {
-        self.pid.map(|pid| LocalPortProcess {
-            command: self.command.unwrap_or_else(|| "unknown".to_owned()),
-            pid,
-            endpoint: self.endpoint,
-        })
+    fn into_processes(self) -> Vec<LocalPortProcess> {
+        let Some(pid) = self.pid else {
+            return Vec::new();
+        };
+        let command = self.command.unwrap_or_else(|| "unknown".to_owned());
+
+        if self.endpoints.is_empty() {
+            return vec![LocalPortProcess {
+                command,
+                pid,
+                endpoint: None,
+            }];
+        }
+
+        self.endpoints
+            .into_iter()
+            .map(|endpoint| LocalPortProcess {
+                command: command.clone(),
+                pid,
+                endpoint: Some(endpoint),
+            })
+            .collect()
     }
 }
 
@@ -836,6 +949,65 @@ n*:15432 (LISTEN)
                 },
             ])
         );
+    }
+
+    /// lsof の同一プロセスに複数 endpoint がある場合に endpoint ごとの行として扱うことを検証する
+    #[test]
+    fn parse_lsof_processes_reads_multiple_endpoints_for_same_process() {
+        let output = "\
+p1234
+cssh
+n127.0.0.1:15432 (LISTEN)
+n127.0.0.1:25432 (LISTEN)
+";
+
+        let processes = parse_lsof_processes(output);
+
+        assert_eq!(
+            processes,
+            LocalPortProcesses::new(vec![
+                LocalPortProcess {
+                    command: "ssh".to_owned(),
+                    pid: 1234,
+                    endpoint: Some("127.0.0.1:15432 (LISTEN)".to_owned()),
+                },
+                LocalPortProcess {
+                    command: "ssh".to_owned(),
+                    pid: 1234,
+                    endpoint: Some("127.0.0.1:25432 (LISTEN)".to_owned()),
+                },
+            ])
+        );
+    }
+
+    /// lsof の endpoint 表記からローカルポートごとに分類できることを検証する
+    #[test]
+    fn group_local_port_processes_by_port_extracts_requested_ports() {
+        let processes = LocalPortProcesses::new(vec![
+            LocalPortProcess {
+                command: "ssh".to_owned(),
+                pid: 1234,
+                endpoint: Some("TCP 127.0.0.1:15432 (LISTEN)".to_owned()),
+            },
+            LocalPortProcess {
+                command: "postgres".to_owned(),
+                pid: 5678,
+                endpoint: Some("*:5432 (LISTEN)".to_owned()),
+            },
+        ]);
+        let ports = HashSet::from([15432]);
+
+        let grouped = group_local_port_processes_by_port(processes, &ports);
+
+        assert_eq!(
+            grouped.get(&15432),
+            Some(&LocalPortProcesses::new(vec![LocalPortProcess {
+                command: "ssh".to_owned(),
+                pid: 1234,
+                endpoint: Some("TCP 127.0.0.1:15432 (LISTEN)".to_owned()),
+            }]))
+        );
+        assert!(!grouped.contains_key(&5432));
     }
 
     /// ポート使用プロセス情報がエラー表示へ含まれることを検証する

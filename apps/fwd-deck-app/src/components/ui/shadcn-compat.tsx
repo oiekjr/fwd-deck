@@ -317,17 +317,19 @@ export const Label = React.forwardRef<
 ));
 Label.displayName = LabelPrimitive.Root.displayName;
 
+type CheckboxSelectionState = boolean | "indeterminate";
+
 interface CheckboxContextValue {
   disabled: boolean;
   onChange?: (checked: boolean) => void;
-  selected: boolean;
+  selected: CheckboxSelectionState;
 }
 
 const CheckboxContext = React.createContext<CheckboxContextValue | null>(null);
 
 interface CheckboxRootProps extends Omit<React.LabelHTMLAttributes<HTMLLabelElement>, "onChange"> {
   isDisabled?: boolean;
-  isSelected?: boolean;
+  isSelected?: CheckboxSelectionState;
   onChange?: (checked: boolean) => void;
 }
 
@@ -361,7 +363,7 @@ function CheckboxControl({
     <CheckboxPrimitive.Root
       checked={context.selected}
       className={cn(
-        "peer size-4 shrink-0 rounded-sm border border-input bg-card shadow-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground",
+        "peer size-4 shrink-0 rounded-sm border border-input bg-card shadow-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground data-[state=indeterminate]:border-primary data-[state=indeterminate]:bg-primary data-[state=indeterminate]:text-primary-foreground",
         className,
       )}
       disabled={context.disabled}
@@ -376,21 +378,28 @@ function CheckboxIndicator({
   children,
   className,
 }: React.HTMLAttributes<HTMLSpanElement>): React.ReactElement {
+  const context = useRequiredContext(CheckboxContext, "Checkbox.Indicator");
+
   return (
     <CheckboxPrimitive.Indicator
       className={cn("flex items-center justify-center text-current", className)}
     >
-      {children ?? (
-        <svg aria-hidden="true" className="size-3" fill="none" viewBox="0 0 16 16">
-          <path
-            d="M3.5 8.5 6.5 11.5 12.5 4.5"
-            stroke="currentColor"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth="2"
-          />
-        </svg>
-      )}
+      {children ??
+        (context.selected === "indeterminate" ? (
+          <svg aria-hidden="true" className="size-3" fill="none" viewBox="0 0 16 16">
+            <path d="M3.5 8H12.5" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+          </svg>
+        ) : (
+          <svg aria-hidden="true" className="size-3" fill="none" viewBox="0 0 16 16">
+            <path
+              d="M3.5 8.5 6.5 11.5 12.5 4.5"
+              stroke="currentColor"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth="2"
+            />
+          </svg>
+        ))}
     </CheckboxPrimitive.Indicator>
   );
 }

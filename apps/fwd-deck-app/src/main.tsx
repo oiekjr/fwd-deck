@@ -1745,6 +1745,7 @@ function IconButton({
 interface SelectionCheckboxProps {
   label: string;
   isSelected: boolean;
+  isIndeterminate?: boolean;
   isDisabled?: boolean;
   onChange: () => void;
   className?: string;
@@ -1756,6 +1757,7 @@ interface SelectionCheckboxProps {
 function SelectionCheckbox({
   label,
   isSelected,
+  isIndeterminate = false,
   isDisabled = false,
   onChange,
   className,
@@ -1765,7 +1767,7 @@ function SelectionCheckbox({
       aria-label={label}
       className={className}
       isDisabled={isDisabled}
-      isSelected={isSelected}
+      isSelected={isIndeterminate ? "indeterminate" : isSelected}
       onChange={onChange}
     >
       <Checkbox.Control>
@@ -1964,7 +1966,10 @@ function DashboardView({
         hasActiveFilters={hasActiveFilters}
         homePath={homePath}
         selectedIds={selectedIds}
+        selectedVisibleCount={selectedVisibleCount}
         isBusy={isBusy}
+        onSelectVisible={onSelectVisible}
+        onDeselectVisible={onDeselectVisible}
         onToggle={onToggleSelection}
         onStart={onStartTunnel}
         onStop={onStopTunnel}
@@ -2999,7 +3004,10 @@ interface TunnelDeckProps {
   hasActiveFilters: boolean;
   homePath: string | null;
   selectedIds: Set<string>;
+  selectedVisibleCount: number;
   isBusy: boolean;
+  onSelectVisible: () => void;
+  onDeselectVisible: () => void;
   onToggle: (id: string) => void;
   onStart: (id: string) => void;
   onStop: (id: string) => void;
@@ -3021,7 +3029,10 @@ function TunnelDeck({
   hasActiveFilters,
   homePath,
   selectedIds,
+  selectedVisibleCount,
   isBusy,
+  onSelectVisible,
+  onDeselectVisible,
   onToggle,
   onStart,
   onStop,
@@ -3080,7 +3091,10 @@ function TunnelDeck({
         tunnels={tunnels}
         query={filters.query}
         selectedIds={selectedIds}
+        selectedVisibleCount={selectedVisibleCount}
         isBusy={isBusy}
+        onSelectVisible={onSelectVisible}
+        onDeselectVisible={onDeselectVisible}
         onToggle={onToggle}
         onStart={onStart}
         onStop={onStop}
@@ -3115,7 +3129,10 @@ interface TunnelSlimListProps {
   tunnels: TunnelView[];
   query: string;
   selectedIds: Set<string>;
+  selectedVisibleCount: number;
   isBusy: boolean;
+  onSelectVisible: () => void;
+  onDeselectVisible: () => void;
   onToggle: (id: string) => void;
   onStart: (id: string) => void;
   onStop: (id: string) => void;
@@ -3130,20 +3147,50 @@ function TunnelSlimList({
   tunnels,
   query,
   selectedIds,
+  selectedVisibleCount,
   isBusy,
+  onSelectVisible,
+  onDeselectVisible,
   onToggle,
   onStart,
   onStop,
   onEdit,
   onRemove,
 }: TunnelSlimListProps): ReactElement {
+  const visibleCount = tunnels.length;
+  const isAllVisibleSelected = visibleCount > 0 && selectedVisibleCount === visibleCount;
+  const isPartiallyVisibleSelected = selectedVisibleCount > 0 && !isAllVisibleSelected;
+  const headerSelectionLabel = isAllVisibleSelected
+    ? "表示中のトンネル選択を解除"
+    : "表示中のトンネルをすべて選択";
+
+  /**
+   * 表示中トンネルの選択状態を一括で切り替える
+   */
+  function toggleVisibleSelection(): void {
+    if (isAllVisibleSelected) {
+      onDeselectVisible();
+      return;
+    }
+
+    onSelectVisible();
+  }
+
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       <Table variant="secondary">
         <Table.ScrollContainer>
           <Table.Content aria-label="Configured tunnels" className="min-w-[64rem]">
             <Table.Header>
-              <Table.Column className="w-12">Select</Table.Column>
+              <Table.Column className="w-12">
+                <SelectionCheckbox
+                  label={headerSelectionLabel}
+                  isSelected={isAllVisibleSelected}
+                  isIndeterminate={isPartiallyVisibleSelected}
+                  isDisabled={isBusy || visibleCount === 0}
+                  onChange={toggleVisibleSelection}
+                />
+              </Table.Column>
               <Table.Column isRowHeader>Name</Table.Column>
               <Table.Column>Status</Table.Column>
               <Table.Column>Local</Table.Column>

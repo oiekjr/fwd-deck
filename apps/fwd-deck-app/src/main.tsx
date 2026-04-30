@@ -4106,7 +4106,18 @@ function TunnelSlimList({
     <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       <Table variant="secondary">
         <Table.ScrollContainer>
-          <Table.Content aria-label="Configured tunnels" className="min-w-[70rem]">
+          <Table.Content aria-label="Configured tunnels" className="min-w-[84rem] table-fixed">
+            <colgroup>
+              <col className="w-12" />
+              <col className="w-40" />
+              <col className="w-[5.5rem]" />
+              <col className="w-[10.5rem]" />
+              <col className="w-48" />
+              <col className="w-52" />
+              <col className="w-[5.5rem]" />
+              <col className="w-[4.5rem]" />
+              <col className="w-[19.5rem]" />
+            </colgroup>
             <Table.Header>
               <Table.Column className="w-12">
                 <SelectionCheckbox
@@ -4117,14 +4128,16 @@ function TunnelSlimList({
                   onChange={toggleVisibleSelection}
                 />
               </Table.Column>
-              <Table.Column isRowHeader>Name</Table.Column>
-              <Table.Column>Status</Table.Column>
-              <Table.Column>Local</Table.Column>
-              <Table.Column>Remote</Table.Column>
-              <Table.Column>SSH</Table.Column>
-              <Table.Column>Source</Table.Column>
-              <Table.Column>Watch</Table.Column>
-              <Table.Column className="text-right">Actions</Table.Column>
+              <Table.Column className="w-40" isRowHeader>
+                Name
+              </Table.Column>
+              <Table.Column className="w-[5.5rem]">Status</Table.Column>
+              <Table.Column className="w-[10.5rem]">Local</Table.Column>
+              <Table.Column className="w-48">Remote</Table.Column>
+              <Table.Column className="w-52">SSH</Table.Column>
+              <Table.Column className="w-[5.5rem]">Source</Table.Column>
+              <Table.Column className="w-[4.5rem]">Watch</Table.Column>
+              <Table.Column className="w-[19.5rem] text-right">Actions</Table.Column>
             </Table.Header>
             <Table.Body>
               {tunnels.map((tunnel) => (
@@ -4195,6 +4208,9 @@ const TunnelSlimRow = memo(function TunnelSlimRow({
 }: TunnelSlimRowProps): ReactElement {
   const running = tunnel.status?.state === "running";
   const status = tunnel.status?.state ?? "idle";
+  const runtimeInfo = tunnel.status
+    ? runtimeDisplayInfo(tunnel.status, runtimeNowUnixSeconds)
+    : null;
   const highlightQuery = query.trim();
 
   return (
@@ -4211,17 +4227,12 @@ const TunnelSlimRow = memo(function TunnelSlimRow({
           <HighlightedText text={tunnel.id} query={highlightQuery} />
         </div>
       </Table.Cell>
-      <Table.Cell>
-        <div className="flex flex-col items-start gap-1">
-          <StatusBadge status={status} />
-          {tunnel.status ? (
-            <RuntimeSummary
-              status={tunnel.status}
-              nowUnixSeconds={runtimeNowUnixSeconds}
-              className="max-w-40 truncate font-mono text-[0.65rem] text-foreground/50"
-            />
-          ) : null}
-        </div>
+      <Table.Cell className="w-[5.5rem]">
+        <StatusBadge
+          status={status}
+          title={runtimeInfo ? `${runtimeInfo.value} (${runtimeInfo.title})` : undefined}
+          ariaLabel={runtimeInfo?.ariaLabel}
+        />
       </Table.Cell>
       <Table.Cell className="max-w-44 truncate font-mono text-xs">
         <span title={tunnel.local}>
@@ -4250,7 +4261,7 @@ const TunnelSlimRow = memo(function TunnelSlimRow({
           compact
         />
       </Table.Cell>
-      <Table.Cell>
+      <Table.Cell className="w-[19.5rem]">
         <div className="flex min-w-max items-center justify-end gap-1">
           <FavoriteButton
             isFavorite={tunnel.isFavorite}
@@ -4593,17 +4604,29 @@ const RuntimeSummary = memo(function RuntimeSummary({
 }, areRuntimeSummaryPropsEqual);
 
 interface StatusBadgeProps {
+  ariaLabel?: string;
   status: TunnelStatus;
+  title?: string;
 }
 
 /**
  * トンネル状態のチップを表示する
  */
-const StatusBadge = memo(function StatusBadge({ status }: StatusBadgeProps): ReactElement {
+const StatusBadge = memo(function StatusBadge({
+  ariaLabel,
+  status,
+  title,
+}: StatusBadgeProps): ReactElement {
   const color = status === "running" ? "success" : status === "stale" ? "warning" : "default";
 
   return (
-    <Chip color={color} size="sm" variant={status === "idle" ? "secondary" : "soft"}>
+    <Chip
+      color={color}
+      size="sm"
+      variant={status === "idle" ? "secondary" : "soft"}
+      title={title}
+      aria-label={ariaLabel}
+    >
       {status}
     </Chip>
   );

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fwd Deck Release"
+  short_description: "Fwd Deckのrelease version更新"
+  default_prompt: "Use $fwd-deck-release to prepare a Fwd Deck release version update, asking for the exact version if it is not specified."

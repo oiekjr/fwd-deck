@@ -259,6 +259,14 @@ type OperationToastInput = Omit<OperationToastMessage, "id">;
 
 type TunnelOperationCommand = "start_tunnels" | "stop_tunnels";
 
+/**
+ * トンネル操作後の画面反映方法を指定する
+ */
+interface RunOperationOptions {
+  /** 成功した操作対象を選択状態から除外するか */
+  clearSucceededSelections?: boolean;
+}
+
 interface OperationProgress {
   operationId: string;
   command: TunnelOperationCommand;
@@ -768,7 +776,7 @@ function App(): ReactElement {
   /**
    * 指定 ID のトンネルを開始する
    */
-  async function startSelected(ids: string[]): Promise<void> {
+  async function startSelected(ids: string[], options: RunOperationOptions = {}): Promise<void> {
     if (ids.length === 0) {
       showOperationToast({ kind: "info", summary: "開始するトンネルを選択してください" });
       return;
@@ -777,13 +785,14 @@ function App(): ReactElement {
     await runOperation(
       "start_tunnels",
       ids.map((id) => ({ id })),
+      options,
     );
   }
 
   /**
    * 指定 ID のトンネルを停止する
    */
-  async function stopSelected(ids: string[]): Promise<void> {
+  async function stopSelected(ids: string[], options: RunOperationOptions = {}): Promise<void> {
     if (ids.length === 0) {
       showOperationToast({ kind: "info", summary: "停止するトンネルを選択してください" });
       return;
@@ -792,6 +801,7 @@ function App(): ReactElement {
     await runOperation(
       "stop_tunnels",
       ids.map((id) => operationTargetForStop(id, dashboard)),
+      options,
     );
   }
 
@@ -808,6 +818,7 @@ function App(): ReactElement {
   async function runOperation(
     command: TunnelOperationCommand,
     targets: OperationTarget[],
+    options: RunOperationOptions = {},
   ): Promise<void> {
     operationSequenceRef.current += 1;
     const operationId = `operation-${operationSequenceRef.current}`;
@@ -831,6 +842,15 @@ function App(): ReactElement {
       });
 
       await refreshDashboard(paths, { silent: true });
+      if (options.clearSucceededSelections === true && report.succeeded.length > 0) {
+        setSelectedIds((current) =>
+          removeSelections(
+            current,
+            report.succeeded.map((success) => success.id),
+          ),
+        );
+      }
+
       const message = operationMessage(report);
       if (message === null) {
         dismissOperationToast();
@@ -1356,8 +1376,12 @@ function App(): ReactElement {
               onSelectVisible={selectVisibleTunnels}
               onDeselectVisible={deselectVisibleTunnels}
               onToggleSelection={toggleSelection}
-              onStartSelected={() => void startSelected(selectedIdList)}
-              onStopSelected={() => void stopSelected(selectedIdList)}
+              onStartSelected={() =>
+                void startSelected(selectedIdList, { clearSucceededSelections: true })
+              }
+              onStopSelected={() =>
+                void stopSelected(selectedIdList, { clearSucceededSelections: true })
+              }
               onStartTunnel={(id) => void startSelected([id])}
               onStopTunnel={(id) => void stopSelected([id])}
               onStartTracked={(id) => void startSelected([id])}

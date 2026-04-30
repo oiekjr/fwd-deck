@@ -72,6 +72,8 @@ type StatusFilter = "all" | TunnelStatus;
 
 type ScopeFilter = "all" | ConfigScope;
 
+type TagFilterMode = "any" | "all";
+
 type AppView = "dashboard" | "add";
 
 type TunnelDisplayMode = "card" | "slim";
@@ -324,6 +326,7 @@ interface TunnelFilters {
   status: StatusFilter;
   scope: ScopeFilter;
   tags: string[];
+  tagMode: TagFilterMode;
   favoritesOnly: boolean;
 }
 
@@ -377,6 +380,7 @@ const initialFilters: TunnelFilters = {
   status: "all",
   scope: "all",
   tags: [],
+  tagMode: "any",
   favoritesOnly: false,
 };
 
@@ -414,6 +418,11 @@ const scopeFilterOptions: ReadonlyArray<{ value: ScopeFilter; label: string }> =
   { value: "all", label: "All scopes" },
   { value: "local", label: "Local" },
   { value: "global", label: "Global" },
+];
+
+const tagFilterModeOptions: ReadonlyArray<{ value: TagFilterMode; label: string }> = [
+  { value: "any", label: "Any" },
+  { value: "all", label: "All" },
 ];
 
 /**
@@ -1536,7 +1545,7 @@ function App(): ReactElement {
   function resetFilters(): void {
     captureResultScrollPosition();
     setQueryInput(initialFilters.query);
-    setFilters(initialFilters);
+    setFilters((current) => ({ ...initialFilters, tagMode: current.tagMode }));
   }
 
   return (
@@ -2855,28 +2864,74 @@ function TunnelOperationsPanel({
         />
 
         {availableTags.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-1.5 border-t border-border px-3 py-2">
-            <span className="text-xs font-medium text-muted-foreground">Tags</span>
-            {visibleTags.map((tag) => {
-              const selected = filters.tags.includes(tag);
-              return (
-                <HeroButton
-                  key={tag}
-                  type="button"
-                  variant={selected ? "primary" : "outline"}
-                  size="sm"
-                  onPress={() => onToggleTag(tag)}
-                  aria-pressed={selected}
-                  className="min-h-7 rounded-full px-3"
-                >
-                  {tag}
-                </HeroButton>
-              );
-            })}
+          <div className="flex flex-col gap-2 border-t border-border px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium text-muted-foreground">Tags</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-medium text-muted-foreground">Match</span>
+                <TagFilterModeControl
+                  tagMode={filters.tagMode}
+                  onTagModeChange={(mode) => onFilterChange("tagMode", mode)}
+                />
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {visibleTags.map((tag) => {
+                const selected = filters.tags.includes(tag);
+                return (
+                  <HeroButton
+                    key={tag}
+                    type="button"
+                    variant={selected ? "primary" : "outline"}
+                    size="sm"
+                    onPress={() => onToggleTag(tag)}
+                    aria-pressed={selected}
+                    className="min-h-7 rounded-full px-3"
+                  >
+                    {tag}
+                  </HeroButton>
+                );
+              })}
+            </div>
           </div>
         ) : null}
       </div>
     </section>
+  );
+}
+
+interface TagFilterModeControlProps {
+  tagMode: TagFilterMode;
+  onTagModeChange: (mode: TagFilterMode) => void;
+}
+
+/**
+ * タグ条件の照合方法を切り替える操作を表示する
+ */
+function TagFilterModeControl({
+  tagMode,
+  onTagModeChange,
+}: TagFilterModeControlProps): ReactElement {
+  return (
+    <div
+      className="grid grid-cols-2 gap-0.5 rounded-lg border border-border bg-muted p-0.5"
+      role="group"
+      aria-label="Tag match mode"
+    >
+      {tagFilterModeOptions.map((option) => (
+        <HeroButton
+          key={option.value}
+          type="button"
+          variant={tagMode === option.value ? "primary" : "ghost"}
+          size="sm"
+          onPress={() => onTagModeChange(option.value)}
+          aria-pressed={tagMode === option.value}
+          className="min-h-7 min-w-0 justify-center px-2"
+        >
+          {option.label}
+        </HeroButton>
+      ))}
+    </div>
   );
 }
 
@@ -5099,7 +5154,7 @@ function filterTunnels(
   homePath: string | null,
 ): TunnelView[] {
   const query = filters.query.trim().toLowerCase();
-  const requiredTags = new Set(filters.tags);
+  const selectedTags = new Set(filters.tags);
 
   return tunnels.filter((tunnel) => {
     const status = tunnelStatus(tunnel);
@@ -5116,7 +5171,7 @@ function filterTunnels(
       return false;
     }
 
-    if (!tunnelMatchesRequiredTags(tunnel, requiredTags)) {
+    if (!tunnelMatchesSelectedTags(tunnel, selectedTags, filters.tagMode)) {
       return false;
     }
 
@@ -5125,18 +5180,26 @@ function filterTunnels(
 }
 
 /**
- * トンネルが選択済みタグをすべて持つか判定する
+ * トンネルが選択済みタグの照合方法に一致するか判定する
  */
-function tunnelMatchesRequiredTags(tunnel: TunnelView, requiredTags: Set<string>): boolean {
-  if (requiredTags.size === 0) {
+function tunnelMatchesSelectedTags(
+  tunnel: TunnelView,
+  selectedTags: Set<string>,
+  tagMode: TagFilterMode,
+): boolean {
+  if (selectedTags.size === 0) {
     return true;
   }
 
-  if (tunnel.tags.length < requiredTags.size) {
+  if (tagMode === "any") {
+    return tunnel.tags.some((tag) => selectedTags.has(tag));
+  }
+
+  if (tunnel.tags.length < selectedTags.size) {
     return false;
   }
 
-  for (const tag of requiredTags) {
+  for (const tag of selectedTags) {
     if (!tunnel.tags.includes(tag)) {
       return false;
     }

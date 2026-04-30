@@ -125,7 +125,7 @@ interface WorkspaceSelection {
   workspaceStatePath: string;
   hideDockIconWhenWindowHidden: boolean;
   autoStopTunnelsOnQuit: boolean;
-  showTrackedRuntimeBar: boolean;
+  hideTrackedRuntimeBar: boolean;
 }
 
 interface WorkspaceSelectionInput {
@@ -134,7 +134,7 @@ interface WorkspaceSelectionInput {
   useGlobal: boolean;
   hideDockIconWhenWindowHidden: boolean;
   autoStopTunnelsOnQuit: boolean;
-  showTrackedRuntimeBar: boolean;
+  hideTrackedRuntimeBar: boolean;
 }
 
 interface OperationTarget {
@@ -381,7 +381,7 @@ const initialPaths: WorkspaceSelection = {
   workspaceStatePath: "",
   hideDockIconWhenWindowHidden: false,
   autoStopTunnelsOnQuit: false,
-  showTrackedRuntimeBar: true,
+  hideTrackedRuntimeBar: false,
 };
 
 const initialForm: TunnelFormState = {
@@ -2462,7 +2462,7 @@ function DashboardView({
   const [isTrackedPanelCollapsed, setIsTrackedPanelCollapsed] = useState<boolean>(true);
   const hasTrackedRuntime = (dashboard?.trackedTunnels.length ?? 0) > 0;
   const shouldShowTrackedPanel =
-    (dashboard?.paths.showTrackedRuntimeBar ?? true) && hasTrackedRuntime;
+    !(dashboard?.paths.hideTrackedRuntimeBar ?? false) && hasTrackedRuntime;
   const hasSelection = selectedCount > 0;
   const shouldShowSelectionActionBar = hasSelection || filteredTunnels.length > 0;
   const [selectionBarRef, selectionBarHeight] = useMeasuredElementHeight<HTMLDivElement>(
@@ -2890,12 +2890,12 @@ function PathPanel({
         <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
           <Switch
             size="sm"
-            isSelected={paths.showTrackedRuntimeBar}
-            onChange={(selected) => onChange("showTrackedRuntimeBar", selected)}
+            isSelected={paths.hideTrackedRuntimeBar}
+            onChange={(selected) => onChange("hideTrackedRuntimeBar", selected)}
             className="w-full justify-between"
           >
             <Switch.Content>
-              <span className="text-sm font-semibold">Show Tracked runtime bar</span>
+              <span className="text-sm font-semibold">Hide Tracked runtime bar</span>
             </Switch.Content>
             <Switch.Control>
               <Switch.Thumb />
@@ -5961,7 +5961,7 @@ function workspaceSelectionEquals(left: WorkspaceSelection, right: WorkspaceSele
     left.workspaceStatePath === right.workspaceStatePath &&
     left.hideDockIconWhenWindowHidden === right.hideDockIconWhenWindowHidden &&
     left.autoStopTunnelsOnQuit === right.autoStopTunnelsOnQuit &&
-    left.showTrackedRuntimeBar === right.showTrackedRuntimeBar
+    left.hideTrackedRuntimeBar === right.hideTrackedRuntimeBar
   );
 }
 
@@ -6659,7 +6659,7 @@ function normalizeWorkspaceSelection(paths: WorkspaceSelection): WorkspaceSelect
     useGlobal: paths.useGlobal,
     hideDockIconWhenWindowHidden: paths.hideDockIconWhenWindowHidden,
     autoStopTunnelsOnQuit: paths.autoStopTunnelsOnQuit,
-    showTrackedRuntimeBar: paths.showTrackedRuntimeBar,
+    hideTrackedRuntimeBar: paths.hideTrackedRuntimeBar,
   };
 }
 

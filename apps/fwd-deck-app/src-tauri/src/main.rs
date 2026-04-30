@@ -2,7 +2,10 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -149,6 +152,8 @@ struct TrayState {
     tunnel_actions: Mutex<HashMap<String, TrayTunnelAction>>,
     workspace_actions: Mutex<HashMap<String, TrayWorkspaceAction>>,
     tunnel_items: Mutex<HashMap<String, CheckMenuItem<tauri::Wry>>>,
+    favorite_submenu: Mutex<Option<Submenu<tauri::Wry>>>,
+    favorite_refresh_sequence: AtomicU64,
 }
 
 impl TrayState {
@@ -208,6 +213,22 @@ impl TrayState {
             .tunnel_items
             .lock()
             .expect("tray item state should not be poisoned") = item_handles.tunnel_items;
+        *self
+            .favorite_submenu
+            .lock()
+            .expect("tray submenu state should not be poisoned") = item_handles.favorite_submenu;
+    }
+
+    /// Favorites メニュー更新の世代を進める
+    fn next_favorite_refresh_sequence(&self) -> u64 {
+        self.favorite_refresh_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            + 1
+    }
+
+    /// Favorites メニュー更新の世代が最新か判定する
+    fn favorite_refresh_sequence_is_latest(&self, sequence: u64) -> bool {
+        self.favorite_refresh_sequence.load(Ordering::Relaxed) == sequence
     }
 
     /// 既存のトンネル項目へ状態を反映する
@@ -275,6 +296,89 @@ impl TrayState {
         self.upsert_tunnel_actions(items);
 
         Ok(TrayInPlaceMenuUpdate::Apply)
+    }
+
+    /// Favorites サブメニューのトンネル項目だけを差し替える
+    fn replace_favorite_tunnel_items_in_place(
+        &self,
+        app: &tauri::AppHandle,
+        items: Vec<TrayTunnelMenuItem>,
+    ) -> Result<TrayInPlaceMenuUpdate, AppError> {
+        let submenu = self
+            .favorite_submenu
+            .lock()
+            .expect("tray submenu state should not be poisoned")
+            .clone();
+        let Some(submenu) = submenu else {
+            return Ok(TrayInPlaceMenuUpdate::RebuildRequired);
+        };
+
+        remove_submenu_items(&submenu)?;
+        let mut next_item_handles = HashMap::new();
+        let mut next_actions = HashMap::new();
+
+        if items.is_empty() {
+            let empty = MenuItem::with_id(
+                app,
+                TRAY_MENU_NO_FAVORITE_TUNNELS,
+                "No favorite tunnels",
+                false,
+                None::<&str>,
+            )?;
+            submenu.append(&empty)?;
+        } else {
+            for item in items {
+                let menu_item = CheckMenuItem::with_id(
+                    app,
+                    item.menu_id.clone(),
+                    item.label,
+                    item.enabled,
+                    item.checked,
+                    None::<&str>,
+                )?;
+                next_actions.insert(item.menu_id.clone(), item.action);
+                next_item_handles.insert(item.menu_id, menu_item.clone());
+                submenu.append(&menu_item)?;
+            }
+        }
+
+        self.replace_tunnel_item_handles_by_prefix(
+            TRAY_FAVORITE_TUNNEL_ITEM_PREFIX,
+            next_item_handles,
+        );
+        self.replace_tunnel_actions_by_prefix(TRAY_FAVORITE_TUNNEL_ITEM_PREFIX, next_actions);
+
+        Ok(TrayInPlaceMenuUpdate::Apply)
+    }
+
+    /// 指定 prefix のトンネル項目ハンドルを差し替える
+    fn replace_tunnel_item_handles_by_prefix(
+        &self,
+        menu_id_prefix: &str,
+        next_item_handles: HashMap<String, CheckMenuItem<tauri::Wry>>,
+    ) {
+        let mut item_handles = self
+            .tunnel_items
+            .lock()
+            .expect("tray item state should not be poisoned");
+
+        item_handles.retain(|menu_id, _| !menu_id.starts_with(menu_id_prefix));
+        item_handles.extend(next_item_handles);
+    }
+
+    /// 指定 prefix のトレイ操作を差し替える
+    fn replace_tunnel_actions_by_prefix(
+        &self,
+        menu_id_prefix: &str,
+        next_actions: HashMap<String, TrayTunnelAction>,
+    ) {
+        let mut actions = self
+            .tunnel_actions
+            .lock()
+            .expect("tray action state should not be poisoned");
+
+        actions.retain(|menu_id, _| !menu_id.starts_with(menu_id_prefix));
+        actions.extend(next_actions);
     }
 
     /// 既存のトレイ操作へ指定項目の操作だけを反映する
@@ -346,6 +450,7 @@ struct TrayMenuActions {
 #[derive(Clone, Default)]
 struct TrayMenuItemHandles {
     tunnel_items: HashMap<String, CheckMenuItem<tauri::Wry>>,
+    favorite_submenu: Option<Submenu<tauri::Wry>>,
 }
 
 /// トレイアイコンへ反映する接続状態を表現する
@@ -823,6 +928,8 @@ fn build_tray_menu(
     let auto_recover = Submenu::new(app, "Auto recover", true)?;
     let workspaces = Submenu::new(app, "Workspaces", true)?;
 
+    item_handles.favorite_submenu = Some(favorites.clone());
+
     append_tray_tunnel_menu_items(
         app,
         &favorites,
@@ -968,6 +1075,52 @@ fn refresh_tray_auto_recover_items_in_place_or_rebuild(
     }
 }
 
+/// Favorites 項目更新を command の応答後に実行する
+fn refresh_tray_favorite_items_in_background(app: tauri::AppHandle) {
+    let sequence = app.state::<TrayState>().next_favorite_refresh_sequence();
+
+    let _ = thread::Builder::new()
+        .name("tray-favorites-refresh".to_owned())
+        .spawn(move || {
+            let _ = refresh_latest_tray_favorite_items_in_place_or_rebuild(&app, sequence);
+        });
+}
+
+/// 最新の Favorites 項目更新だけをトレイへ反映する
+fn refresh_latest_tray_favorite_items_in_place_or_rebuild(
+    app: &tauri::AppHandle,
+    sequence: u64,
+) -> Result<(), AppError> {
+    let items = load_tray_favorite_tunnel_items(app)?;
+    let tray_state = app.state::<TrayState>();
+
+    if !tray_state.favorite_refresh_sequence_is_latest(sequence) {
+        return Ok(());
+    }
+
+    match tray_state.replace_favorite_tunnel_items_in_place(app, items)? {
+        TrayInPlaceMenuUpdate::Apply => Ok(()),
+        TrayInPlaceMenuUpdate::RebuildRequired => rebuild_tray_menu(app),
+    }
+}
+
+/// Favorites サブメニューに必要な項目だけを読み込む
+fn load_tray_favorite_tunnel_items(
+    app: &tauri::AppHandle,
+) -> Result<Vec<TrayTunnelMenuItem>, AppError> {
+    let runtime_paths = resolve_runtime_paths(app, None)?;
+    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
+    let validation = validate_config(&config);
+
+    Ok(tray_favorite_tunnel_menu_items(
+        &config,
+        &statuses,
+        &validation,
+        &runtime_paths.preferences,
+    ))
+}
+
 /// 必要な場合だけトレイアイコン画像を差し替える
 fn update_tray_icon_if_changed(
     app: &tauri::AppHandle,
@@ -1036,6 +1189,17 @@ fn tray_in_place_menu_update(
     } else {
         TrayInPlaceMenuUpdate::RebuildRequired
     }
+}
+
+/// サブメニュー内の現在項目をすべて削除する
+fn remove_submenu_items(submenu: &Submenu<tauri::Wry>) -> Result<(), AppError> {
+    let item_count = submenu.items()?.len();
+
+    for _ in 0..item_count {
+        let _ = submenu.remove_at(0)?;
+    }
+
+    Ok(())
 }
 
 /// トレイのトンネルサブメニューへ項目を追加する
@@ -2536,7 +2700,7 @@ fn set_tunnel_favorite(
 ) -> Result<PathView, String> {
     let result = set_tunnel_favorite_inner(&app, paths, &runtime_id, is_favorite);
     if result.is_ok() {
-        let _ = rebuild_tray_menu(&app);
+        refresh_tray_favorite_items_in_background(app.clone());
     }
 
     command_result(result)

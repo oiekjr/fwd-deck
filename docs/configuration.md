@@ -11,7 +11,8 @@
 | グローバル設定 | `~/.config/fwd-deck/config.toml` | 複数プロジェクトで共有する設定 |
 | ローカル設定 | `./fwd-deck.toml` | 作業ディレクトリ固有の設定 |
 
-同じ `id` がある場合は、ローカル設定がグローバル設定を上書きします。  
+同じ `name` は global と local の両方に共存できます。  
+bare name を指定する操作では local が優先され、global を対象にする場合は `--scope global` を指定します。  
 `fwd-deck.toml` はローカル環境用の設定として git 管理から除外する想定です。  
 
 設定ファイルの場所は CLIオプションで変更できます。  
@@ -36,7 +37,7 @@ server_alive_count_max = 3
 start_grace_milliseconds = 300
 
 [[tunnels]]
-id = "dev-db"
+name = "dev-db"
 description = "Development database"
 tags = ["dev", "project-a"]
 local_host = "127.0.0.1"
@@ -56,7 +57,7 @@ connect_timeout_seconds = 10
 
 | フィールド | 必須 | 説明 |
 | --- | --- | --- |
-| `id` | Yes | トンネルを識別する名前 |
+| `name` | Yes | トンネルを識別する表示名 |
 | `description` | No | `show` や `list --query` で使う説明 |
 | `tags` | No | `start --tag` や `list --tag` で使うタグ |
 | `local_host` | No | ローカル側bind address、省略時は `127.0.0.1` |
@@ -70,6 +71,9 @@ connect_timeout_seconds = 10
 | `timeouts` | No | トンネル単位のタイムアウト上書き |
 
 `tags` は小文字 ASCII の `a-z`, `0-9`, `-`, `_`, `.`, `/` を使えます。  
+同一設定ファイル内の `name` 重複と `local_port` 重複は検証エラーです。  
+global と local の間で同じ `name` や `local_port` を使う設定は許容します。  
+同じ `local_port` のトンネルを同時に起動しようとした場合、後から起動した側が local endpoint 使用中として失敗します。  
 `local_port` が `1024` 未満の場合、`validate` は権限が必要になる可能性を warning として表示します。  
 
 ## Timeout Settings
@@ -88,6 +92,7 @@ connect_timeout_seconds = 10
 
 起動したトンネルの PID や接続先は、既定で `~/.local/state/fwd-deck/state.toml` に保存します。  
 この状態ファイルは `status`, `stop`, `recover`, `watch` が対象プロセスを判断するために使います。  
+状態ファイル上では `source_kind`, 正規化した `source_path`, `name` から生成した `runtime_id` で各トンネルを追跡します。  
 
 状態ファイルの場所は `--state` で変更できます。  
 

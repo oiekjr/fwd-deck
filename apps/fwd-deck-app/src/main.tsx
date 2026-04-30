@@ -120,6 +120,7 @@ interface WorkspaceSelectionInput {
 
 interface OperationTarget {
   id: string;
+  runtimeId?: string;
   runtimeScope?: RuntimeScope;
 }
 
@@ -145,12 +146,13 @@ interface ValidationView {
 interface ValidationIssueView {
   source: string;
   path: string;
-  tunnelId: string | null;
+  tunnelName: string | null;
   message: string;
 }
 
 interface TunnelView {
   id: string;
+  runtimeId: string;
   description: string | null;
   tags: string[];
   localHost: string;
@@ -172,6 +174,7 @@ interface TunnelView {
 
 interface TrackedTunnelView {
   id: string;
+  runtimeId: string;
   runtimeScope: RuntimeScope;
   runtimeKey: string;
   local: string;
@@ -181,6 +184,7 @@ interface TrackedTunnelView {
 }
 
 interface RuntimeStatusView {
+  runtimeId: string;
   runtimeScope: RuntimeScope;
   runtimeKey: string;
   pid: number;
@@ -418,7 +422,7 @@ function App(): ReactElement {
     [dashboard, filters, homePath],
   );
   const filteredTunnelIds = useMemo<string[]>(
-    () => filteredTunnels.map((tunnel) => tunnel.id),
+    () => filteredTunnels.map((tunnel) => tunnel.runtimeId),
     [filteredTunnels],
   );
   const selectedVisibleCount = useMemo<number>(
@@ -774,7 +778,7 @@ function App(): ReactElement {
   }, [hasCompletedInitialLoad, paths, refreshDashboard]);
 
   /**
-   * 指定 ID のトンネルを開始する
+   * 指定 name のトンネルを開始する
    */
   async function startSelected(ids: string[], options: RunOperationOptions = {}): Promise<void> {
     if (ids.length === 0) {
@@ -784,13 +788,13 @@ function App(): ReactElement {
 
     await runOperation(
       "start_tunnels",
-      ids.map((id) => ({ id })),
+      ids.map((id) => operationTargetForTunnel(id, dashboard)),
       options,
     );
   }
 
   /**
-   * 指定 ID のトンネルを停止する
+   * 指定 name のトンネルを停止する
    */
   async function stopSelected(ids: string[], options: RunOperationOptions = {}): Promise<void> {
     if (ids.length === 0) {
@@ -843,12 +847,7 @@ function App(): ReactElement {
 
       await refreshDashboard(paths, { silent: true });
       if (options.clearSucceededSelections === true && report.succeeded.length > 0) {
-        setSelectedIds((current) =>
-          removeSelections(
-            current,
-            report.succeeded.map((success) => success.id),
-          ),
-        );
+        setSelectedIds(new Set());
       }
 
       const message = operationMessage(report);
@@ -979,7 +978,7 @@ function App(): ReactElement {
 
       setDashboard(loaded);
       setPaths(loaded.paths);
-      setSelectedIds((current) => removeSelection(current, tunnel.id));
+      setSelectedIds((current) => removeSelection(current, tunnel.runtimeId));
       showOperationToast({ kind: "success", summary: `${tunnel.id} を設定から削除しました` });
     } catch (error) {
       showOperationToast({ kind: "error", summary: stringifyError(error) });
@@ -2359,14 +2358,14 @@ function ValidationPanel({ dashboard }: ValidationPanelProps): ReactElement | nu
     <section className="flex flex-col gap-2">
       {dashboard.validation.errors.map((issue) => (
         <IssueRow
-          key={`${issue.path}:${issue.tunnelId ?? "file"}:${issue.message}`}
+          key={`${issue.path}:${issue.tunnelName ?? "file"}:${issue.message}`}
           issue={issue}
           kind="error"
         />
       ))}
       {dashboard.validation.warnings.map((issue) => (
         <IssueRow
-          key={`${issue.path}:${issue.tunnelId ?? "file"}:${issue.message}`}
+          key={`${issue.path}:${issue.tunnelName ?? "file"}:${issue.message}`}
           issue={issue}
           kind="warning"
         />
@@ -2407,7 +2406,7 @@ interface IssueRowProps {
 function IssueRow({ issue, kind }: IssueRowProps): ReactElement {
   return (
     <AlertMessage kind={kind}>
-      {issue.tunnelId ? `${issue.tunnelId}: ` : ""}
+      {issue.tunnelName ? `${issue.tunnelName}: ` : ""}
       {issue.message}
     </AlertMessage>
   );
@@ -2496,7 +2495,7 @@ function TunnelOperationsPanel({
                 onChange={(event: ChangeEvent<HTMLInputElement>) =>
                   onQueryInputChange(event.target.value)
                 }
-                placeholder="Search ID, tag, endpoint"
+                placeholder="Search name, tag, endpoint"
                 aria-label="Search tunnels"
               />
               {queryInput.length > 0 ? (
@@ -3095,11 +3094,11 @@ function TunnelDeck({
     <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
       {tunnels.map((tunnel) => (
         <TunnelCard
-          key={tunnel.id}
+          key={tunnel.runtimeId}
           tunnel={tunnel}
           query={filters.query}
           homePath={homePath}
-          checked={selectedIds.has(tunnel.id)}
+          checked={selectedIds.has(tunnel.runtimeId)}
           isBusy={isBusy}
           onToggle={onToggle}
           onStart={onStart}
@@ -3145,7 +3144,7 @@ function TunnelSlimList({
           <Table.Content aria-label="Configured tunnels" className="min-w-[64rem]">
             <Table.Header>
               <Table.Column className="w-12">Select</Table.Column>
-              <Table.Column isRowHeader>ID</Table.Column>
+              <Table.Column isRowHeader>Name</Table.Column>
               <Table.Column>Status</Table.Column>
               <Table.Column>Local</Table.Column>
               <Table.Column>Remote</Table.Column>
@@ -3156,10 +3155,10 @@ function TunnelSlimList({
             <Table.Body>
               {tunnels.map((tunnel) => (
                 <TunnelSlimRow
-                  key={tunnel.id}
+                  key={tunnel.runtimeId}
                   tunnel={tunnel}
                   query={query}
-                  checked={selectedIds.has(tunnel.id)}
+                  checked={selectedIds.has(tunnel.runtimeId)}
                   isBusy={isBusy}
                   onToggle={onToggle}
                   onStart={onStart}
@@ -3207,12 +3206,12 @@ function TunnelSlimRow({
   const highlightQuery = query.trim();
 
   return (
-    <Table.Row className={checked ? "bg-primary/5" : undefined} id={tunnel.id}>
+    <Table.Row className={checked ? "bg-primary/5" : undefined} id={tunnel.runtimeId}>
       <Table.Cell>
         <SelectionCheckbox
           label={`${tunnel.id} を選択`}
           isSelected={checked}
-          onChange={() => onToggle(tunnel.id)}
+          onChange={() => onToggle(tunnel.runtimeId)}
         />
       </Table.Cell>
       <Table.Cell className="max-w-56">
@@ -3247,7 +3246,7 @@ function TunnelSlimRow({
             type="button"
             variant={running ? "ghost" : "primary"}
             size="sm"
-            onPress={() => onStart(tunnel.id)}
+            onPress={() => onStart(tunnel.runtimeId)}
             isDisabled={isBusy || running}
           >
             <Play size={13} />
@@ -3257,7 +3256,7 @@ function TunnelSlimRow({
             type="button"
             variant={running ? "danger" : "outline"}
             size="sm"
-            onPress={() => onStop(tunnel.id)}
+            onPress={() => onStop(tunnel.runtimeId)}
             isDisabled={isBusy || tunnel.status === null}
           >
             <CircleStop size={13} />
@@ -3360,7 +3359,7 @@ function TunnelCard({
           <Checkbox
             className="min-w-0 flex-1 items-start gap-3"
             isSelected={checked}
-            onChange={() => onToggle(tunnel.id)}
+            onChange={() => onToggle(tunnel.runtimeId)}
           >
             <Checkbox.Control className="mt-1">
               <Checkbox.Indicator />
@@ -3396,7 +3395,7 @@ function TunnelCard({
             type="button"
             variant={running ? "ghost" : "primary"}
             size="sm"
-            onPress={() => onStart(tunnel.id)}
+            onPress={() => onStart(tunnel.runtimeId)}
             isDisabled={isBusy || running}
           >
             <Play size={15} />
@@ -3406,7 +3405,7 @@ function TunnelCard({
             type="button"
             variant={running ? "danger" : "outline"}
             size="sm"
-            onPress={() => onStop(tunnel.id)}
+            onPress={() => onStop(tunnel.runtimeId)}
             isDisabled={isBusy || tunnel.status === null}
           >
             <CircleStop size={15} />
@@ -3669,7 +3668,7 @@ function TrackedPanel({
               <Table.ScrollContainer>
                 <Table.Content aria-label="Tracked runtime tunnels">
                   <Table.Header>
-                    <Table.Column isRowHeader>ID</Table.Column>
+                    <Table.Column isRowHeader>Name</Table.Column>
                     <Table.Column>Endpoint</Table.Column>
                     <Table.Column>Status</Table.Column>
                     <Table.Column className="text-right">Actions</Table.Column>
@@ -3699,7 +3698,7 @@ function TrackedPanel({
                                   type="button"
                                   variant="primary"
                                   size="sm"
-                                  onPress={() => onStart(tracked.id)}
+                                  onPress={() => onStart(tracked.runtimeId)}
                                   isDisabled={isBusy}
                                 >
                                   <Play size={13} />
@@ -3711,7 +3710,11 @@ function TrackedPanel({
                                 variant="outline"
                                 size="sm"
                                 onPress={() =>
-                                  onStop({ id: tracked.id, runtimeScope: tracked.runtimeScope })
+                                  onStop({
+                                    id: tracked.id,
+                                    runtimeId: tracked.runtimeId,
+                                    runtimeScope: tracked.runtimeScope,
+                                  })
                                 }
                                 isDisabled={isBusy}
                               >
@@ -3840,7 +3843,7 @@ function TunnelForm({
         <section className="flex flex-col gap-3">
           <h3 className="text-xs font-medium text-muted-foreground">Identity</h3>
           <TextField
-            label="ID"
+            label="Name"
             value={form.id}
             onChange={(value) => onChange("id", value)}
             required
@@ -4119,7 +4122,7 @@ function EditTunnelModal({
                   <section className="flex flex-col gap-3">
                     <h4 className="text-xs font-medium text-muted-foreground">Identity</h4>
                     <TextField
-                      label="ID"
+                      label="Name"
                       value={form.id}
                       onChange={(value) => onChange("id", value)}
                       required
@@ -4570,7 +4573,7 @@ function isMissingTauriRuntimeError(error: unknown): boolean {
  */
 function formToTunnelInput(form: TunnelFormState): TunnelInput {
   return {
-    id: requireText(form.id, "ID"),
+    id: requireText(form.id, "Name"),
     description: optionalText(form.description),
     tags: parseTags(form.tags),
     localHost: requireText(form.localHost, "Local host"),
@@ -4711,16 +4714,43 @@ function workspaceSwitchSuccessSummary(defaultSummary: string, stoppedCount: num
 }
 
 /**
- * 停止対象の runtime scope を現在の表示状態から取得する
+ * runtime ID から操作対象を現在の表示状態で解決する
  */
-function operationTargetForStop(id: string, dashboard: DashboardState | null): OperationTarget {
-  const runtimeScope = dashboard?.tunnels.find((tunnel) => tunnel.id === id)?.status?.runtimeScope;
+function operationTargetForTunnel(
+  runtimeId: string,
+  dashboard: DashboardState | null,
+): OperationTarget {
+  const tunnel = dashboard?.tunnels.find((tunnel) => tunnel.runtimeId === runtimeId);
 
-  if (runtimeScope === undefined) {
-    return { id };
+  if (tunnel === undefined) {
+    return { id: runtimeId, runtimeId };
   }
 
-  return { id, runtimeScope };
+  return { id: tunnel.id, runtimeId: tunnel.runtimeId };
+}
+
+/**
+ * 停止対象の runtime scope を現在の表示状態から取得する
+ */
+function operationTargetForStop(
+  runtimeId: string,
+  dashboard: DashboardState | null,
+): OperationTarget {
+  const tunnel = dashboard?.tunnels.find((tunnel) => tunnel.runtimeId === runtimeId);
+
+  if (tunnel === undefined) {
+    return { id: runtimeId, runtimeId };
+  }
+
+  if (tunnel.status === null) {
+    return { id: tunnel.id, runtimeId: tunnel.runtimeId };
+  }
+
+  return {
+    id: tunnel.id,
+    runtimeId: tunnel.runtimeId,
+    runtimeScope: tunnel.status.runtimeScope,
+  };
 }
 
 /**
@@ -4747,7 +4777,7 @@ function isSearchKeyboardShortcut(event: KeyboardEvent): boolean {
  * 現在存在するトンネルだけを選択状態として残す
  */
 function keepExistingSelections(current: Set<string>, tunnels: TunnelView[]): Set<string> {
-  const ids = new Set(tunnels.map((tunnel) => tunnel.id));
+  const ids = new Set(tunnels.map((tunnel) => tunnel.runtimeId));
   const next = new Set<string>();
   let hasRemovedSelection = false;
 
@@ -4764,7 +4794,7 @@ function keepExistingSelections(current: Set<string>, tunnels: TunnelView[]): Se
 }
 
 /**
- * 指定 ID の選択状態を切り替える
+ * 指定 runtime ID の選択状態を切り替える
  */
 function toggleId(current: Set<string>, id: string): Set<string> {
   const next = new Set(current);
@@ -4778,7 +4808,7 @@ function toggleId(current: Set<string>, id: string): Set<string> {
 }
 
 /**
- * 指定 ID 群を選択状態へ追加する
+ * 指定 runtime ID 群を選択状態へ追加する
  */
 function addSelections(current: Set<string>, ids: string[]): Set<string> {
   const next = new Set(current);
@@ -4787,7 +4817,7 @@ function addSelections(current: Set<string>, ids: string[]): Set<string> {
 }
 
 /**
- * 指定 ID を選択状態から除外する
+ * 指定 runtime ID を選択状態から除外する
  */
 function removeSelection(current: Set<string>, id: string): Set<string> {
   const next = new Set(current);
@@ -4796,7 +4826,7 @@ function removeSelection(current: Set<string>, id: string): Set<string> {
 }
 
 /**
- * 指定 ID 群を選択状態から除外する
+ * 指定 runtime ID 群を選択状態から除外する
  */
 function removeSelections(current: Set<string>, ids: string[]): Set<string> {
   const next = new Set(current);

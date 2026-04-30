@@ -16,7 +16,10 @@ pub use config::{
     tunnel_matches_tags, update_tunnel_in_config_file, validate_config,
 };
 pub use path_display::{format_path_for_display, format_path_for_display_with_home};
-pub use state::{StateFileError, TunnelState, TunnelStateFile, default_state_file_path};
+pub use state::{
+    StateFileError, TunnelState, TunnelStateFile, default_state_file_path,
+    runtime_id_for_resolved_tunnel, tunnel_runtime_id,
+};
 pub use tunnel::{
     ProcessState, StartedTunnel, StoppedTunnel, TunnelRuntimeError, TunnelRuntimeStatus,
     build_ssh_command_args, start_tunnel, start_tunnels, start_tunnels_with_progress, stop_tunnel,

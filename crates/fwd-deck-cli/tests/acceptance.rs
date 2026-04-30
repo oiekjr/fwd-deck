@@ -34,7 +34,7 @@ fn list_tag_filters_tunnels_by_tag() {
     output.assert_stdout_not_contains("prod-cache");
 }
 
-/// list が ID 昇順でトンネルを表示することを検証する
+/// list が NAME 昇順でトンネルを表示することを検証する
 #[test]
 fn list_sorts_tunnels_by_id() {
     let workspace = TestWorkspace::new();
@@ -70,7 +70,7 @@ fn list_json_outputs_configured_tunnels() {
     assert!(output.status.success());
     let json = output.stdout_json();
     assert_eq!(json["hasConfig"], true);
-    assert_eq!(json["tunnels"][0]["id"], "prod-cache");
+    assert_eq!(json["tunnels"][0]["name"], "prod-cache");
     assert_eq!(json["tunnels"][0]["localPort"], 16379);
 }
 
@@ -105,13 +105,13 @@ fn show_displays_tunnel_details() {
     let output = workspace.run(["show", "dev-db"]);
 
     assert!(output.status.success());
-    output.assert_stdout_contains("ID: dev-db");
+    output.assert_stdout_contains("NAME: dev-db");
     output.assert_stdout_contains("Description: Development database");
     output.assert_stdout_contains("Tags: dev,project-a");
     output.assert_stdout_contains("Connect timeout: 10s");
 }
 
-/// show が存在しない ID を失敗として扱うことを検証する
+/// show が存在しない NAME を失敗として扱うことを検証する
 #[test]
 fn show_fails_for_unknown_tunnel_id() {
     let workspace = TestWorkspace::new();
@@ -120,7 +120,7 @@ fn show_fails_for_unknown_tunnel_id() {
     let output = workspace.run(["show", "missing"]);
 
     assert!(!output.status.success());
-    output.assert_stderr_contains("No tunnel matched ID: missing.");
+    output.assert_stderr_contains("No tunnel matched NAME: missing.");
 }
 
 /// validate が有効な設定を成功として扱うことを検証する
@@ -207,7 +207,7 @@ fn start_dry_run_json_outputs_plan_without_writing_state() {
     assert!(output.status.success());
     let json = output.stdout_json();
     assert_eq!(json["dryRun"], true);
-    assert_eq!(json["tunnels"][0]["tunnel"]["id"], "dev-db");
+    assert_eq!(json["tunnels"][0]["tunnel"]["name"], "dev-db");
     assert!(
         json["tunnels"][0]["command"]
             .as_str()
@@ -217,7 +217,49 @@ fn start_dry_run_json_outputs_plan_without_writing_state() {
     assert!(!workspace.state_path().exists());
 }
 
-/// start --all --dry-run が ID 昇順で開始予定を表示することを検証する
+/// start の bare name は local を優先し、--scope global で global を選択することを検証する
+#[test]
+fn start_dry_run_selects_local_by_default_and_global_with_scope() {
+    let workspace = TestWorkspace::new();
+    let global_config_path = workspace.path().join("global.toml");
+    workspace.write_config(&single_tunnel_config("hoge", 22222));
+    fs::write(&global_config_path, single_tunnel_config("hoge", 11111))
+        .expect("write global configuration");
+
+    let output = workspace.run_with_global_config(
+        [
+            "--state",
+            workspace.state_path_str(),
+            "start",
+            "hoge",
+            "--dry-run",
+        ],
+        &global_config_path,
+    );
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("Would start tunnel: hoge");
+    output.assert_stdout_contains("Local: 127.0.0.1:22222");
+
+    let output = workspace.run_with_global_config(
+        [
+            "--state",
+            workspace.state_path_str(),
+            "start",
+            "hoge",
+            "--scope",
+            "global",
+            "--dry-run",
+        ],
+        &global_config_path,
+    );
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("Would start tunnel: hoge");
+    output.assert_stdout_contains("Local: 127.0.0.1:11111");
+}
+
+/// start --all --dry-run が NAME 昇順で開始予定を表示することを検証する
 #[test]
 fn start_all_dry_run_sorts_tunnels_by_id() {
     let workspace = TestWorkspace::new();
@@ -238,7 +280,7 @@ fn start_all_dry_run_sorts_tunnels_by_id() {
     ]);
 }
 
-/// start が ID と --tag の同時指定を失敗として扱うことを検証する
+/// start が NAME と --tag の同時指定を失敗として扱うことを検証する
 #[test]
 fn start_fails_when_id_and_tag_are_combined() {
     let workspace = TestWorkspace::new();
@@ -247,7 +289,7 @@ fn start_fails_when_id_and_tag_are_combined() {
     let output = workspace.run(["start", "dev-db", "--tag", "dev", "--dry-run"]);
 
     assert!(!output.status.success());
-    output.assert_stderr_contains("Cannot combine tunnel IDs with --tag.");
+    output.assert_stderr_contains("Cannot combine tunnel NAMEs with --tag.");
 }
 
 /// --help が日本語の概要、主要コマンド、代表例を表示することを検証する
@@ -272,8 +314,8 @@ fn start_help_displays_selection_constraints_and_dry_run_note() {
     let output = workspace.run(["start", "--help"]);
 
     assert!(output.status.success());
-    output.assert_stdout_contains("ID を省略すると対話選択を表示します。");
-    output.assert_stdout_contains("--all、ID、--tag は同時に指定できません。");
+    output.assert_stdout_contains("NAME を省略すると対話選択を表示します。");
+    output.assert_stdout_contains("--all、NAME、--tag は同時に指定できません。");
     output.assert_stdout_contains("--dry-run は SSH を起動せず、状態ファイルも更新しません。");
 }
 
@@ -286,7 +328,7 @@ fn list_help_displays_filter_and_wide_notes() {
 
     assert!(output.status.success());
     output.assert_stdout_contains("--tag は複数指定でき");
-    output.assert_stdout_contains("--query は ID と description");
+    output.assert_stdout_contains("--query は NAME と description");
     output.assert_stdout_contains("--wide は REMOTE の host 部分を省略せずに表示します。");
 }
 
@@ -449,6 +491,20 @@ impl TestWorkspace {
         CommandOutput::from_output(output)
     }
 
+    /// global設定を有効にして fwd-deck を一時ワークスペース上で実行する
+    fn run_with_global_config<const N: usize>(
+        &self,
+        args: [&str; N],
+        global_config_path: &Path,
+    ) -> CommandOutput {
+        let output = self
+            .command_with_global_config(args, global_config_path)
+            .output()
+            .expect("run fwd-deck");
+
+        CommandOutput::from_output(output)
+    }
+
     /// fwd-deck 実行コマンドを初期化する
     fn command<const N: usize>(&self, args: [&str; N]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_fwd-deck"));
@@ -457,6 +513,24 @@ impl TestWorkspace {
             .arg("--config")
             .arg(&self.config_path)
             .arg("--no-global")
+            .args(args);
+
+        command
+    }
+
+    /// global設定を有効にした fwd-deck 実行コマンドを初期化する
+    fn command_with_global_config<const N: usize>(
+        &self,
+        args: [&str; N],
+        global_config_path: &Path,
+    ) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fwd-deck"));
+        command
+            .current_dir(self.temp_dir.path())
+            .arg("--config")
+            .arg(&self.config_path)
+            .arg("--global-config")
+            .arg(global_config_path)
             .args(args);
 
         command
@@ -571,7 +645,7 @@ server_alive_count_max = 3
 start_grace_milliseconds = 300
 
 [[tunnels]]
-id = "dev-db"
+name = "dev-db"
 description = "Development database"
 tags = ["dev", "project-a"]
 local_host = "127.0.0.1"
@@ -587,7 +661,7 @@ identity_file = "~/.ssh/id_ed25519"
 connect_timeout_seconds = 10
 
 [[tunnels]]
-id = "prod-cache"
+name = "prod-cache"
 description = "Production cache"
 tags = ["prod", "project-a"]
 local_host = "127.0.0.1"
@@ -599,11 +673,11 @@ ssh_host = "bastion.example.com"
 "#
 }
 
-/// ID 順とは逆に記述されたテスト用設定を生成する
+/// NAME 順とは逆に記述されたテスト用設定を生成する
 fn unsorted_config() -> &'static str {
     r#"
 [[tunnels]]
-id = "prod-cache"
+name = "prod-cache"
 local_host = "127.0.0.1"
 local_port = 16379
 remote_host = "127.0.0.1"
@@ -612,7 +686,7 @@ ssh_user = "ec2-user"
 ssh_host = "bastion.example.com"
 
 [[tunnels]]
-id = "dev-db"
+name = "dev-db"
 local_host = "127.0.0.1"
 local_port = 15432
 remote_host = "127.0.0.1"
@@ -626,7 +700,7 @@ ssh_host = "bastion.example.com"
 fn long_remote_config() -> &'static str {
     r#"
 [[tunnels]]
-id = "prod-db"
+name = "prod-db"
 local_host = "127.0.0.1"
 local_port = 15432
 remote_host = "japandb-as.cluster-clpmwhbh0sfa.ap-northeast-1.rds.amazonaws.com"
@@ -640,7 +714,7 @@ ssh_host = "bastion.example.com"
 fn duplicate_local_port_config() -> &'static str {
     r#"
 [[tunnels]]
-id = "dev-db"
+name = "dev-db"
 local_port = 15432
 remote_host = "127.0.0.1"
 remote_port = 5432
@@ -648,7 +722,7 @@ ssh_user = "ec2-user"
 ssh_host = "bastion.example.com"
 
 [[tunnels]]
-id = "dev-cache"
+name = "dev-cache"
 local_port = 15432
 remote_host = "127.0.0.1"
 remote_port = 6379
@@ -657,12 +731,28 @@ ssh_host = "bastion.example.com"
 "#
 }
 
+/// 単一トンネルのテスト用設定を生成する
+fn single_tunnel_config(name: &str, local_port: u16) -> String {
+    format!(
+        r#"
+[[tunnels]]
+name = "{name}"
+local_host = "127.0.0.1"
+local_port = {local_port}
+remote_host = "127.0.0.1"
+remote_port = 5432
+ssh_user = "ec2-user"
+ssh_host = "bastion.example.com"
+"#
+    )
+}
+
 /// テスト用状態ファイルを生成する
 fn state_file(pid: u32, local_port: u16) -> String {
     format!(
         r#"
 [[tunnels]]
-id = "dev-db"
+name = "dev-db"
 pid = {pid}
 local_host = "127.0.0.1"
 local_port = {local_port}

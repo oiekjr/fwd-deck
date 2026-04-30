@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::{
     ResolvedTimeoutConfig, ResolvedTunnelConfig, TunnelState,
-    state::{StateFileError, read_state_file, write_state_file},
+    state::{StateFileError, read_state_file, runtime_id_for_resolved_tunnel, write_state_file},
 };
 
 /// 起動中プロセスの状態を表現する
@@ -113,34 +113,38 @@ impl Display for LocalPortProcess {
 pub enum TunnelRuntimeError {
     #[error(transparent)]
     State(#[from] StateFileError),
-    #[error("Tunnel is already running: {id} (pid: {pid})")]
-    AlreadyRunning { id: String, pid: u32 },
-    #[error("Tunnel is not tracked: {id}")]
-    NotTracked { id: String },
+    #[error("Tunnel is already running: {name} (pid: {pid})")]
+    AlreadyRunning {
+        runtime_id: String,
+        name: String,
+        pid: u32,
+    },
+    #[error("Tunnel is not tracked: {runtime_id}")]
+    NotTracked { runtime_id: String },
     #[error(
-        "Local endpoint is not available: {id} ({local_host}:{local_port}): {source}{processes}"
+        "Local endpoint is not available: {name} ({local_host}:{local_port}): {source}{processes}"
     )]
     LocalEndpointUnavailable {
-        id: String,
+        name: String,
         local_host: String,
         local_port: u16,
         source: io::Error,
         processes: LocalPortProcesses,
     },
-    #[error("Failed to start ssh for tunnel: {id}: {source}")]
-    Spawn { id: String, source: io::Error },
-    #[error("Failed to inspect ssh startup for tunnel: {id}: {source}")]
-    StartupCheck { id: String, source: io::Error },
-    #[error("Tunnel start worker panicked: {id}")]
-    StartWorkerPanic { id: String },
-    #[error("ssh exited before the tunnel was ready: {id}: {status}")]
+    #[error("Failed to start ssh for tunnel: {name}: {source}")]
+    Spawn { name: String, source: io::Error },
+    #[error("Failed to inspect ssh startup for tunnel: {name}: {source}")]
+    StartupCheck { name: String, source: io::Error },
+    #[error("Tunnel start worker panicked: {name}")]
+    StartWorkerPanic { name: String },
+    #[error("ssh exited before the tunnel was ready: {name}: {status}")]
     EarlyExit {
-        id: String,
+        name: String,
         status: std::process::ExitStatus,
     },
-    #[error("Failed to stop tunnel: {id} (pid: {pid}): {source}")]
+    #[error("Failed to stop tunnel: {name} (pid: {pid}): {source}")]
     Stop {
-        id: String,
+        name: String,
         pid: u32,
         source: io::Error,
     },
@@ -152,12 +156,14 @@ pub fn start_tunnel(
     state_path: &Path,
 ) -> Result<StartedTunnel, TunnelRuntimeError> {
     let mut state_file = read_state_file(state_path)?;
+    let runtime_id = runtime_id_for_resolved_tunnel(resolved);
 
-    if let Some(existing) = state_file.get(&resolved.tunnel.id)
+    if let Some(existing) = state_file.get(&runtime_id)
         && tunnel_is_running(existing)
     {
         return Err(TunnelRuntimeError::AlreadyRunning {
-            id: existing.id.clone(),
+            runtime_id: existing.runtime_id.clone(),
+            name: existing.name.clone(),
             pid: existing.pid,
         });
     }
@@ -200,11 +206,14 @@ where
     let mut pending_jobs = Vec::new();
 
     for (index, resolved) in resolved_tunnels.iter().enumerate() {
-        if let Some(existing) = state_file.get(&resolved.tunnel.id)
+        let runtime_id = runtime_id_for_resolved_tunnel(resolved);
+
+        if let Some(existing) = state_file.get(&runtime_id)
             && tunnel_is_running(existing)
         {
             let result = Err(TunnelRuntimeError::AlreadyRunning {
-                id: existing.id.clone(),
+                runtime_id: existing.runtime_id.clone(),
+                name: existing.name.clone(),
                 pid: existing.pid,
             });
             on_result(index, &result);
@@ -231,7 +240,7 @@ where
         for (job, handle) in chunk.iter().zip(handles) {
             let result = handle.join().unwrap_or_else(|_| {
                 Err(TunnelRuntimeError::StartWorkerPanic {
-                    id: job.resolved.tunnel.id.clone(),
+                    name: job.resolved.tunnel.name.clone(),
                 })
             });
             on_result(job.index, &result);
@@ -274,10 +283,15 @@ pub fn tunnel_statuses(state_path: &Path) -> Result<Vec<TunnelRuntimeStatus>, Tu
 }
 
 /// トンネルを停止して状態ファイルから削除する
-pub fn stop_tunnel(id: &str, state_path: &Path) -> Result<StoppedTunnel, TunnelRuntimeError> {
+pub fn stop_tunnel(
+    runtime_id: &str,
+    state_path: &Path,
+) -> Result<StoppedTunnel, TunnelRuntimeError> {
     let mut state_file = read_state_file(state_path)?;
-    let Some(state) = state_file.remove(id) else {
-        return Err(TunnelRuntimeError::NotTracked { id: id.to_owned() });
+    let Some(state) = state_file.remove(runtime_id) else {
+        return Err(TunnelRuntimeError::NotTracked {
+            runtime_id: runtime_id.to_owned(),
+        });
     };
     let previous_state = if tunnel_is_running(&state) {
         stop_process(&state)?;
@@ -389,12 +403,12 @@ fn start_tunnel_without_state_write(
     if let Some(status) = child
         .try_wait()
         .map_err(|source| TunnelRuntimeError::StartupCheck {
-            id: resolved.tunnel.id.clone(),
+            name: resolved.tunnel.name.clone(),
             source,
         })?
     {
         return Err(TunnelRuntimeError::EarlyExit {
-            id: resolved.tunnel.id.clone(),
+            name: resolved.tunnel.name.clone(),
             status,
         });
     }
@@ -426,7 +440,7 @@ fn spawn_ssh_tunnel(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|source| TunnelRuntimeError::Spawn {
-            id: resolved.tunnel.id.clone(),
+            name: resolved.tunnel.name.clone(),
             source,
         })
 }
@@ -442,7 +456,7 @@ fn ensure_local_endpoint_available(
     TcpListener::bind((local_host, local_port))
         .map(drop)
         .map_err(|source| TunnelRuntimeError::LocalEndpointUnavailable {
-            id: tunnel.id.clone(),
+            name: tunnel.name.clone(),
             local_host: local_host.to_owned(),
             local_port,
             source,
@@ -567,7 +581,7 @@ fn process_is_running(pid: u32) -> bool {
 #[cfg(unix)]
 fn stop_process(state: &TunnelState) -> Result<(), TunnelRuntimeError> {
     let pid = libc::pid_t::try_from(state.pid).map_err(|_| TunnelRuntimeError::Stop {
-        id: state.id.clone(),
+        name: state.name.clone(),
         pid: state.pid,
         source: io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -581,7 +595,7 @@ fn stop_process(state: &TunnelState) -> Result<(), TunnelRuntimeError> {
     }
 
     Err(TunnelRuntimeError::Stop {
-        id: state.id.clone(),
+        name: state.name.clone(),
         pid: state.pid,
         source: io::Error::last_os_error(),
     })
@@ -598,7 +612,7 @@ fn stop_process(state: &TunnelState) -> Result<(), TunnelRuntimeError> {
         .stderr(Stdio::null())
         .status()
         .map_err(|source| TunnelRuntimeError::Stop {
-            id: state.id.clone(),
+            name: state.name.clone(),
             pid: state.pid,
             source,
         })
@@ -607,7 +621,7 @@ fn stop_process(state: &TunnelState) -> Result<(), TunnelRuntimeError> {
                 Ok(())
             } else {
                 Err(TunnelRuntimeError::Stop {
-                    id: state.id.clone(),
+                    name: state.name.clone(),
                     pid: state.pid,
                     source: io::Error::other(format!("kill exited with {status}")),
                 })
@@ -711,7 +725,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(matches!(
             &results[0],
-            Err(TunnelRuntimeError::AlreadyRunning { id, .. }) if id == "db"
+            Err(TunnelRuntimeError::AlreadyRunning { name, .. }) if name == "db"
         ));
     }
 
@@ -828,7 +842,7 @@ n*:15432 (LISTEN)
     #[test]
     fn local_endpoint_error_displays_listening_processes() {
         let error = TunnelRuntimeError::LocalEndpointUnavailable {
-            id: "db".to_owned(),
+            name: "db".to_owned(),
             local_host: "127.0.0.1".to_owned(),
             local_port: 15432,
             source: io::Error::new(io::ErrorKind::AddrInUse, "address already in use"),
@@ -875,7 +889,7 @@ n*:15432 (LISTEN)
         ResolvedTunnelConfig::new(
             ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml")),
             TunnelConfig {
-                id: "db".to_owned(),
+                name: "db".to_owned(),
                 description: None,
                 tags: Vec::new(),
                 local_host: Some("127.0.0.1".to_owned()),

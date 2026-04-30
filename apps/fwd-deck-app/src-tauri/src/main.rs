@@ -13,8 +13,8 @@ use fwd_deck_core::{
     TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport,
     add_tunnel_to_config_file, default_global_config_path, default_local_config_path,
     default_state_file_path, format_path_for_display, load_effective_config,
-    remove_tunnel_from_config_file, start_tunnels_with_progress, stop_tunnel, tag_is_valid,
-    tunnel_statuses, update_tunnel_in_config_file, validate_config,
+    remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel, start_tunnels_with_progress,
+    stop_tunnel, tag_is_valid, tunnel_statuses, update_tunnel_in_config_file, validate_config,
 };
 #[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
@@ -187,6 +187,7 @@ impl TrayState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TrayTunnelAction {
     id: String,
+    runtime_id: Option<String>,
     runtime_scope: Option<RuntimeScope>,
     operation: TrayTunnelOperation,
 }
@@ -413,6 +414,7 @@ fn run_tray_tunnel_action(
 ) -> Result<OperationReport, AppError> {
     let target = OperationTargetInput {
         id: action.id,
+        runtime_id: action.runtime_id,
         runtime_scope: action.runtime_scope,
     };
 
@@ -770,9 +772,10 @@ fn tray_tunnel_menu_items(
         .iter()
         .enumerate()
         .map(|(index, resolved)| {
+            let runtime_id = runtime_id_for_resolved_tunnel(resolved);
             let runtime_key = (
                 runtime_scope_for_source(resolved.source.kind),
-                resolved.tunnel.id.as_str(),
+                runtime_id.as_str(),
             );
             let status = status_by_key.get(&runtime_key).copied();
             tray_tunnel_menu_item(index, resolved, status, can_start)
@@ -850,14 +853,16 @@ fn tray_tunnel_menu_item(
         TrayTunnelOperation::Start => None,
         TrayTunnelOperation::Stop => status.map(|status| status.runtime_scope),
     };
+    let runtime_id = runtime_id_for_resolved_tunnel(resolved);
 
     TrayTunnelMenuItem {
         menu_id: format!("{TRAY_TUNNEL_ITEM_PREFIX}{index}"),
-        label: tray_tunnel_label(&resolved.tunnel.id, resolved.source.kind, is_stale),
+        label: tray_tunnel_label(&resolved.tunnel.name, resolved.source.kind, is_stale),
         checked: is_running,
         enabled: is_running || can_start,
         action: TrayTunnelAction {
-            id: resolved.tunnel.id.clone(),
+            id: resolved.tunnel.name.clone(),
+            runtime_id: Some(runtime_id),
             runtime_scope,
             operation,
         },
@@ -1036,6 +1041,7 @@ enum QuitDialogAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QuitTunnelTarget {
     id: String,
+    runtime_id: String,
     runtime_scope: RuntimeScope,
     state_path: PathBuf,
     process_state: ProcessState,
@@ -1231,7 +1237,8 @@ fn quit_tunnel_targets_from_statuses(
     for status in statuses {
         let state_path = state_path_for_runtime_scope(paths, status.runtime_scope)?;
         let target = QuitTunnelTarget {
-            id: status.status.state.id.clone(),
+            id: status.status.state.name.clone(),
+            runtime_id: status.status.state.runtime_id.clone(),
             runtime_scope: status.runtime_scope,
             state_path: state_path.to_path_buf(),
             process_state: status.status.process_state,
@@ -1321,7 +1328,7 @@ fn handle_quit_dialog_result(
 /// 終了前に対象トンネルを停止または stale 削除する
 fn stop_quit_tunnel_targets(targets: &[QuitTunnelTarget]) -> Result<(), QuitStopFailure> {
     for target in targets {
-        if let Err(error) = stop_tunnel_for_app(&target.id, &target.state_path) {
+        if let Err(error) = stop_tunnel_for_app(&target.runtime_id, &target.state_path) {
             return Err(QuitStopFailure {
                 id: target.display_id(),
                 message: error.to_string(),
@@ -1477,7 +1484,7 @@ struct ValidationView {
 struct ValidationIssueView {
     source: String,
     path: String,
-    tunnel_id: Option<String>,
+    tunnel_name: Option<String>,
     message: String,
 }
 
@@ -1486,6 +1493,7 @@ struct ValidationIssueView {
 #[serde(rename_all = "camelCase")]
 struct TunnelView {
     id: String,
+    runtime_id: String,
     description: Option<String>,
     tags: Vec<String>,
     local_host: String,
@@ -1510,6 +1518,7 @@ struct TunnelView {
 #[serde(rename_all = "camelCase")]
 struct TrackedTunnelView {
     id: String,
+    runtime_id: String,
     runtime_scope: RuntimeScope,
     runtime_key: String,
     local: String,
@@ -1522,6 +1531,7 @@ struct TrackedTunnelView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeStatusView {
+    runtime_id: String,
     runtime_scope: RuntimeScope,
     runtime_key: String,
     pid: u32,
@@ -1615,6 +1625,7 @@ impl std::fmt::Display for RuntimeScope {
 #[serde(rename_all = "camelCase")]
 struct OperationTargetInput {
     id: String,
+    runtime_id: Option<String>,
     runtime_scope: Option<RuntimeScope>,
 }
 
@@ -1690,6 +1701,7 @@ struct ScopedRuntimeStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkspaceSwitchStopTarget {
     id: String,
+    runtime_id: String,
     runtime_scope: RuntimeScope,
     state_path: PathBuf,
 }
@@ -1722,7 +1734,7 @@ impl TunnelInput {
     /// 入力値を中核機能のトンネル設定へ変換する
     fn into_tunnel_config(self) -> TunnelConfig {
         TunnelConfig {
-            id: trimmed_required(self.id),
+            name: trimmed_required(self.id),
             description: trimmed_optional(self.description),
             tags: self.tags.into_iter().map(trimmed_required).collect(),
             local_host: Some(trimmed_required(self.local_host)),
@@ -1972,11 +1984,10 @@ fn start_tunnels_inner(
 ) -> Result<OperationReport, AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
-    let tunnels_by_id = tunnel_index_by_id(&config);
 
     ensure_valid_config(&config)?;
     let mut progress = OperationProgressEmitter::new(app, operation_id, targets.len());
-    run_start_tunnel_operations(&runtime_paths, &targets, &tunnels_by_id, &mut progress)
+    run_start_tunnel_operations(&runtime_paths, &config, &targets, &mut progress)
 }
 
 /// トンネル停止処理を実行する
@@ -1988,30 +1999,15 @@ fn stop_tunnels_inner(
 ) -> Result<OperationReport, AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
-    let tunnels_by_id = tunnel_index_by_id(&config);
     let mut progress = OperationProgressEmitter::new(app, operation_id, targets.len());
 
     run_tunnel_operations_with_progress(
         &targets,
         |target| {
-            let state_path = match target.runtime_scope {
-                Some(scope) => state_path_for_runtime_scope(&runtime_paths, scope)?,
-                None => {
-                    let tunnel =
-                        tunnels_by_id
-                            .get(target.id.as_str())
-                            .copied()
-                            .ok_or_else(|| {
-                                AppError::InvalidInput(format!(
-                                    "未定義のトンネル ID です: {}",
-                                    target.id
-                                ))
-                            })?;
-                    state_path_for_source(&runtime_paths, tunnel.source.kind)?
-                }
-            };
+            let (runtime_id, state_path) =
+                resolve_stop_operation_target(&runtime_paths, &config, target)?;
 
-            stop_tunnel_for_app(&target.id, state_path)
+            stop_tunnel_for_app(&runtime_id, &state_path)
         },
         |_target| progress.advance(),
     )
@@ -2028,9 +2024,8 @@ fn add_tunnel_entry_inner(
     let config = load_effective_config(&runtime_paths.config_paths)?;
     let tunnel = tunnel.into_tunnel_config();
 
-    validate_new_tunnel(&config, &tunnel)?;
-
     let kind = ConfigSourceKind::from(scope);
+    validate_new_tunnel(&config, kind, &tunnel)?;
     let path = config_path_for_scope(&runtime_paths, kind)?;
     add_tunnel_to_config_file(&path, kind, tunnel)?;
     load_dashboard_inner(app, paths)
@@ -2048,9 +2043,8 @@ fn update_tunnel_entry_inner(
     let config = load_effective_config(&runtime_paths.config_paths)?;
     let tunnel = tunnel.into_tunnel_config();
 
-    validate_updated_tunnel(&config, id, &tunnel)?;
-
     let kind = ConfigSourceKind::from(scope);
+    validate_updated_tunnel(&config, kind, id, &tunnel)?;
     let path = config_path_for_scope(&runtime_paths, kind)?;
     update_tunnel_in_config_file(&path, kind, id, tunnel)?;
     load_dashboard_inner(app, paths)
@@ -2517,7 +2511,8 @@ fn collect_workspace_switch_stop_targets_from_state(
         .filter(|status| status.state.source_kind == ConfigSourceKind::Local)
         .filter(|status| paths_refer_to_same_file(local_config_path, &status.state.source_path))
         .map(|status| WorkspaceSwitchStopTarget {
-            id: status.state.id,
+            id: status.state.name,
+            runtime_id: status.state.runtime_id,
             runtime_scope,
             state_path: state_path.to_path_buf(),
         })
@@ -2527,7 +2522,7 @@ fn collect_workspace_switch_stop_targets_from_state(
 /// 旧ワークスペース切り替え対象を停止する
 fn stop_workspace_switch_targets(targets: &[WorkspaceSwitchStopTarget]) -> Result<usize, AppError> {
     for target in targets {
-        stop_tunnel_for_app(&target.id, &target.state_path).map_err(|error| {
+        stop_tunnel_for_app(&target.runtime_id, &target.state_path).map_err(|error| {
             AppError::WorkspaceSwitchStop {
                 id: target.display_id(),
                 message: error.to_string(),
@@ -2621,20 +2616,32 @@ fn build_dashboard_state(
         .tunnels
         .iter()
         .map(|resolved| {
+            let runtime_id = runtime_id_for_resolved_tunnel(resolved);
             let runtime_key = (
                 runtime_scope_for_source(resolved.source.kind),
-                resolved.tunnel.id.as_str(),
+                runtime_id.as_str(),
             );
             tunnel_view(resolved, status_by_key.get(&runtime_key).copied())
         })
         .collect::<Vec<_>>();
     let mut tracked_statuses = statuses.iter().collect::<Vec<_>>();
 
-    tunnels.sort_by(|left, right| left.id.cmp(&right.id));
+    tunnels.sort_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then_with(|| left.source.cmp(&right.source))
+            .then_with(|| left.runtime_id.cmp(&right.runtime_id))
+    });
     tracked_statuses.sort_by(|left, right| {
         runtime_process_state_sort_rank(left.status.process_state)
             .cmp(&runtime_process_state_sort_rank(right.status.process_state))
-            .then_with(|| left.status.state.id.cmp(&right.status.state.id))
+            .then_with(|| left.status.state.name.cmp(&right.status.state.name))
+            .then_with(|| {
+                left.status
+                    .state
+                    .runtime_id
+                    .cmp(&right.status.state.runtime_id)
+            })
             .then_with(|| left.runtime_scope.cmp(&right.runtime_scope))
     });
     let tracked_tunnels = tracked_statuses
@@ -2655,7 +2662,7 @@ fn build_dashboard_state(
 fn runtime_status_lookup_key(status: &ScopedRuntimeStatus) -> (RuntimeScope, &str) {
     (
         runtime_scope_for_source(status.status.state.source_kind),
-        status.status.state.id.as_str(),
+        status.status.state.runtime_id.as_str(),
     )
 }
 
@@ -2714,7 +2721,7 @@ fn validation_view(report: ValidationReport) -> ValidationView {
             .map(|issue| ValidationIssueView {
                 source: issue.source.kind.to_string(),
                 path: display_path(&issue.source.path),
-                tunnel_id: issue.tunnel_id,
+                tunnel_name: issue.tunnel_name,
                 message: issue.message,
             })
             .collect(),
@@ -2724,7 +2731,7 @@ fn validation_view(report: ValidationReport) -> ValidationView {
             .map(|issue| ValidationIssueView {
                 source: issue.source.kind.to_string(),
                 path: display_path(&issue.source.path),
-                tunnel_id: issue.tunnel_id,
+                tunnel_name: issue.tunnel_name,
                 message: issue.message,
             })
             .collect(),
@@ -2739,7 +2746,8 @@ fn tunnel_view(
     let tunnel = &resolved.tunnel;
 
     TunnelView {
-        id: tunnel.id.clone(),
+        id: tunnel.name.clone(),
+        runtime_id: runtime_id_for_resolved_tunnel(resolved),
         description: tunnel.description.clone(),
         tags: tunnel.tags.clone(),
         local_host: tunnel.effective_local_host().to_owned(),
@@ -2762,10 +2770,11 @@ fn tunnel_view(
 
 /// 追跡中トンネルを表示用へ変換する
 fn tracked_tunnel_view(status: &ScopedRuntimeStatus) -> TrackedTunnelView {
-    let runtime_key = runtime_status_key(status.runtime_scope, &status.status.state.id);
+    let runtime_key = runtime_status_key(status.runtime_scope, &status.status.state.runtime_id);
 
     TrackedTunnelView {
-        id: status.status.state.id.clone(),
+        id: status.status.state.name.clone(),
+        runtime_id: status.status.state.runtime_id.clone(),
         runtime_scope: status.runtime_scope,
         runtime_key,
         local: format_state_local_endpoint(&status.status),
@@ -2778,8 +2787,9 @@ fn tracked_tunnel_view(status: &ScopedRuntimeStatus) -> TrackedTunnelView {
 /// runtime 状態を表示用へ変換する
 fn runtime_status_view(status: &ScopedRuntimeStatus) -> RuntimeStatusView {
     RuntimeStatusView {
+        runtime_id: status.status.state.runtime_id.clone(),
         runtime_scope: status.runtime_scope,
-        runtime_key: runtime_status_key(status.runtime_scope, &status.status.state.id),
+        runtime_key: runtime_status_key(status.runtime_scope, &status.status.state.runtime_id),
         pid: status.status.state.pid,
         state: match status.status.process_state {
             ProcessState::Running => "running".to_owned(),
@@ -2825,14 +2835,22 @@ fn ensure_valid_config(config: &EffectiveConfig) -> Result<(), AppError> {
 }
 
 /// 追加対象トンネルの意味的な不備を検証する
-fn validate_new_tunnel(config: &EffectiveConfig, tunnel: &TunnelConfig) -> Result<(), AppError> {
+fn validate_new_tunnel(
+    config: &EffectiveConfig,
+    kind: ConfigSourceKind,
+    tunnel: &TunnelConfig,
+) -> Result<(), AppError> {
     validate_tunnel_fields(tunnel)?;
 
     let mut existing_id = None;
     let mut existing_local_port = None;
 
     for resolved in &config.tunnels {
-        if existing_id.is_none() && resolved.tunnel.id == tunnel.id {
+        if resolved.source.kind != kind {
+            continue;
+        }
+
+        if existing_id.is_none() && resolved.tunnel.name == tunnel.name {
             existing_id = Some(resolved);
         }
 
@@ -2847,8 +2865,8 @@ fn validate_new_tunnel(config: &EffectiveConfig, tunnel: &TunnelConfig) -> Resul
 
     if let Some(existing) = existing_id {
         return Err(AppError::InvalidInput(format!(
-            "同じ ID のトンネルが既に存在します: {} ({})",
-            existing.tunnel.id,
+            "同じ name のトンネルが既に存在します: {} ({})",
+            existing.tunnel.name,
             format_path_for_display(&existing.source.path)
         )));
     }
@@ -2856,7 +2874,7 @@ fn validate_new_tunnel(config: &EffectiveConfig, tunnel: &TunnelConfig) -> Resul
     if let Some(existing) = existing_local_port {
         return Err(AppError::InvalidInput(format!(
             "local_port は既存トンネルと重複しています: {} ({})",
-            tunnel.local_port, existing.tunnel.id
+            tunnel.local_port, existing.tunnel.name
         )));
     }
 
@@ -2866,6 +2884,7 @@ fn validate_new_tunnel(config: &EffectiveConfig, tunnel: &TunnelConfig) -> Resul
 /// 更新対象トンネルの意味的な不備を検証する
 fn validate_updated_tunnel(
     config: &EffectiveConfig,
+    kind: ConfigSourceKind,
     current_id: &str,
     tunnel: &TunnelConfig,
 ) -> Result<(), AppError> {
@@ -2875,11 +2894,15 @@ fn validate_updated_tunnel(
     let mut existing_local_port = None;
 
     for resolved in &config.tunnels {
-        if resolved.tunnel.id == current_id {
+        if resolved.source.kind != kind {
             continue;
         }
 
-        if existing_id.is_none() && resolved.tunnel.id == tunnel.id {
+        if resolved.tunnel.name == current_id {
+            continue;
+        }
+
+        if existing_id.is_none() && resolved.tunnel.name == tunnel.name {
             existing_id = Some(resolved);
         }
 
@@ -2894,8 +2917,8 @@ fn validate_updated_tunnel(
 
     if let Some(existing) = existing_id {
         return Err(AppError::InvalidInput(format!(
-            "同じ ID のトンネルが既に存在します: {} ({})",
-            existing.tunnel.id,
+            "同じ name のトンネルが既に存在します: {} ({})",
+            existing.tunnel.name,
             format_path_for_display(&existing.source.path)
         )));
     }
@@ -2903,7 +2926,7 @@ fn validate_updated_tunnel(
     if let Some(existing) = existing_local_port {
         return Err(AppError::InvalidInput(format!(
             "local_port は既存トンネルと重複しています: {} ({})",
-            tunnel.local_port, existing.tunnel.id
+            tunnel.local_port, existing.tunnel.name
         )));
     }
 
@@ -2912,7 +2935,7 @@ fn validate_updated_tunnel(
 
 /// トンネル入力値の単体制約を検証する
 fn validate_tunnel_fields(tunnel: &TunnelConfig) -> Result<(), AppError> {
-    ensure_required("id", &tunnel.id)?;
+    ensure_required("name", &tunnel.name)?;
     ensure_required("local_host", tunnel.effective_local_host())?;
     ensure_required("remote_host", &tunnel.remote_host)?;
     ensure_required("ssh_user", &tunnel.ssh_user)?;
@@ -2951,8 +2974,8 @@ fn ensure_required(name: &str, value: &str) -> Result<(), AppError> {
 /// アプリの一括開始操作としてトンネルを開始する
 fn run_start_tunnel_operations(
     paths: &RuntimePaths,
+    config: &EffectiveConfig,
     targets: &[OperationTargetInput],
-    tunnels_by_id: &HashMap<&str, &ResolvedTunnelConfig>,
     progress: &mut OperationProgressEmitter<'_>,
 ) -> Result<OperationReport, AppError> {
     ensure_operation_targets_selected(targets)?;
@@ -2961,7 +2984,7 @@ fn run_start_tunnel_operations(
     let mut groups = Vec::new();
 
     for (index, target) in targets.iter().enumerate() {
-        match resolve_start_operation_target(paths, tunnels_by_id, index, target) {
+        match resolve_start_operation_target(paths, config, index, target) {
             Ok((state_path, operation_target)) => {
                 push_start_operation_group(&mut groups, state_path, operation_target);
             }
@@ -3015,16 +3038,11 @@ fn run_start_tunnel_operations(
 /// 開始操作の入力を状態ファイル単位の実行対象へ変換する
 fn resolve_start_operation_target(
     paths: &RuntimePaths,
-    tunnels_by_id: &HashMap<&str, &ResolvedTunnelConfig>,
+    config: &EffectiveConfig,
     index: usize,
     target: &OperationTargetInput,
 ) -> Result<(PathBuf, StartOperationTarget), AppError> {
-    let tunnel = tunnels_by_id
-        .get(target.id.as_str())
-        .copied()
-        .ok_or_else(|| {
-            AppError::InvalidInput(format!("未定義のトンネル ID です: {}", target.id))
-        })?;
+    let tunnel = resolve_configured_tunnel_target(config, target)?;
     let state_path = state_path_for_source(paths, tunnel.source.kind)?.to_path_buf();
 
     Ok((
@@ -3035,6 +3053,83 @@ fn resolve_start_operation_target(
             tunnel: (*tunnel).clone(),
         },
     ))
+}
+
+/// 操作対象から設定済みトンネルを解決する
+fn resolve_configured_tunnel_target<'a>(
+    config: &'a EffectiveConfig,
+    target: &OperationTargetInput,
+) -> Result<&'a ResolvedTunnelConfig, AppError> {
+    if let Some(runtime_id) = target.runtime_id.as_deref() {
+        return config
+            .tunnels
+            .iter()
+            .find(|resolved| runtime_id_for_resolved_tunnel(resolved) == runtime_id)
+            .ok_or_else(|| {
+                AppError::InvalidInput(format!("未定義の runtime ID です: {runtime_id}"))
+            });
+    }
+
+    find_configured_tunnel_by_name(config, &target.id)
+        .ok_or_else(|| AppError::InvalidInput(format!("未定義のトンネル name です: {}", target.id)))
+}
+
+/// bare name 指定時の優先順位に従って設定済みトンネルを取得する
+fn find_configured_tunnel_by_name<'a>(
+    config: &'a EffectiveConfig,
+    name: &str,
+) -> Option<&'a ResolvedTunnelConfig> {
+    config
+        .tunnels
+        .iter()
+        .find(|resolved| {
+            resolved.source.kind == ConfigSourceKind::Local && resolved.tunnel.name == name
+        })
+        .or_else(|| {
+            config.tunnels.iter().find(|resolved| {
+                resolved.source.kind == ConfigSourceKind::Global && resolved.tunnel.name == name
+            })
+        })
+}
+
+/// 停止操作対象から runtime ID と state path を解決する
+fn resolve_stop_operation_target(
+    paths: &RuntimePaths,
+    config: &EffectiveConfig,
+    target: &OperationTargetInput,
+) -> Result<(String, PathBuf), AppError> {
+    if let Some(runtime_id) = target.runtime_id.clone() {
+        let state_path = match target.runtime_scope {
+            Some(scope) => state_path_for_runtime_scope(paths, scope)?.to_path_buf(),
+            None => {
+                let tunnel = resolve_configured_tunnel_target(config, target)?;
+                state_path_for_source(paths, tunnel.source.kind)?.to_path_buf()
+            }
+        };
+
+        return Ok((runtime_id, state_path));
+    }
+
+    if let Some(scope) = target.runtime_scope {
+        let state_path = state_path_for_runtime_scope(paths, scope)?.to_path_buf();
+        let runtime_id = tunnel_statuses(&state_path)?
+            .into_iter()
+            .find(|status| status.state.name == target.id)
+            .map(|status| status.state.runtime_id)
+            .ok_or_else(|| {
+                AppError::InvalidInput(format!(
+                    "追跡中のトンネル name ではありません: {}",
+                    target.id
+                ))
+            })?;
+
+        return Ok((runtime_id, state_path));
+    }
+
+    let tunnel = resolve_configured_tunnel_target(config, target)?;
+    let state_path = state_path_for_source(paths, tunnel.source.kind)?.to_path_buf();
+
+    Ok((runtime_id_for_resolved_tunnel(tunnel), state_path))
 }
 
 /// 同一 state file の開始対象を同じ実行グループへ追加する
@@ -3078,8 +3173,8 @@ fn start_tunnel_result_for_app(
 ) -> Result<Option<String>, AppError> {
     match result {
         Ok(started) => Ok(Some(start_success_message(started))),
-        Err(TunnelRuntimeError::AlreadyRunning { id, pid }) => {
-            Ok(Some(start_already_running_message(&id, pid)))
+        Err(TunnelRuntimeError::AlreadyRunning { name, pid, .. }) => {
+            Ok(Some(start_already_running_message(&name, pid)))
         }
         Err(error) => Err(AppError::Runtime(error)),
     }
@@ -3089,7 +3184,9 @@ fn start_tunnel_result_for_app(
 fn stop_tunnel_for_app(id: &str, state_path: &Path) -> Result<Option<String>, AppError> {
     match stop_tunnel(id, state_path) {
         Ok(stopped) => Ok(Some(stop_success_message(stopped))),
-        Err(TunnelRuntimeError::NotTracked { id }) => Ok(Some(stop_already_stopped_message(&id))),
+        Err(TunnelRuntimeError::NotTracked { runtime_id }) => {
+            Ok(Some(stop_already_stopped_message(&runtime_id)))
+        }
         Err(error) => Err(AppError::Runtime(error)),
     }
 }
@@ -3175,7 +3272,7 @@ fn operation_target_label(target: &OperationTargetInput) -> String {
 fn start_success_message(started: StartedTunnel) -> String {
     format!(
         "{} を開始しました (pid: {})",
-        started.state.id, started.state.pid
+        started.state.name, started.state.pid
     )
 }
 
@@ -3189,11 +3286,11 @@ fn stop_success_message(stopped: StoppedTunnel) -> String {
     match stopped.previous_state {
         ProcessState::Running => format!(
             "{} を停止しました (pid: {})",
-            stopped.state.id, stopped.state.pid
+            stopped.state.name, stopped.state.pid
         ),
         ProcessState::Stale => format!(
             "{} の stale 状態を削除しました (pid: {})",
-            stopped.state.id, stopped.state.pid
+            stopped.state.name, stopped.state.pid
         ),
     }
 }
@@ -3201,15 +3298,6 @@ fn stop_success_message(stopped: StoppedTunnel) -> String {
 /// 停止済みの場合の成功メッセージを生成する
 fn stop_already_stopped_message(id: &str) -> String {
     format!("{id} はすでに停止済みです")
-}
-
-/// 統合済みトンネル設定を ID から参照する索引を生成する
-fn tunnel_index_by_id(config: &EffectiveConfig) -> HashMap<&str, &ResolvedTunnelConfig> {
-    config
-        .tunnels
-        .iter()
-        .map(|resolved| (resolved.tunnel.id.as_str(), resolved))
-        .collect()
 }
 
 /// トンネル設定の local endpoint を生成する
@@ -3724,7 +3812,7 @@ use_global = true
 
         assert_eq!(stopped_count, 0);
         assert_eq!(global_state.tunnels.len(), 1);
-        assert_eq!(global_state.tunnels[0].id, "global-db");
+        assert_eq!(global_state.tunnels[0].name, "global-db");
     }
 
     /// 停止失敗時に新しいワークスペース設定が保存されないことを検証する
@@ -3767,6 +3855,7 @@ use_global = true
     fn run_tunnel_operations_omits_skipped_targets() {
         let targets = vec![OperationTargetInput {
             id: "missing".to_owned(),
+            runtime_id: None,
             runtime_scope: None,
         }];
 
@@ -4050,6 +4139,11 @@ use_global = true
         .expect("write state");
         let target = QuitTunnelTarget {
             id: "db".to_owned(),
+            runtime_id: fwd_deck_core::tunnel_runtime_id(
+                ConfigSourceKind::Global,
+                &temp_dir.path().join("fwd-deck.toml"),
+                "db",
+            ),
             runtime_scope: RuntimeScope::Global,
             state_path: state_path.clone(),
             process_state: ProcessState::Stale,
@@ -4168,11 +4262,11 @@ use_global = true
         assert_eq!(
             runtime_keys,
             vec![
-                "global:aaa-running",
-                "workspace:aaa-running",
-                "workspace:zzz-running",
-                "workspace:aaa-stale",
-                "workspace:bbb-stale",
+                "global:local:fwd-deck.toml:aaa-running",
+                "workspace:local:fwd-deck.toml:aaa-running",
+                "workspace:local:fwd-deck.toml:zzz-running",
+                "workspace:local:fwd-deck.toml:aaa-stale",
+                "workspace:local:fwd-deck.toml:bbb-stale",
             ]
         );
     }
@@ -4214,7 +4308,7 @@ use_global = true
 
         assert_eq!(
             runtime_status_lookup_key(&status),
-            (RuntimeScope::Workspace, "db")
+            (RuntimeScope::Workspace, "local:fwd-deck.toml:db")
         );
     }
 
@@ -4293,8 +4387,11 @@ use_global = true
         pid: u32,
         local_port: u16,
     ) -> TunnelState {
+        let runtime_id = fwd_deck_core::tunnel_runtime_id(source_kind, &source_path, id);
+
         TunnelState {
-            id: id.to_owned(),
+            runtime_id,
+            name: id.to_owned(),
             pid,
             local_host: "127.0.0.1".to_owned(),
             local_port,
@@ -4375,7 +4472,7 @@ use_global = true
         ResolvedTunnelConfig::new(
             ConfigSource::new(source_kind, source_path),
             TunnelConfig {
-                id: id.to_owned(),
+                name: id.to_owned(),
                 description: None,
                 tags: Vec::new(),
                 local_host: None,

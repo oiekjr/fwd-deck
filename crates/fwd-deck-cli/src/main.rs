@@ -20,8 +20,9 @@ use fwd_deck_core::{
     ValidationReport, add_tunnel_to_config_file, build_ssh_command_args,
     default_global_config_path, default_local_config_path, default_state_file_path,
     filter_tunnels_by_tags, format_path_for_display, load_effective_config, normalize_tag,
-    read_config_file, remove_tunnel_from_config_file, start_tunnel, start_tunnels, stop_tunnel,
-    tag_is_valid, tunnel_statuses, update_tunnel_in_config_file, validate_config,
+    read_config_file, remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel, start_tunnel,
+    start_tunnels, stop_tunnel, tag_is_valid, tunnel_statuses, update_tunnel_in_config_file,
+    validate_config,
 };
 use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
 use serde::Serialize;
@@ -62,7 +63,7 @@ const LIST_AFTER_HELP: &str = "\
 
 補足:
   --tag は複数指定でき、指定したタグをすべて持つトンネルだけを表示します。
-  --query は ID と description を大文字小文字を区別せずに検索します。
+  --query は NAME と description を大文字小文字を区別せずに検索します。
   --wide は REMOTE の host 部分を省略せずに表示します。";
 const SHOW_AFTER_HELP: &str = "\
 例:
@@ -82,8 +83,8 @@ const START_AFTER_HELP: &str = "\
   fwd-deck --json start dev-db --dry-run
 
 補足:
-  ID を省略すると対話選択を表示します。
-  --all、ID、--tag は同時に指定できません。
+  NAME を省略すると対話選択を表示します。
+  --all、NAME、--tag は同時に指定できません。
   --parallel は複数トンネルの開始処理を指定件数まで並列実行します。
   --dry-run は SSH を起動せず、状態ファイルも更新しません。";
 const RECOVER_AFTER_HELP: &str = "\
@@ -92,7 +93,7 @@ const RECOVER_AFTER_HELP: &str = "\
   fwd-deck recover dev-db
 
 補足:
-  ID を省略すると、状態ファイルで stale と判定された追跡中トンネルを再起動します。";
+  NAME を省略すると、状態ファイルで stale と判定された追跡中トンネルを再起動します。";
 const WATCH_AFTER_HELP: &str = "\
 例:
   fwd-deck watch
@@ -115,8 +116,8 @@ const STOP_AFTER_HELP: &str = "\
   fwd-deck stop dev-db --dry-run
 
 補足:
-  ID を省略すると対話選択を表示します。
-  --all と ID は同時に指定できません。
+  NAME を省略すると対話選択を表示します。
+  --all と NAME は同時に指定できません。
   --dry-run はプロセスを停止せず、状態ファイルも更新しません。";
 const CONFIG_AFTER_HELP: &str = "\
 例:
@@ -143,7 +144,7 @@ const CONFIG_EDIT_AFTER_HELP: &str = "\
 
 補足:
   既存値を初期値として表示し、空入力は既存値維持として扱います。
-  同じ ID が local と global の両方に存在する場合、対話実行時は編集対象を選択します。
+  同じ NAME が local と global の両方に存在する場合、対話実行時は編集対象を選択します。
   非対話実行時は --scope を指定します。";
 const CONFIG_REMOVE_AFTER_HELP: &str = "\
 例:
@@ -230,7 +231,7 @@ enum Command {
         #[arg(
             long,
             value_name = "TEXT",
-            help = "ID または description の部分一致で絞り込む"
+            help = "NAME または description の部分一致で絞り込む"
         )]
         query: Option<String>,
         #[arg(long, help = "REMOTE の host 部分を省略せずに表示する")]
@@ -238,13 +239,15 @@ enum Command {
     },
     #[command(about = "設定済みトンネルの詳細を表示する", after_help = SHOW_AFTER_HELP)]
     Show {
-        #[arg(value_name = "ID", help = "詳細を表示するトンネルID")]
-        id: String,
+        #[arg(value_name = "NAME", help = "詳細を表示するトンネル名")]
+        name: String,
+        #[arg(long, value_enum, help = "対象スコープ")]
+        scope: Option<ConfigScopeArg>,
     },
     #[command(about = "設定済みトンネルを起動する", after_help = START_AFTER_HELP)]
     Start {
-        #[arg(value_name = "ID", help = "起動するトンネルID")]
-        ids: Vec<String>,
+        #[arg(value_name = "NAME", help = "起動するトンネル名")]
+        names: Vec<String>,
         #[arg(
             long = "tag",
             value_name = "TAG",
@@ -261,16 +264,20 @@ enum Command {
         parallel: usize,
         #[arg(long, help = "SSH を起動せずに実行予定だけを表示する")]
         dry_run: bool,
+        #[arg(long, value_enum, help = "対象スコープ")]
+        scope: Option<ConfigScopeArg>,
     },
     #[command(about = "stale な追跡中トンネルを再起動する", after_help = RECOVER_AFTER_HELP)]
     Recover {
-        #[arg(value_name = "ID", help = "再起動するトンネルID")]
-        ids: Vec<String>,
+        #[arg(value_name = "NAME", help = "再起動するトンネル名")]
+        names: Vec<String>,
+        #[arg(long, value_enum, help = "対象スコープ")]
+        scope: Option<ConfigScopeArg>,
     },
     #[command(about = "追跡中トンネルを監視して stale 時に再起動する", after_help = WATCH_AFTER_HELP)]
     Watch {
-        #[arg(value_name = "ID", help = "監視するトンネルID")]
-        ids: Vec<String>,
+        #[arg(value_name = "NAME", help = "監視するトンネル名")]
+        names: Vec<String>,
         #[arg(
             long,
             default_value_t = DEFAULT_WATCH_INTERVAL_SECONDS,
@@ -278,17 +285,21 @@ enum Command {
             help = "監視間隔を秒単位で指定する"
         )]
         interval_seconds: u64,
+        #[arg(long, value_enum, help = "対象スコープ")]
+        scope: Option<ConfigScopeArg>,
     },
     #[command(about = "追跡中トンネルの状態を表示する", after_help = STATUS_AFTER_HELP)]
     Status,
     #[command(about = "追跡中トンネルを停止する", after_help = STOP_AFTER_HELP)]
     Stop {
-        #[arg(value_name = "ID", help = "停止するトンネルID")]
-        ids: Vec<String>,
+        #[arg(value_name = "NAME", help = "停止するトンネル名")]
+        names: Vec<String>,
         #[arg(long, help = "追跡中の全トンネルを停止する")]
         all: bool,
         #[arg(long, help = "プロセスを停止せずに実行予定だけを表示する")]
         dry_run: bool,
+        #[arg(long, value_enum, help = "対象スコープ")]
+        scope: Option<ConfigScopeArg>,
     },
     #[command(about = "設定ファイルを対話形式で編集する", after_help = CONFIG_AFTER_HELP)]
     Config {
@@ -327,7 +338,7 @@ enum ConfigCommand {
         after_help = CONFIG_EDIT_AFTER_HELP
     )]
     Edit {
-        #[arg(value_name = "ID", help = "編集するトンネルID")]
+        #[arg(value_name = "NAME", help = "編集するトンネル名")]
         id: String,
         #[arg(long, value_enum, help = "編集する設定スコープ")]
         scope: Option<ConfigScopeArg>,
@@ -351,6 +362,11 @@ impl From<ConfigScopeArg> for ConfigSourceKind {
     }
 }
 
+/// CLI で指定されたスコープを任意の設定種別へ変換する
+fn scope_kind(scope: Option<ConfigScopeArg>) -> Option<ConfigSourceKind> {
+    scope.map(ConfigSourceKind::from)
+}
+
 /// CLI 実行時の失敗理由を表現する
 #[derive(Debug, Error)]
 enum CliError {
@@ -365,7 +381,7 @@ enum CliError {
     )]
     InvalidTag { tag: String },
     #[error(
-        "Tunnel ID exists in multiple configuration files: {id}. Specify --scope in non-interactive mode"
+        "Tunnel name exists in multiple configuration files: {id}. Specify --scope in non-interactive mode"
     )]
     AmbiguousConfigEdit { id: String },
     #[error(transparent)]
@@ -403,16 +419,17 @@ fn run() -> Result<ExitCode, CliError> {
             let config = load_config(&cli)?;
             list_command(&config, tags.clone(), query.clone(), *wide, cli.json)
         }
-        Command::Show { id } => {
+        Command::Show { name, scope } => {
             let config = load_config(&cli)?;
-            show_command(&config, id, cli.json)
+            show_command(&config, name, *scope, cli.json)
         }
         Command::Start {
-            ids,
+            names,
             tags,
             all,
             parallel,
             dry_run,
+            scope,
         } => {
             let config = load_config(&cli)?;
             let state_path = resolve_state_path(state_path)?;
@@ -420,36 +437,49 @@ fn run() -> Result<ExitCode, CliError> {
                 &config,
                 &state_path,
                 StartCommandOptions {
-                    ids: ids.clone(),
+                    names: names.clone(),
                     tags: tags.clone(),
                     all: *all,
                     parallel: *parallel,
                     dry_run: *dry_run,
+                    scope: *scope,
                     json: cli.json,
                 },
             )
         }
-        Command::Recover { ids } => {
+        Command::Recover { names, scope } => {
             let config = load_config(&cli)?;
             let state_path = resolve_state_path(state_path)?;
-            recover_command(&config, &state_path, ids.clone())
+            recover_command(&config, &state_path, names.clone(), *scope)
         }
         Command::Watch {
-            ids,
+            names,
             interval_seconds,
+            scope,
         } => {
             let config = load_config(&cli)?;
             let state_path = resolve_state_path(state_path)?;
-            watch_command(&config, &state_path, ids.clone(), *interval_seconds)
+            watch_command(
+                &config,
+                &state_path,
+                names.clone(),
+                *scope,
+                *interval_seconds,
+            )
         }
         Command::Status => {
             let state_path = resolve_state_path(state_path)?;
             status_command(&state_path, cli.json)
         }
-        Command::Stop { ids, all, dry_run } => {
+        Command::Stop {
+            names,
+            all,
+            dry_run,
+            scope,
+        } => {
             reject_json_if_requested(cli.json)?;
             let state_path = resolve_state_path(state_path)?;
-            stop_command(&state_path, ids.clone(), *all, *dry_run)
+            stop_command(&state_path, names.clone(), *all, *dry_run, *scope)
         }
         Command::Config { command } => {
             reject_json_if_requested(cli.json)?;
@@ -541,7 +571,7 @@ fn config_add_command(
     let scope = resolve_config_scope(paths, scope)?;
     let path = config_path_for_scope(paths, scope)?;
     let config = load_effective_config(paths)?;
-    let tunnel = prompt_tunnel_config(&config)?;
+    let tunnel = prompt_tunnel_config(&config, scope)?;
 
     add_tunnel_to_config_file(&path, scope, tunnel)?;
     println!(
@@ -618,7 +648,7 @@ fn config_edit_command(
 ) -> Result<ExitCode, CliError> {
     let target = resolve_config_edit_target(paths, id, scope)?;
     let config = load_effective_config(paths)?;
-    let tunnel = prompt_tunnel_config_update(&config, &target.tunnel)?;
+    let tunnel = prompt_tunnel_config_update(&config, &target.tunnel, target.scope)?;
 
     update_tunnel_in_config_file(&target.path, target.scope, id, tunnel)?;
     println!(
@@ -685,7 +715,7 @@ fn resolve_config_edit_target(
     match targets.len() {
         0 => Err(ConfigEditError::NotFound {
             path: paths.local.clone(),
-            id: id.to_owned(),
+            name: id.to_owned(),
         }
         .into()),
         1 => Ok(targets
@@ -707,10 +737,10 @@ fn config_edit_target_for_scope(
     let Some(file) = read_config_file(&path, scope)? else {
         return Err(ConfigEditError::Missing { path }.into());
     };
-    let Some(tunnel) = file.tunnels.into_iter().find(|tunnel| tunnel.id == id) else {
+    let Some(tunnel) = file.tunnels.into_iter().find(|tunnel| tunnel.name == id) else {
         return Err(ConfigEditError::NotFound {
             path,
-            id: id.to_owned(),
+            name: id.to_owned(),
         }
         .into());
     };
@@ -731,7 +761,7 @@ fn config_edit_targets_for_id(
 
     if let Some(global_path) = &paths.global
         && let Some(file) = read_config_file(global_path, ConfigSourceKind::Global)?
-        && let Some(tunnel) = file.tunnels.into_iter().find(|tunnel| tunnel.id == id)
+        && let Some(tunnel) = file.tunnels.into_iter().find(|tunnel| tunnel.name == id)
     {
         targets.push(ConfigEditTarget {
             scope: ConfigSourceKind::Global,
@@ -741,7 +771,7 @@ fn config_edit_targets_for_id(
     }
 
     if let Some(file) = read_config_file(&paths.local, ConfigSourceKind::Local)?
-        && let Some(tunnel) = file.tunnels.into_iter().find(|tunnel| tunnel.id == id)
+        && let Some(tunnel) = file.tunnels.into_iter().find(|tunnel| tunnel.name == id)
     {
         targets.push(ConfigEditTarget {
             scope: ConfigSourceKind::Local,
@@ -810,7 +840,12 @@ fn list_command(
 }
 
 /// トンネル詳細表示コマンドを実行する
-fn show_command(config: &EffectiveConfig, id: &str, json: bool) -> Result<ExitCode, CliError> {
+fn show_command(
+    config: &EffectiveConfig,
+    name: &str,
+    scope: Option<ConfigScopeArg>,
+    json: bool,
+) -> Result<ExitCode, CliError> {
     if !config.has_sources() {
         eprintln!(
             "{}",
@@ -819,11 +854,11 @@ fn show_command(config: &EffectiveConfig, id: &str, json: bool) -> Result<ExitCo
         return Ok(ExitCode::FAILURE);
     }
 
-    let Some(resolved) = find_tunnel_by_id(config, id) else {
+    let Some(resolved) = find_tunnel_by_name(config, name, scope) else {
         eprintln!(
             "{}",
             red(
-                &format!("No tunnel matched ID: {id}."),
+                &format!("No tunnel matched NAME: {name}."),
                 OutputStream::Stderr
             )
         );
@@ -846,7 +881,7 @@ fn print_list(tunnels: &[&ResolvedTunnelConfig], wide: bool) {
 
     println!(
         "{} {} {} {} {} SOURCE",
-        pad_display_width("ID", widths.id),
+        pad_display_width("NAME", widths.id),
         pad_display_width("LOCAL", widths.local),
         pad_display_width("REMOTE", widths.remote),
         pad_display_width("SSH", widths.ssh),
@@ -905,8 +940,8 @@ impl<'a> ListRow<'a> {
         let tags = format_tag_list(&tunnel.tags);
 
         Self {
-            id: tunnel.id.as_str(),
-            id_width: display_width(&tunnel.id),
+            id: tunnel.name.as_str(),
+            id_width: display_width(&tunnel.name),
             local_width: display_width(&local),
             local,
             remote_width: display_width(&remote),
@@ -1029,7 +1064,7 @@ fn display_width(value: &str) -> usize {
 fn print_tunnel_details(resolved: &ResolvedTunnelConfig) {
     let tunnel = &resolved.tunnel;
 
-    println!("ID: {}", tunnel.id);
+    println!("NAME: {}", tunnel.name);
     println!(
         "Description: {}",
         format_optional_value(tunnel.description.as_deref())
@@ -1047,6 +1082,7 @@ fn print_tunnel_details(resolved: &ResolvedTunnelConfig) {
         resolved.source.kind,
         format_path_for_display(&resolved.source.path)
     );
+    println!("Runtime ID: {}", runtime_id_for_resolved_tunnel(resolved));
     print_timeout_details(resolved.timeouts);
 }
 
@@ -1106,11 +1142,12 @@ fn start_command(
     options: StartCommandOptions,
 ) -> Result<ExitCode, CliError> {
     let StartCommandOptions {
-        ids,
+        names,
         tags,
         all,
         parallel,
         dry_run,
+        scope,
         json,
     } = options;
 
@@ -1126,22 +1163,22 @@ fn start_command(
         return Ok(ExitCode::FAILURE);
     }
 
-    if all && (!ids.is_empty() || !tags.is_empty()) {
+    if all && (!names.is_empty() || !tags.is_empty()) {
         eprintln!(
             "{}",
             red(
-                "Cannot combine --all with tunnel IDs or --tag.",
+                "Cannot combine --all with tunnel NAMEs or --tag.",
                 OutputStream::Stderr
             )
         );
         return Ok(ExitCode::FAILURE);
     }
 
-    if !ids.is_empty() && !tags.is_empty() {
+    if !names.is_empty() && !tags.is_empty() {
         eprintln!(
             "{}",
             red(
-                "Cannot combine tunnel IDs with --tag.",
+                "Cannot combine tunnel NAMEs with --tag.",
                 OutputStream::Stderr
             )
         );
@@ -1161,13 +1198,10 @@ fn start_command(
 
     let tags = normalize_cli_tags(&tags)?;
 
-    let ids = if all {
-        sorted_tunnels_by_id(&config.tunnels)
-            .into_iter()
-            .map(|tunnel| tunnel.tunnel.id.clone())
-            .collect()
+    let tunnels = if all {
+        select_tunnels_for_scope(sorted_tunnels_by_id(&config.tunnels), scope)
     } else if !tags.is_empty() {
-        let tunnels = select_tunnels_for_tags(config, &tags);
+        let tunnels = select_tunnels_for_scope(select_tunnels_for_tags(config, &tags), scope);
 
         if tunnels.is_empty() {
             eprintln!(
@@ -1181,24 +1215,21 @@ fn start_command(
         }
 
         tunnels
-            .into_iter()
-            .map(|tunnel| tunnel.tunnel.id.clone())
-            .collect()
-    } else if ids.is_empty() {
-        prompt_tunnels_to_start(config)?
+    } else if names.is_empty() {
+        let runtime_ids = prompt_tunnels_to_start(config, scope)?;
+        find_tunnels_by_runtime_ids(config, &runtime_ids)
     } else {
-        ids
+        let Ok(tunnels) = find_tunnels_by_names(config, &names, scope) else {
+            print_unknown_names(config, &names, scope);
+            return Ok(ExitCode::FAILURE);
+        };
+        tunnels
     };
 
-    if ids.is_empty() {
+    if tunnels.is_empty() {
         println!("No tunnels were selected.");
         return Ok(ExitCode::SUCCESS);
     }
-
-    let Ok(tunnels) = find_tunnels_by_ids(config, &ids) else {
-        print_unknown_ids(config, &ids);
-        return Ok(ExitCode::FAILURE);
-    };
 
     if dry_run {
         if json {
@@ -1232,11 +1263,12 @@ fn start_command(
 /// start コマンドの実行条件を保持する
 #[derive(Debug, Clone)]
 struct StartCommandOptions {
-    ids: Vec<String>,
+    names: Vec<String>,
     tags: Vec<String>,
     all: bool,
     parallel: usize,
     dry_run: bool,
+    scope: Option<ConfigScopeArg>,
     json: bool,
 }
 
@@ -1244,7 +1276,8 @@ struct StartCommandOptions {
 fn recover_command(
     config: &EffectiveConfig,
     state_path: &Path,
-    ids: Vec<String>,
+    names: Vec<String>,
+    scope: Option<ConfigScopeArg>,
 ) -> Result<ExitCode, CliError> {
     if !config.has_sources() {
         eprintln!(
@@ -1265,27 +1298,34 @@ fn recover_command(
         return Ok(ExitCode::SUCCESS);
     }
 
-    let recovery_ids = if ids.is_empty() {
-        stale_tunnel_ids(&statuses)
+    let recovery_runtime_ids = if names.is_empty() {
+        stale_runtime_ids(&statuses, scope)
     } else {
-        ids
+        let Ok(tunnels) = find_tunnels_by_names(config, &names, scope) else {
+            print_unknown_names(config, &names, scope);
+            return Ok(ExitCode::FAILURE);
+        };
+        tunnels
+            .into_iter()
+            .map(runtime_id_for_resolved_tunnel)
+            .collect()
     };
 
-    if recovery_ids.is_empty() {
+    if recovery_runtime_ids.is_empty() {
         println!("No stale tunnels to recover.");
         return Ok(ExitCode::SUCCESS);
     }
 
-    let statuses_by_id = status_index_by_id(&statuses);
+    let statuses_by_runtime_id = status_index_by_runtime_id(&statuses);
     let mut failed = false;
 
-    for id in recovery_ids {
-        let Some(status) = statuses_by_id.get(id.as_str()).copied() else {
+    for runtime_id in recovery_runtime_ids {
+        let Some(status) = statuses_by_runtime_id.get(runtime_id.as_str()).copied() else {
             failed = true;
             eprintln!(
                 "{}",
                 red(
-                    &format!("Tunnel is not tracked: {id}"),
+                    &format!("Tunnel is not tracked: {runtime_id}"),
                     OutputStream::Stderr
                 )
             );
@@ -1298,7 +1338,7 @@ fn recover_command(
                 green(
                     &format!(
                         "Tunnel is already running: {} (pid: {})",
-                        status.state.id, status.state.pid
+                        status.state.name, status.state.pid
                     ),
                     OutputStream::Stdout
                 )
@@ -1306,12 +1346,15 @@ fn recover_command(
             continue;
         }
 
-        let Some(tunnel) = find_tunnel_by_id(config, &id) else {
+        let Some(tunnel) = find_tunnel_by_runtime_id(config, &runtime_id) else {
             failed = true;
             eprintln!(
                 "{}",
                 red(
-                    &format!("Configured tunnel not found for stale state: {id}"),
+                    &format!(
+                        "Configured tunnel not found for stale state: {} ({runtime_id})",
+                        status.state.name
+                    ),
                     OutputStream::Stderr
                 )
             );
@@ -1334,7 +1377,8 @@ fn recover_command(
 fn watch_command(
     config: &EffectiveConfig,
     state_path: &Path,
-    ids: Vec<String>,
+    names: Vec<String>,
+    scope: Option<ConfigScopeArg>,
     interval_seconds: u64,
 ) -> Result<ExitCode, CliError> {
     if !config.has_sources() {
@@ -1360,20 +1404,28 @@ fn watch_command(
         return Ok(ExitCode::FAILURE);
     }
 
-    if !ids.is_empty() && find_tunnels_by_ids(config, &ids).is_err() {
-        print_unknown_ids(config, &ids);
-        return Ok(ExitCode::FAILURE);
-    }
+    let runtime_ids = if names.is_empty() {
+        Vec::new()
+    } else {
+        let Ok(tunnels) = find_tunnels_by_names(config, &names, scope) else {
+            print_unknown_names(config, &names, scope);
+            return Ok(ExitCode::FAILURE);
+        };
+        tunnels
+            .into_iter()
+            .map(runtime_id_for_resolved_tunnel)
+            .collect()
+    };
 
-    print_watch_started(&ids, interval_seconds);
+    print_watch_started(&names, interval_seconds);
     let interval = Duration::from_secs(interval_seconds);
 
     loop {
         let statuses = tunnel_statuses(state_path)?;
-        let stale_ids = watched_stale_tunnel_ids(&statuses, &ids);
+        let stale_runtime_ids = watched_stale_runtime_ids(&statuses, &runtime_ids, scope);
 
-        if !stale_ids.is_empty() {
-            recover_watch_stale_tunnels(config, state_path, &stale_ids)?;
+        if !stale_runtime_ids.is_empty() {
+            recover_watch_stale_tunnels(config, state_path, &stale_runtime_ids)?;
         }
 
         thread::sleep(interval);
@@ -1413,52 +1465,61 @@ fn status_command(state_path: &Path, json: bool) -> Result<ExitCode, CliError> {
 /// トンネル停止コマンドを実行する
 fn stop_command(
     state_path: &Path,
-    ids: Vec<String>,
+    names: Vec<String>,
     all: bool,
     dry_run: bool,
+    scope: Option<ConfigScopeArg>,
 ) -> Result<ExitCode, CliError> {
     let statuses = tunnel_statuses(state_path)?;
 
-    if all && !ids.is_empty() {
+    if all && !names.is_empty() {
         eprintln!(
             "{}",
             red(
-                "Cannot combine --all with tunnel IDs.",
+                "Cannot combine --all with tunnel NAMEs.",
                 OutputStream::Stderr
             )
         );
         return Ok(ExitCode::FAILURE);
     }
 
-    if statuses.is_empty() && ids.is_empty() {
+    if statuses.is_empty() && names.is_empty() {
         println!("No tracked tunnels.");
         return Ok(ExitCode::SUCCESS);
     }
 
-    let ids = if all {
+    let runtime_ids = if all {
         sorted_statuses_by_id(&statuses)
             .into_iter()
-            .map(|status| status.state.id.clone())
+            .filter(|status| status_matches_scope(status, scope))
+            .map(|status| status.state.runtime_id.clone())
             .collect()
-    } else if ids.is_empty() {
-        prompt_tunnels_to_stop(&statuses)?
+    } else if names.is_empty() {
+        prompt_tunnels_to_stop(&statuses, scope)?
     } else {
-        ids
+        let Ok(statuses) = find_statuses_by_names(&statuses, &names, scope) else {
+            print_untracked_names(&statuses, &names, scope);
+            return Ok(ExitCode::FAILURE);
+        };
+        statuses
+            .into_iter()
+            .map(|status| status.state.runtime_id.clone())
+            .collect()
     };
 
-    if ids.is_empty() {
+    if runtime_ids.is_empty() {
         println!("No tunnels were selected.");
         return Ok(ExitCode::SUCCESS);
     }
 
     if dry_run {
-        return Ok(print_stop_dry_run(&statuses, &ids, state_path));
+        return Ok(print_stop_dry_run(&statuses, &runtime_ids, state_path));
     }
 
     let mut failed = false;
 
-    for id in ids {
-        match stop_tunnel(&id, state_path) {
+    for runtime_id in runtime_ids {
+        match stop_tunnel(&runtime_id, state_path) {
             Ok(stopped) => print_stopped_tunnel(&stopped),
             Err(error) => {
                 failed = true;
@@ -1650,7 +1711,7 @@ fn doctor_identity_file_checks(config: &EffectiveConfig) -> Vec<DoctorCheck> {
         .filter_map(|resolved| {
             let identity_file = resolved.tunnel.identity_file.as_deref()?;
             let path = expand_home_pathbuf(identity_file);
-            let name = format!("Identity file ({})", resolved.tunnel.id);
+            let name = format!("Identity file ({})", resolved.tunnel.name);
 
             if path.is_file() {
                 Some(DoctorCheck::ok(name, format_path_for_display(&path)))
@@ -1672,7 +1733,7 @@ fn doctor_local_endpoint_checks(config: &EffectiveConfig) -> Vec<DoctorCheck> {
         .map(|resolved| {
             let tunnel = &resolved.tunnel;
             let local_host = tunnel.effective_local_host();
-            let name = format!("Local endpoint ({})", tunnel.id);
+            let name = format!("Local endpoint ({})", tunnel.name);
 
             match TcpListener::bind((local_host, tunnel.local_port)) {
                 Ok(listener) => {
@@ -1813,6 +1874,21 @@ fn select_tunnels_for_tags<'a>(
     sorted_tunnels_by_id(filter_tunnels_by_tags(&config.tunnels, tags))
 }
 
+/// 指定スコープがある場合に統合済みトンネルを絞り込む
+fn select_tunnels_for_scope(
+    tunnels: Vec<&ResolvedTunnelConfig>,
+    scope: Option<ConfigScopeArg>,
+) -> Vec<&ResolvedTunnelConfig> {
+    let Some(scope) = scope_kind(scope) else {
+        return tunnels;
+    };
+
+    tunnels
+        .into_iter()
+        .filter(|resolved| resolved.source.kind == scope)
+        .collect()
+}
+
 /// list の絞り込み条件に応じて統合済みトンネル設定を選択する
 fn select_tunnels_for_list<'a>(
     config: &'a EffectiveConfig,
@@ -1832,7 +1908,7 @@ fn sorted_tunnels_by_id<'a>(
     tunnels: impl IntoIterator<Item = &'a ResolvedTunnelConfig>,
 ) -> Vec<&'a ResolvedTunnelConfig> {
     let mut tunnels = tunnels.into_iter().collect::<Vec<_>>();
-    tunnels.sort_by(|left, right| left.tunnel.id.cmp(&right.tunnel.id));
+    tunnels.sort_by(|left, right| left.tunnel.name.cmp(&right.tunnel.name));
 
     tunnels
 }
@@ -1846,7 +1922,7 @@ fn normalize_list_query(query: Option<String>) -> Option<String> {
 
 /// トンネルが list query に一致するかを判定する
 fn tunnel_matches_list_query(tunnel: &TunnelConfig, query: &str) -> bool {
-    ascii_case_insensitive_contains(&tunnel.id, query)
+    ascii_case_insensitive_contains(&tunnel.name, query)
         || tunnel
             .description
             .as_deref()
@@ -1901,12 +1977,15 @@ fn prompt_config_scope(paths: &ConfigPaths) -> Result<ConfigSourceKind, InquireE
 }
 
 /// 追加するトンネル設定を対話的に入力する
-fn prompt_tunnel_config(config: &EffectiveConfig) -> Result<TunnelConfig, CliError> {
-    let id = prompt_available_tunnel_id(config)?;
+fn prompt_tunnel_config(
+    config: &EffectiveConfig,
+    scope: ConfigSourceKind,
+) -> Result<TunnelConfig, CliError> {
+    let id = prompt_available_tunnel_id(config, scope)?;
     let description = prompt_optional_text("Description:")?;
     let tags = prompt_tags()?;
     let local_host = Some(prompt_local_host()?);
-    let local_port = prompt_available_local_port(config, &id)?;
+    let local_port = prompt_available_local_port(config, scope, &id)?;
     let remote_host = prompt_required_text("Remote host:")?;
     let remote_port = prompt_port("Remote port:", None)?;
     let ssh_user = prompt_required_text("SSH user:")?;
@@ -1915,7 +1994,7 @@ fn prompt_tunnel_config(config: &EffectiveConfig) -> Result<TunnelConfig, CliErr
     let identity_file = prompt_optional_text("Identity file:")?;
 
     Ok(TunnelConfig {
-        id,
+        name: id,
         description,
         tags,
         local_host,
@@ -1934,14 +2013,15 @@ fn prompt_tunnel_config(config: &EffectiveConfig) -> Result<TunnelConfig, CliErr
 fn prompt_tunnel_config_update(
     config: &EffectiveConfig,
     current: &TunnelConfig,
+    scope: ConfigSourceKind,
 ) -> Result<TunnelConfig, CliError> {
-    let id = prompt_available_tunnel_id_for_update(config, &current.id)?;
+    let id = prompt_available_tunnel_id_for_update(config, scope, &current.name)?;
     let description =
         prompt_existing_optional_text("Description:", current.description.as_deref())?;
     let tags = prompt_existing_tags(&current.tags)?;
     let local_host = prompt_existing_local_host(current)?;
     let local_port =
-        prompt_available_local_port_for_update(config, &current.id, current.local_port)?;
+        prompt_available_local_port_for_update(config, scope, &current.name, current.local_port)?;
     let remote_host = prompt_existing_required_text("Remote host:", &current.remote_host)?;
     let remote_port = prompt_existing_port("Remote port:", current.remote_port)?;
     let ssh_user = prompt_existing_required_text("SSH user:", &current.ssh_user)?;
@@ -1951,7 +2031,7 @@ fn prompt_tunnel_config_update(
         prompt_existing_optional_text("Identity file:", current.identity_file.as_deref())?;
 
     Ok(TunnelConfig {
-        id,
+        name: id,
         description,
         tags,
         local_host,
@@ -1967,17 +2047,20 @@ fn prompt_tunnel_config_update(
 }
 
 /// 既存設定と重複しないトンネル ID の入力を受け取る
-fn prompt_available_tunnel_id(config: &EffectiveConfig) -> Result<String, CliError> {
+fn prompt_available_tunnel_id(
+    config: &EffectiveConfig,
+    scope: ConfigSourceKind,
+) -> Result<String, CliError> {
     loop {
-        let id = prompt_required_text("Tunnel id:")?;
+        let id = prompt_required_text("Tunnel name:")?;
 
-        if let Some(conflict) = find_tunnel_id_conflict(config, &id) {
+        if let Some(conflict) = find_tunnel_id_conflict(config, scope, &id) {
             eprintln!(
                 "{}",
                 red(
                     &format!(
-                        "Tunnel id is already used: {} ({}: {})",
-                        conflict.tunnel.id,
+                        "Tunnel name is already used: {} ({}: {})",
+                        conflict.tunnel.name,
                         conflict.source.kind,
                         format_path_for_display(&conflict.source.path)
                     ),
@@ -1994,18 +2077,19 @@ fn prompt_available_tunnel_id(config: &EffectiveConfig) -> Result<String, CliErr
 /// 更新対象を除いて重複しないトンネル ID の入力を受け取る
 fn prompt_available_tunnel_id_for_update(
     config: &EffectiveConfig,
+    scope: ConfigSourceKind,
     current_id: &str,
 ) -> Result<String, CliError> {
     loop {
-        let id = prompt_existing_required_text("Tunnel id:", current_id)?;
+        let id = prompt_existing_required_text("Tunnel name:", current_id)?;
 
-        if let Some(conflict) = find_tunnel_id_conflict_for_update(config, current_id, &id) {
+        if let Some(conflict) = find_tunnel_id_conflict_for_update(config, scope, current_id, &id) {
             eprintln!(
                 "{}",
                 red(
                     &format!(
-                        "Tunnel id is already used: {} ({}: {})",
-                        conflict.tunnel.id,
+                        "Tunnel name is already used: {} ({}: {})",
+                        conflict.tunnel.name,
                         conflict.source.kind,
                         format_path_for_display(&conflict.source.path)
                     ),
@@ -2022,38 +2106,45 @@ fn prompt_available_tunnel_id_for_update(
 /// トンネル ID が重複する既存トンネルを取得する
 fn find_tunnel_id_conflict<'a>(
     config: &'a EffectiveConfig,
+    scope: ConfigSourceKind,
     tunnel_id: &str,
 ) -> Option<&'a ResolvedTunnelConfig> {
     config
         .tunnels
         .iter()
-        .find(|resolved| resolved.tunnel.id == tunnel_id)
+        .find(|resolved| resolved.source.kind == scope && resolved.tunnel.name == tunnel_id)
 }
 
 /// 更新対象を除いてトンネル ID が重複する既存トンネルを取得する
 fn find_tunnel_id_conflict_for_update<'a>(
     config: &'a EffectiveConfig,
+    scope: ConfigSourceKind,
     current_id: &str,
     tunnel_id: &str,
 ) -> Option<&'a ResolvedTunnelConfig> {
-    config
-        .tunnels
-        .iter()
-        .find(|resolved| resolved.tunnel.id != current_id && resolved.tunnel.id == tunnel_id)
+    config.tunnels.iter().find(|resolved| {
+        resolved.source.kind == scope
+            && resolved.tunnel.name != current_id
+            && resolved.tunnel.name == tunnel_id
+    })
 }
 
 /// 既存設定と重複しない local_port の入力を受け取る
-fn prompt_available_local_port(config: &EffectiveConfig, tunnel_id: &str) -> Result<u16, CliError> {
+fn prompt_available_local_port(
+    config: &EffectiveConfig,
+    scope: ConfigSourceKind,
+    tunnel_id: &str,
+) -> Result<u16, CliError> {
     loop {
         let local_port = prompt_port("Local port:", None)?;
 
-        if let Some(conflict) = find_local_port_conflict(config, tunnel_id, local_port) {
+        if let Some(conflict) = find_local_port_conflict(config, scope, tunnel_id, local_port) {
             eprintln!(
                 "{}",
                 red(
                     &format!(
                         "Local port is already used by tunnel: {} ({}:{})",
-                        conflict.tunnel.id,
+                        conflict.tunnel.name,
                         conflict.tunnel.effective_local_host(),
                         conflict.tunnel.local_port
                     ),
@@ -2070,19 +2161,20 @@ fn prompt_available_local_port(config: &EffectiveConfig, tunnel_id: &str) -> Res
 /// 更新対象を除いて重複しない local_port の入力を受け取る
 fn prompt_available_local_port_for_update(
     config: &EffectiveConfig,
+    scope: ConfigSourceKind,
     current_id: &str,
     current_port: u16,
 ) -> Result<u16, CliError> {
     loop {
         let local_port = prompt_existing_port("Local port:", current_port)?;
 
-        if let Some(conflict) = find_local_port_conflict(config, current_id, local_port) {
+        if let Some(conflict) = find_local_port_conflict(config, scope, current_id, local_port) {
             eprintln!(
                 "{}",
                 red(
                     &format!(
                         "Local port is already used by tunnel: {} ({}:{})",
-                        conflict.tunnel.id,
+                        conflict.tunnel.name,
                         conflict.tunnel.effective_local_host(),
                         conflict.tunnel.local_port
                     ),
@@ -2099,11 +2191,14 @@ fn prompt_available_local_port_for_update(
 /// local_port が重複する既存トンネルを取得する
 fn find_local_port_conflict<'a>(
     config: &'a EffectiveConfig,
+    scope: ConfigSourceKind,
     tunnel_id: &str,
     local_port: u16,
 ) -> Option<&'a ResolvedTunnelConfig> {
     config.tunnels.iter().find(|resolved| {
-        resolved.tunnel.id != tunnel_id && resolved.tunnel.local_port == local_port
+        resolved.source.kind == scope
+            && resolved.tunnel.name != tunnel_id
+            && resolved.tunnel.local_port == local_port
     })
 }
 
@@ -2388,8 +2483,11 @@ fn prompt_port_text(label: &str, default: Option<u16>) -> Result<String, CliErro
 }
 
 /// 開始対象のトンネルを対話的に選択する
-fn prompt_tunnels_to_start(config: &EffectiveConfig) -> Result<Vec<String>, InquireError> {
-    let choices = sorted_tunnels_by_id(&config.tunnels)
+fn prompt_tunnels_to_start(
+    config: &EffectiveConfig,
+    scope: Option<ConfigScopeArg>,
+) -> Result<Vec<String>, InquireError> {
+    let choices = select_tunnels_for_scope(sorted_tunnels_by_id(&config.tunnels), scope)
         .into_iter()
         .map(StartChoice::from_resolved_tunnel)
         .collect::<Vec<_>>();
@@ -2404,8 +2502,14 @@ fn prompt_tunnels_to_start(config: &EffectiveConfig) -> Result<Vec<String>, Inqu
 }
 
 /// 停止対象のトンネルを対話的に選択する
-fn prompt_tunnels_to_stop(statuses: &[TunnelRuntimeStatus]) -> Result<Vec<String>, InquireError> {
-    let sorted_statuses = sorted_statuses_by_id(statuses);
+fn prompt_tunnels_to_stop(
+    statuses: &[TunnelRuntimeStatus],
+    scope: Option<ConfigScopeArg>,
+) -> Result<Vec<String>, InquireError> {
+    let sorted_statuses = sorted_statuses_by_id(statuses)
+        .into_iter()
+        .filter(|status| status_matches_scope(status, scope))
+        .collect::<Vec<_>>();
     let mut choices = vec![StopChoice::all()];
     choices.extend(
         sorted_statuses
@@ -2417,7 +2521,7 @@ fn prompt_tunnels_to_stop(statuses: &[TunnelRuntimeStatus]) -> Result<Vec<String
     if selected.iter().any(StopChoice::is_all) {
         return Ok(sorted_statuses
             .into_iter()
-            .map(|status| status.state.id.clone())
+            .map(|status| status.state.runtime_id.clone())
             .collect());
     }
 
@@ -2427,73 +2531,167 @@ fn prompt_tunnels_to_stop(statuses: &[TunnelRuntimeStatus]) -> Result<Vec<String
         .collect())
 }
 
-/// 指定 ID のトンネル設定を取得する
-fn find_tunnels_by_ids<'a>(
+/// 指定 runtime ID のトンネル設定を取得する
+fn find_tunnels_by_runtime_ids<'a>(
     config: &'a EffectiveConfig,
-    ids: &[String],
-) -> Result<Vec<&'a ResolvedTunnelConfig>, ()> {
-    let tunnels_by_id = tunnel_index_by_id(config);
+    runtime_ids: &[String],
+) -> Vec<&'a ResolvedTunnelConfig> {
+    let tunnels_by_runtime_id = tunnel_index_by_runtime_id(config);
 
-    ids.iter()
-        .map(|id| tunnels_by_id.get(id.as_str()).copied().ok_or(()))
+    runtime_ids
+        .iter()
+        .filter_map(|runtime_id| tunnels_by_runtime_id.get(runtime_id.as_str()).copied())
         .collect()
 }
 
-/// 指定 ID のトンネル設定を取得する
-fn find_tunnel_by_id<'a>(
+/// 指定 name のトンネル設定をスコープ優先規則に従って取得する
+fn find_tunnels_by_names<'a>(
     config: &'a EffectiveConfig,
-    id: &str,
-) -> Option<&'a ResolvedTunnelConfig> {
-    config.tunnels.iter().find(|tunnel| tunnel.tunnel.id == id)
+    names: &[String],
+    scope: Option<ConfigScopeArg>,
+) -> Result<Vec<&'a ResolvedTunnelConfig>, ()> {
+    names
+        .iter()
+        .map(|name| find_tunnel_by_name(config, name, scope).ok_or(()))
+        .collect()
 }
 
-/// 統合済みトンネル設定を ID から参照する索引を生成する
-fn tunnel_index_by_id(config: &EffectiveConfig) -> HashMap<&str, &ResolvedTunnelConfig> {
+/// 指定 name のトンネル設定をスコープ優先規則に従って取得する
+fn find_tunnel_by_name<'a>(
+    config: &'a EffectiveConfig,
+    name: &str,
+    scope: Option<ConfigScopeArg>,
+) -> Option<&'a ResolvedTunnelConfig> {
+    if let Some(scope) = scope_kind(scope) {
+        return config
+            .tunnels
+            .iter()
+            .find(|resolved| resolved.source.kind == scope && resolved.tunnel.name == name);
+    }
+
     config
         .tunnels
         .iter()
-        .map(|resolved| (resolved.tunnel.id.as_str(), resolved))
+        .find(|resolved| {
+            resolved.source.kind == ConfigSourceKind::Local && resolved.tunnel.name == name
+        })
+        .or_else(|| {
+            config.tunnels.iter().find(|resolved| {
+                resolved.source.kind == ConfigSourceKind::Global && resolved.tunnel.name == name
+            })
+        })
+}
+
+/// 指定 runtime ID のトンネル設定を取得する
+fn find_tunnel_by_runtime_id<'a>(
+    config: &'a EffectiveConfig,
+    runtime_id: &str,
+) -> Option<&'a ResolvedTunnelConfig> {
+    config
+        .tunnels
+        .iter()
+        .find(|resolved| runtime_id_for_resolved_tunnel(resolved) == runtime_id)
+}
+
+/// 統合済みトンネル設定を runtime ID から参照する索引を生成する
+fn tunnel_index_by_runtime_id(config: &EffectiveConfig) -> HashMap<String, &ResolvedTunnelConfig> {
+    config
+        .tunnels
+        .iter()
+        .map(|resolved| (runtime_id_for_resolved_tunnel(resolved), resolved))
         .collect()
 }
 
-/// トンネル状態を ID から参照する索引を生成する
-fn status_index_by_id(statuses: &[TunnelRuntimeStatus]) -> HashMap<&str, &TunnelRuntimeStatus> {
+/// 指定 name のトンネル状態をスコープ優先規則に従って取得する
+fn find_statuses_by_names<'a>(
+    statuses: &'a [TunnelRuntimeStatus],
+    names: &[String],
+    scope: Option<ConfigScopeArg>,
+) -> Result<Vec<&'a TunnelRuntimeStatus>, ()> {
+    names
+        .iter()
+        .map(|name| find_status_by_name(statuses, name, scope).ok_or(()))
+        .collect()
+}
+
+/// 指定 name のトンネル状態をスコープ優先規則に従って取得する
+fn find_status_by_name<'a>(
+    statuses: &'a [TunnelRuntimeStatus],
+    name: &str,
+    scope: Option<ConfigScopeArg>,
+) -> Option<&'a TunnelRuntimeStatus> {
+    if let Some(scope) = scope_kind(scope) {
+        return statuses
+            .iter()
+            .find(|status| status.state.source_kind == scope && status.state.name == name);
+    }
+
     statuses
         .iter()
-        .map(|status| (status.state.id.as_str(), status))
+        .find(|status| {
+            status.state.source_kind == ConfigSourceKind::Local && status.state.name == name
+        })
+        .or_else(|| {
+            statuses.iter().find(|status| {
+                status.state.source_kind == ConfigSourceKind::Global && status.state.name == name
+            })
+        })
+}
+
+/// トンネル状態を runtime ID から参照する索引を生成する
+fn status_index_by_runtime_id(
+    statuses: &[TunnelRuntimeStatus],
+) -> HashMap<&str, &TunnelRuntimeStatus> {
+    statuses
+        .iter()
+        .map(|status| (status.state.runtime_id.as_str(), status))
         .collect()
 }
 
 /// ID 昇順のトンネル状態一覧を生成する
 fn sorted_statuses_by_id(statuses: &[TunnelRuntimeStatus]) -> Vec<&TunnelRuntimeStatus> {
     let mut statuses = statuses.iter().collect::<Vec<_>>();
-    statuses.sort_by(|left, right| left.state.id.cmp(&right.state.id));
+    statuses.sort_by(|left, right| left.state.name.cmp(&right.state.name));
 
     statuses
 }
 
-/// stale なトンネル ID を取得する
-fn stale_tunnel_ids(statuses: &[TunnelRuntimeStatus]) -> Vec<String> {
+/// 指定スコープがある場合にトンネル状態の対象可否を判定する
+fn status_matches_scope(status: &TunnelRuntimeStatus, scope: Option<ConfigScopeArg>) -> bool {
+    scope_kind(scope).is_none_or(|scope| status.state.source_kind == scope)
+}
+
+/// stale なトンネルの runtime ID を取得する
+fn stale_runtime_ids(
+    statuses: &[TunnelRuntimeStatus],
+    scope: Option<ConfigScopeArg>,
+) -> Vec<String> {
     statuses
         .iter()
         .filter(|status| status.process_state == ProcessState::Stale)
-        .map(|status| status.state.id.clone())
+        .filter(|status| status_matches_scope(status, scope))
+        .map(|status| status.state.runtime_id.clone())
         .collect()
 }
 
-/// watch 対象の stale なトンネル ID を取得する
-fn watched_stale_tunnel_ids(statuses: &[TunnelRuntimeStatus], ids: &[String]) -> Vec<String> {
-    let requested_ids = id_set(ids);
+/// watch 対象の stale なトンネル runtime ID を取得する
+fn watched_stale_runtime_ids(
+    statuses: &[TunnelRuntimeStatus],
+    runtime_ids: &[String],
+    scope: Option<ConfigScopeArg>,
+) -> Vec<String> {
+    let requested_runtime_ids = runtime_id_set(runtime_ids);
 
     statuses
         .iter()
         .filter(|status| status.process_state == ProcessState::Stale)
+        .filter(|status| status_matches_scope(status, scope))
         .filter(|status| {
-            requested_ids
+            requested_runtime_ids
                 .as_ref()
-                .is_none_or(|ids| ids.contains(status.state.id.as_str()))
+                .is_none_or(|runtime_ids| runtime_ids.contains(status.state.runtime_id.as_str()))
         })
-        .map(|status| status.state.id.clone())
+        .map(|status| status.state.runtime_id.clone())
         .collect()
 }
 
@@ -2501,14 +2699,14 @@ fn watched_stale_tunnel_ids(statuses: &[TunnelRuntimeStatus], ids: &[String]) ->
 fn recover_watch_stale_tunnels(
     config: &EffectiveConfig,
     state_path: &Path,
-    ids: &[String],
+    runtime_ids: &[String],
 ) -> Result<(), CliError> {
-    for id in ids {
-        let Some(tunnel) = find_tunnel_by_id(config, id) else {
+    for runtime_id in runtime_ids {
+        let Some(tunnel) = find_tunnel_by_runtime_id(config, runtime_id) else {
             eprintln!(
                 "{}",
                 red(
-                    &format!("Configured tunnel not found for stale state: {id}"),
+                    &format!("Configured tunnel not found for stale state: {runtime_id}"),
                     OutputStream::Stderr
                 )
             );
@@ -2526,19 +2724,35 @@ fn recover_watch_stale_tunnels(
     Ok(())
 }
 
-/// 未知の ID を表示する
-fn print_unknown_ids(config: &EffectiveConfig, ids: &[String]) {
-    let known_ids = config
-        .tunnels
-        .iter()
-        .map(|tunnel| tunnel.tunnel.id.as_str())
-        .collect::<HashSet<_>>();
-
-    for id in ids {
-        if !known_ids.contains(id.as_str()) {
+/// 未知の name を表示する
+fn print_unknown_names(config: &EffectiveConfig, names: &[String], scope: Option<ConfigScopeArg>) {
+    for name in names {
+        if find_tunnel_by_name(config, name, scope).is_none() {
             eprintln!(
                 "{}",
-                red(&format!("Unknown tunnel id: {id}"), OutputStream::Stderr)
+                red(
+                    &format!("Unknown tunnel name: {name}"),
+                    OutputStream::Stderr
+                )
+            );
+        }
+    }
+}
+
+/// 追跡されていない name を表示する
+fn print_untracked_names(
+    statuses: &[TunnelRuntimeStatus],
+    names: &[String],
+    scope: Option<ConfigScopeArg>,
+) {
+    for name in names {
+        if find_status_by_name(statuses, name, scope).is_none() {
+            eprintln!(
+                "{}",
+                red(
+                    &format!("Tunnel is not tracked: {name}"),
+                    OutputStream::Stderr
+                )
             );
         }
     }
@@ -2594,7 +2808,7 @@ fn print_start_dry_run_tunnel(resolved: &ResolvedTunnelConfig) {
     let ssh = format_ssh_endpoint(tunnel);
     let command = format_ssh_command(&build_ssh_command_args(resolved));
 
-    println!("Would start tunnel: {}", tunnel.id);
+    println!("Would start tunnel: {}", tunnel.name);
     println!("  Local: {local}");
     println!("  Remote: {remote}");
     println!("  SSH: {ssh}");
@@ -2604,22 +2818,22 @@ fn print_start_dry_run_tunnel(resolved: &ResolvedTunnelConfig) {
 /// stop の dry-run 結果を表示する
 fn print_stop_dry_run(
     statuses: &[TunnelRuntimeStatus],
-    ids: &[String],
+    runtime_ids: &[String],
     state_path: &Path,
 ) -> ExitCode {
     println!("Dry run: no process will be stopped and state file will not be modified.");
     println!("State file: {}", format_path_for_display(state_path));
 
-    let statuses_by_id = status_index_by_id(statuses);
+    let statuses_by_runtime_id = status_index_by_runtime_id(statuses);
     let mut failed = false;
 
-    for id in ids {
-        let Some(status) = statuses_by_id.get(id.as_str()).copied() else {
+    for runtime_id in runtime_ids {
+        let Some(status) = statuses_by_runtime_id.get(runtime_id.as_str()).copied() else {
             failed = true;
             eprintln!(
                 "{}",
                 red(
-                    &format!("Tunnel is not tracked: {id}"),
+                    &format!("Tunnel is not tracked: {runtime_id}"),
                     OutputStream::Stderr
                 )
             );
@@ -2632,12 +2846,12 @@ fn print_stop_dry_run(
     exit_code_from_failure(failed)
 }
 
-/// ID 一覧の一致判定用集合を生成する
-fn id_set(ids: &[String]) -> Option<HashSet<&str>> {
-    if ids.is_empty() {
+/// runtime ID 一覧の一致判定用集合を生成する
+fn runtime_id_set(runtime_ids: &[String]) -> Option<HashSet<&str>> {
+    if runtime_ids.is_empty() {
         None
     } else {
-        Some(ids.iter().map(String::as_str).collect())
+        Some(runtime_ids.iter().map(String::as_str).collect())
     }
 }
 
@@ -2647,14 +2861,14 @@ fn print_stop_dry_run_tunnel(status: &TunnelRuntimeStatus) {
         ProcessState::Running => {
             println!(
                 "Would stop tunnel: {} (pid: {})",
-                status.state.id, status.state.pid
+                status.state.name, status.state.pid
             );
-            println!("Would remove state entry: {}", status.state.id);
+            println!("Would remove state entry: {}", status.state.name);
         }
         ProcessState::Stale => {
             println!(
                 "Would remove stale tunnel state: {} (pid: {})",
-                status.state.id, status.state.pid
+                status.state.name, status.state.pid
             );
         }
     }
@@ -2667,7 +2881,7 @@ fn print_started_tunnel(started: &StartedTunnel) {
         green(
             &format!(
                 "Started tunnel: {} (pid: {}, local: {}:{})",
-                started.state.id,
+                started.state.name,
                 started.state.pid,
                 started.state.local_host,
                 started.state.local_port
@@ -2683,13 +2897,13 @@ fn print_stopped_tunnel(stopped: &StoppedTunnel) {
         ProcessState::Running => {
             format!(
                 "Stopped tunnel: {} (pid: {})",
-                stopped.state.id, stopped.state.pid
+                stopped.state.name, stopped.state.pid
             )
         }
         ProcessState::Stale => {
             format!(
                 "Removed stale tunnel state: {} (pid: {})",
-                stopped.state.id, stopped.state.pid
+                stopped.state.name, stopped.state.pid
             )
         }
     };
@@ -2700,8 +2914,8 @@ fn print_stopped_tunnel(stopped: &StoppedTunnel) {
 /// 状態一覧の見出しを表示する
 fn print_status_header(widths: StatusColumnWidths) {
     println!(
-        "{} {} {} {} {} STARTED",
-        pad_display_width("ID", widths.id),
+        "{} {} {} {} {} SOURCE STARTED",
+        pad_display_width("NAME", widths.id),
         pad_display_width("LOCAL", widths.local),
         pad_display_width("REMOTE", widths.remote),
         pad_display_width("PID", widths.pid),
@@ -2712,7 +2926,7 @@ fn print_status_header(widths: StatusColumnWidths) {
 /// 状態一覧の 1 行を表示する
 fn print_status_row(row: &StatusRow<'_>, widths: StatusColumnWidths) {
     println!(
-        "{} {} {} {} {} {}",
+        "{} {} {} {} {} {} {}",
         pad_display_width_with_visible_width(row.id, row.id_width, widths.id),
         pad_display_width_with_visible_width(&row.local, row.local_width, widths.local),
         pad_display_width_with_visible_width(&row.remote, row.remote_width, widths.remote),
@@ -2722,6 +2936,7 @@ fn print_status_row(row: &StatusRow<'_>, widths: StatusColumnWidths) {
             row.process_state_width,
             widths.state,
         ),
+        row.source,
         row.started
     );
 }
@@ -2747,6 +2962,7 @@ struct StatusRow<'a> {
     pid_width: usize,
     process_state: String,
     process_state_width: usize,
+    source: ConfigSourceKind,
     started: String,
 }
 
@@ -2762,8 +2978,8 @@ impl<'a> StatusRow<'a> {
         let started = relative_time_label(state.started_at_unix_seconds, now);
 
         Self {
-            id: state.id.as_str(),
-            id_width: display_width(&state.id),
+            id: state.name.as_str(),
+            id_width: display_width(&state.name),
             local_width: display_width(&local),
             local,
             remote_width: display_width(&remote),
@@ -2772,6 +2988,7 @@ impl<'a> StatusRow<'a> {
             pid,
             process_state_width,
             process_state,
+            source: state.source_kind,
             started,
         }
     }
@@ -2930,7 +3147,8 @@ impl ShowJson {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TunnelJson {
-    id: String,
+    name: String,
+    runtime_id: String,
     description: Option<String>,
     tags: Vec<String>,
     local_host: String,
@@ -2955,7 +3173,8 @@ impl TunnelJson {
         let tunnel = &resolved.tunnel;
 
         Self {
-            id: tunnel.id.clone(),
+            name: tunnel.name.clone(),
+            runtime_id: runtime_id_for_resolved_tunnel(resolved),
             description: tunnel.description.clone(),
             tags: tunnel.tags.clone(),
             local_host: tunnel.effective_local_host().to_owned(),
@@ -3068,7 +3287,8 @@ impl StatusJson {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StatusTunnelJson {
-    id: String,
+    name: String,
+    runtime_id: String,
     pid: u32,
     process_state: String,
     local_host: String,
@@ -3092,7 +3312,8 @@ impl StatusTunnelJson {
         let state = &status.state;
 
         Self {
-            id: state.id.clone(),
+            name: state.name.clone(),
+            runtime_id: state.runtime_id.clone(),
             pid: state.pid,
             process_state: process_state_plain_label(status.process_state).to_ascii_lowercase(),
             local_host: state.local_host.clone(),
@@ -3148,7 +3369,7 @@ impl ValidationJson {
 struct ValidationIssueJson {
     source: String,
     path: String,
-    tunnel_id: Option<String>,
+    tunnel_name: Option<String>,
     message: String,
 }
 
@@ -3158,7 +3379,7 @@ impl ValidationIssueJson {
         Self {
             source: error.source.kind.to_string(),
             path: error.source.path.display().to_string(),
-            tunnel_id: error.tunnel_id.clone(),
+            tunnel_name: error.tunnel_name.clone(),
             message: error.message.clone(),
         }
     }
@@ -3168,7 +3389,7 @@ impl ValidationIssueJson {
         Self {
             source: warning.source.kind.to_string(),
             path: warning.source.path.display().to_string(),
-            tunnel_id: warning.tunnel_id.clone(),
+            tunnel_name: warning.tunnel_name.clone(),
             message: warning.message.clone(),
         }
     }
@@ -3237,7 +3458,7 @@ fn print_validation_errors(report: &ValidationReport) {
 
     for error in &report.errors {
         let tunnel = error
-            .tunnel_id
+            .tunnel_name
             .as_ref()
             .map_or(String::from("-"), ToString::to_string);
         let message = format!(
@@ -3261,7 +3482,7 @@ fn print_validation_warnings(report: &ValidationReport, stream: OutputStream) {
 
     for warning in &report.warnings {
         let tunnel = warning
-            .tunnel_id
+            .tunnel_name
             .as_ref()
             .map_or(String::from("-"), ToString::to_string);
         let message = format!(
@@ -3334,10 +3555,10 @@ impl RemoveChoice {
     /// トンネル設定から削除対象の選択肢を生成する
     fn from_tunnel(tunnel: &TunnelConfig) -> Self {
         Self {
-            id: tunnel.id.clone(),
+            id: tunnel.name.clone(),
             label: format!(
                 "{}  {}:{} -> {}:{}",
-                tunnel.id,
+                tunnel.name,
                 tunnel.effective_local_host(),
                 tunnel.local_port,
                 tunnel.remote_host,
@@ -3367,14 +3588,15 @@ impl StartChoice {
         let tunnel = &resolved.tunnel;
 
         Self {
-            id: tunnel.id.clone(),
+            id: runtime_id_for_resolved_tunnel(resolved),
             label: format!(
-                "{}  {}:{} -> {}:{}",
-                tunnel.id,
+                "{}  {}:{} -> {}:{} ({})",
+                tunnel.name,
                 tunnel.effective_local_host(),
                 tunnel.local_port,
                 tunnel.remote_host,
-                tunnel.remote_port
+                tunnel.remote_port,
+                resolved.source.kind
             ),
         }
     }
@@ -3412,10 +3634,15 @@ impl StopChoice {
         };
 
         Self {
-            kind: StopChoiceKind::Tunnel(state.id.clone()),
+            kind: StopChoiceKind::Tunnel(state.runtime_id.clone()),
             label: format!(
-                "{}  {}:{} ({}, pid: {})",
-                state.id, state.local_host, state.local_port, process_state, state.pid
+                "{}  {}:{} ({}, pid: {}, {})",
+                state.name,
+                state.local_host,
+                state.local_port,
+                process_state,
+                state.pid,
+                state.source_kind
             ),
         }
     }
@@ -3425,7 +3652,7 @@ impl StopChoice {
         matches!(self.kind, StopChoiceKind::All)
     }
 
-    /// トンネル ID を取り出す
+    /// トンネル runtime ID を取り出す
     fn into_tunnel_id(self) -> Option<String> {
         match self.kind {
             StopChoiceKind::All => None,
@@ -3506,10 +3733,10 @@ mod tests {
     fn find_tunnel_id_conflict_detects_existing_tunnel() {
         let config = effective_config_with_tunnels(vec![tunnel("db", 15432)]);
 
-        let conflict = find_tunnel_id_conflict(&config, "db");
+        let conflict = find_tunnel_id_conflict(&config, ConfigSourceKind::Local, "db");
 
         assert_eq!(
-            conflict.map(|resolved| resolved.tunnel.id.as_str()),
+            conflict.map(|resolved| resolved.tunnel.name.as_str()),
             Some("db")
         );
     }
@@ -3519,7 +3746,7 @@ mod tests {
     fn find_tunnel_id_conflict_returns_none_for_new_tunnel() {
         let config = effective_config_with_tunnels(vec![tunnel("db", 15432)]);
 
-        let conflict = find_tunnel_id_conflict(&config, "cache");
+        let conflict = find_tunnel_id_conflict(&config, ConfigSourceKind::Local, "cache");
 
         assert!(conflict.is_none());
     }
@@ -3529,10 +3756,10 @@ mod tests {
     fn find_local_port_conflict_detects_other_tunnel() {
         let config = effective_config_with_tunnels(vec![tunnel("db", 15432)]);
 
-        let conflict = find_local_port_conflict(&config, "cache", 15432);
+        let conflict = find_local_port_conflict(&config, ConfigSourceKind::Local, "cache", 15432);
 
         assert_eq!(
-            conflict.map(|resolved| resolved.tunnel.id.as_str()),
+            conflict.map(|resolved| resolved.tunnel.name.as_str()),
             Some("db")
         );
     }
@@ -3542,7 +3769,7 @@ mod tests {
     fn find_local_port_conflict_ignores_same_tunnel_id() {
         let config = effective_config_with_tunnels(vec![tunnel("db", 15432)]);
 
-        let conflict = find_local_port_conflict(&config, "db", 15432);
+        let conflict = find_local_port_conflict(&config, ConfigSourceKind::Local, "db", 15432);
 
         assert!(conflict.is_none());
     }
@@ -3556,9 +3783,9 @@ mod tests {
             runtime_status("search", ProcessState::Stale),
         ];
 
-        let ids = watched_stale_tunnel_ids(&statuses, &[]);
+        let ids = watched_stale_runtime_ids(&statuses, &[], None);
 
-        assert_eq!(ids, vec!["db".to_owned(), "search".to_owned()]);
+        assert_eq!(ids, vec![runtime_id("db"), runtime_id("search")]);
     }
 
     /// watch 対象指定時に指定 ID の stale なトンネルだけが対象になることを検証する
@@ -3570,9 +3797,13 @@ mod tests {
             runtime_status("search", ProcessState::Running),
         ];
 
-        let ids = watched_stale_tunnel_ids(&statuses, &["cache".to_owned(), "search".to_owned()]);
+        let ids = watched_stale_runtime_ids(
+            &statuses,
+            &[runtime_id("cache"), runtime_id("search")],
+            None,
+        );
 
-        assert_eq!(ids, vec!["cache".to_owned()]);
+        assert_eq!(ids, vec![runtime_id("cache")]);
     }
 
     /// トンネル状態一覧が ID 昇順に整列されることを検証する
@@ -3724,7 +3955,7 @@ mod tests {
         let tunnels = select_tunnels_for_list(&config, &["dev".to_owned()], Some("db"));
 
         assert_eq!(tunnels.len(), 1);
-        assert_eq!(tunnels[0].tunnel.id, "dev-db");
+        assert_eq!(tunnels[0].tunnel.name, "dev-db");
     }
 
     /// list 選択結果が ID 昇順に整列されることを検証する
@@ -3743,10 +3974,10 @@ mod tests {
     fn find_tunnel_by_id_returns_exact_match() {
         let config = effective_config_with_tunnels(vec![tunnel("dev-db", 15432)]);
 
-        let tunnel = find_tunnel_by_id(&config, "dev-db");
+        let tunnel = find_tunnel_by_name(&config, "dev-db", None);
 
         assert_eq!(
-            tunnel.map(|resolved| resolved.tunnel.id.as_str()),
+            tunnel.map(|resolved| resolved.tunnel.name.as_str()),
             Some("dev-db")
         );
     }
@@ -3756,7 +3987,7 @@ mod tests {
     fn find_tunnel_by_id_does_not_return_partial_match() {
         let config = effective_config_with_tunnels(vec![tunnel("dev-db", 15432)]);
 
-        let tunnel = find_tunnel_by_id(&config, "dev");
+        let tunnel = find_tunnel_by_name(&config, "dev", None);
 
         assert!(tunnel.is_none());
     }
@@ -3780,7 +4011,7 @@ mod tests {
     fn tunnel_ids<'a>(tunnels: &[&'a ResolvedTunnelConfig]) -> Vec<&'a str> {
         tunnels
             .iter()
-            .map(|resolved| resolved.tunnel.id.as_str())
+            .map(|resolved| resolved.tunnel.name.as_str())
             .collect()
     }
 
@@ -3788,7 +4019,7 @@ mod tests {
     fn status_ids<'a>(statuses: &[&'a TunnelRuntimeStatus]) -> Vec<&'a str> {
         statuses
             .iter()
-            .map(|status| status.state.id.as_str())
+            .map(|status| status.state.name.as_str())
             .collect()
     }
 
@@ -3796,7 +4027,8 @@ mod tests {
     fn runtime_status(id: &str, process_state: ProcessState) -> TunnelRuntimeStatus {
         TunnelRuntimeStatus {
             state: TunnelState {
-                id: id.to_owned(),
+                runtime_id: runtime_id(id),
+                name: id.to_owned(),
                 pid: 1000,
                 local_host: "127.0.0.1".to_owned(),
                 local_port: 15432,
@@ -3816,7 +4048,7 @@ mod tests {
     /// テスト用のトンネル設定を生成する
     fn tunnel(id: &str, local_port: u16) -> TunnelConfig {
         TunnelConfig {
-            id: id.to_owned(),
+            name: id.to_owned(),
             description: None,
             tags: Vec::new(),
             local_host: None,
@@ -3829,5 +4061,14 @@ mod tests {
             identity_file: None,
             timeouts: TimeoutConfig::default(),
         }
+    }
+
+    /// テスト用の runtime ID を生成する
+    fn runtime_id(name: &str) -> String {
+        fwd_deck_core::tunnel_runtime_id(
+            ConfigSourceKind::Local,
+            &PathBuf::from("fwd-deck.toml"),
+            name,
+        )
     }
 }

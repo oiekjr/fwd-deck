@@ -27,7 +27,11 @@ impl TunnelStateFile {
 
     /// トンネル状態を追加または更新する
     pub fn upsert(&mut self, tunnel: TunnelState) {
-        if let Some(existing) = self.tunnels.iter_mut().find(|item| item.id == tunnel.id) {
+        if let Some(existing) = self
+            .tunnels
+            .iter_mut()
+            .find(|item| item.runtime_id == tunnel.runtime_id)
+        {
             *existing = tunnel;
             return;
         }
@@ -35,15 +39,29 @@ impl TunnelStateFile {
         self.tunnels.push(tunnel);
     }
 
-    /// 指定 ID のトンネル状態を取得する
-    pub fn get(&self, id: &str) -> Option<&TunnelState> {
-        self.tunnels.iter().find(|item| item.id == id)
+    /// 指定 runtime ID のトンネル状態を取得する
+    pub fn get(&self, runtime_id: &str) -> Option<&TunnelState> {
+        self.tunnels
+            .iter()
+            .find(|item| item.runtime_id == runtime_id)
     }
 
-    /// 指定 ID のトンネル状態を削除する
-    pub fn remove(&mut self, id: &str) -> Option<TunnelState> {
-        let position = self.tunnels.iter().position(|item| item.id == id)?;
+    /// 指定 runtime ID のトンネル状態を削除する
+    pub fn remove(&mut self, runtime_id: &str) -> Option<TunnelState> {
+        let position = self
+            .tunnels
+            .iter()
+            .position(|item| item.runtime_id == runtime_id)?;
         Some(self.tunnels.remove(position))
+    }
+
+    /// legacy state を含む状態情報を現在の形式へ正規化する
+    fn normalize(mut self) -> Self {
+        for tunnel in &mut self.tunnels {
+            tunnel.normalize_runtime_id();
+        }
+
+        self
     }
 }
 
@@ -51,7 +69,10 @@ impl TunnelStateFile {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TunnelState {
-    pub id: String,
+    #[serde(default)]
+    pub runtime_id: String,
+    #[serde(alias = "id")]
+    pub name: String,
     pub pid: u32,
     pub local_host: String,
     pub local_port: u16,
@@ -75,7 +96,8 @@ impl TunnelState {
         let tunnel = &resolved.tunnel;
 
         Self {
-            id: tunnel.id.clone(),
+            runtime_id: runtime_id_for_resolved_tunnel(resolved),
+            name: tunnel.name.clone(),
             pid,
             local_host: tunnel.effective_local_host().to_owned(),
             local_port: tunnel.local_port,
@@ -87,6 +109,13 @@ impl TunnelState {
             source_kind: resolved.source.kind,
             source_path: resolved.source.path.clone(),
             started_at_unix_seconds,
+        }
+    }
+
+    /// legacy state に欠けている runtime ID を補完する
+    fn normalize_runtime_id(&mut self) {
+        if self.runtime_id.is_empty() {
+            self.runtime_id = tunnel_runtime_id(self.source_kind, &self.source_path, &self.name);
         }
     }
 }
@@ -153,10 +182,12 @@ pub fn read_state_file(path: &Path) -> Result<TunnelStateFile, StateFileError> {
         path: path.to_path_buf(),
         source,
     })?;
-    toml::from_str::<TunnelStateFile>(&content).map_err(|source| StateFileError::Parse {
-        path: path.to_path_buf(),
-        source,
-    })
+    toml::from_str::<TunnelStateFile>(&content)
+        .map(TunnelStateFile::normalize)
+        .map_err(|source| StateFileError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 /// 状態ファイルを書き込む
@@ -176,6 +207,27 @@ pub fn write_state_file(path: &Path, state: &TunnelStateFile) -> Result<(), Stat
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// 解決済み設定から runtime ID を生成する
+pub fn runtime_id_for_resolved_tunnel(resolved: &ResolvedTunnelConfig) -> String {
+    tunnel_runtime_id(
+        resolved.source.kind,
+        &resolved.source.path,
+        &resolved.tunnel.name,
+    )
+}
+
+/// runtime 状態の一意な ID を生成する
+pub fn tunnel_runtime_id(kind: ConfigSourceKind, source_path: &Path, name: &str) -> String {
+    let source_path = normalize_runtime_source_path(source_path);
+
+    format!("{kind}:{}:{name}", source_path.display())
+}
+
+/// runtime ID の入力に使う設定ファイルパスを安定化する
+fn normalize_runtime_source_path(source_path: &Path) -> PathBuf {
+    fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf())
 }
 
 #[cfg(test)]
@@ -211,7 +263,37 @@ mod tests {
         assert!(loaded.tunnels.is_empty());
     }
 
-    /// 同じ ID の状態が追加ではなく更新されることを検証する
+    /// legacy state の id が name として読み込まれることを検証する
+    #[test]
+    fn legacy_state_id_is_read_as_name() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let state_path = temp_dir.path().join("state.toml");
+        fs::write(
+            &state_path,
+            r#"
+[[tunnels]]
+id = "db"
+pid = 1000
+local_host = "127.0.0.1"
+local_port = 15432
+remote_host = "127.0.0.1"
+remote_port = 5432
+ssh_user = "user"
+ssh_host = "bastion.example.com"
+source_kind = "local"
+source_path = "fwd-deck.toml"
+started_at_unix_seconds = 1700000000
+"#,
+        )
+        .expect("write legacy state file");
+
+        let loaded = read_state_file(&state_path).expect("read legacy state file");
+
+        assert_eq!(loaded.tunnels[0].name, "db");
+        assert!(!loaded.tunnels[0].runtime_id.is_empty());
+    }
+
+    /// 同じ runtime ID の状態が追加ではなく更新されることを検証する
     #[test]
     fn upsert_replaces_existing_tunnel_state() {
         let mut state = TunnelStateFile::new();
@@ -222,12 +304,50 @@ mod tests {
         assert_eq!(state.tunnels[0].pid, 2000);
     }
 
+    /// 同じ name でも source が異なる状態が共存できることを検証する
+    #[test]
+    fn upsert_keeps_same_name_with_different_sources() {
+        let mut state = TunnelStateFile::new();
+        state.upsert(tunnel_state_with_source(
+            "db",
+            ConfigSourceKind::Global,
+            PathBuf::from("global.toml"),
+            1000,
+        ));
+        state.upsert(tunnel_state_with_source(
+            "db",
+            ConfigSourceKind::Local,
+            PathBuf::from("fwd-deck.toml"),
+            2000,
+        ));
+
+        assert_eq!(state.tunnels.len(), 2);
+        assert_eq!(state.tunnels[0].name, "db");
+        assert_eq!(state.tunnels[1].name, "db");
+        assert_ne!(state.tunnels[0].runtime_id, state.tunnels[1].runtime_id);
+    }
+
     /// テスト用の状態情報を生成する
-    fn tunnel_state(id: &str, pid: u32) -> TunnelState {
+    fn tunnel_state(name: &str, pid: u32) -> TunnelState {
+        tunnel_state_with_source(
+            name,
+            ConfigSourceKind::Local,
+            PathBuf::from("fwd-deck.toml"),
+            pid,
+        )
+    }
+
+    /// テスト用の状態情報を source 指定で生成する
+    fn tunnel_state_with_source(
+        name: &str,
+        source_kind: ConfigSourceKind,
+        source_path: PathBuf,
+        pid: u32,
+    ) -> TunnelState {
         let resolved = ResolvedTunnelConfig::new(
-            ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml")),
+            ConfigSource::new(source_kind, source_path),
             TunnelConfig {
-                id: id.to_owned(),
+                name: name.to_owned(),
                 description: None,
                 tags: Vec::new(),
                 local_host: None,

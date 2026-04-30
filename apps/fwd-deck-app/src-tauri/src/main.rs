@@ -2628,14 +2628,19 @@ fn build_dashboard_state(
             tunnel_view(resolved, status_by_key.get(&runtime_key).copied())
         })
         .collect::<Vec<_>>();
-    let mut tracked_tunnels = statuses.iter().map(tracked_tunnel_view).collect::<Vec<_>>();
+    let mut tracked_statuses = statuses.iter().collect::<Vec<_>>();
 
     tunnels.sort_by(|left, right| left.id.cmp(&right.id));
-    tracked_tunnels.sort_by(|left, right| {
-        left.id
-            .cmp(&right.id)
+    tracked_statuses.sort_by(|left, right| {
+        runtime_process_state_sort_rank(left.status.process_state)
+            .cmp(&runtime_process_state_sort_rank(right.status.process_state))
+            .then_with(|| left.status.state.id.cmp(&right.status.state.id))
             .then_with(|| left.runtime_scope.cmp(&right.runtime_scope))
     });
+    let tracked_tunnels = tracked_statuses
+        .into_iter()
+        .map(tracked_tunnel_view)
+        .collect::<Vec<_>>();
 
     DashboardState {
         paths: path_view(&runtime_paths),
@@ -2652,6 +2657,14 @@ fn runtime_status_lookup_key(status: &ScopedRuntimeStatus) -> (RuntimeScope, &st
         runtime_scope_for_source(status.status.state.source_kind),
         status.status.state.id.as_str(),
     )
+}
+
+/// runtime 状態表示の並び順を取得する
+fn runtime_process_state_sort_rank(process_state: ProcessState) -> u8 {
+    match process_state {
+        ProcessState::Running => 0,
+        ProcessState::Stale => 1,
+    }
 }
 
 /// 解決済みパスを表示用へ変換する
@@ -4108,6 +4121,48 @@ use_global = true
         assert_eq!(
             runtime_status_key(RuntimeScope::Workspace, "db"),
             "workspace:db"
+        );
+    }
+
+    /// tracked runtime が起動中状態を優先して表示されることを検証する
+    #[test]
+    fn dashboard_tracked_runtime_prioritizes_running_status() {
+        let running_z =
+            resolved_tunnel_with_port("zzz-running", PathBuf::from("fwd-deck.toml"), 15432);
+        let running_a =
+            resolved_tunnel_with_port("aaa-running", PathBuf::from("fwd-deck.toml"), 15433);
+        let stale_a = resolved_tunnel_with_port("aaa-stale", PathBuf::from("fwd-deck.toml"), 15434);
+        let stale_b = resolved_tunnel_with_port("bbb-stale", PathBuf::from("fwd-deck.toml"), 15435);
+        let paths = runtime_paths_for_state_paths(None, PathBuf::from("global-state.toml"), None);
+        let statuses = vec![
+            scoped_runtime_status(&stale_a, RuntimeScope::Workspace, ProcessState::Stale),
+            scoped_runtime_status(&running_z, RuntimeScope::Workspace, ProcessState::Running),
+            scoped_runtime_status(&running_a, RuntimeScope::Workspace, ProcessState::Running),
+            scoped_runtime_status(&running_a, RuntimeScope::Global, ProcessState::Running),
+            scoped_runtime_status(&stale_b, RuntimeScope::Workspace, ProcessState::Stale),
+        ];
+
+        let dashboard = build_dashboard_state(
+            paths,
+            EffectiveConfig::new(Vec::new(), Vec::new()),
+            statuses,
+            ValidationReport::valid(),
+        );
+
+        let runtime_keys = dashboard
+            .tracked_tunnels
+            .iter()
+            .map(|tunnel| tunnel.runtime_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            runtime_keys,
+            vec![
+                "global:aaa-running",
+                "workspace:aaa-running",
+                "workspace:zzz-running",
+                "workspace:aaa-stale",
+                "workspace:bbb-stale",
+            ]
         );
     }
 

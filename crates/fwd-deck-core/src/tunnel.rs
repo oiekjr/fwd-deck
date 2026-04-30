@@ -57,6 +57,11 @@ impl LocalPortProcesses {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// 指定PIDを含むかを判定する
+    pub fn contains_pid(&self, pid: u32) -> bool {
+        self.0.iter().any(|process| process.pid == pid)
+    }
 }
 
 impl Display for LocalPortProcesses {
@@ -149,7 +154,7 @@ pub fn start_tunnel(
     let mut state_file = read_state_file(state_path)?;
 
     if let Some(existing) = state_file.get(&resolved.tunnel.id)
-        && process_is_running(existing.pid)
+        && tunnel_is_running(existing)
     {
         return Err(TunnelRuntimeError::AlreadyRunning {
             id: existing.id.clone(),
@@ -196,7 +201,7 @@ where
 
     for (index, resolved) in resolved_tunnels.iter().enumerate() {
         if let Some(existing) = state_file.get(&resolved.tunnel.id)
-            && process_is_running(existing.pid)
+            && tunnel_is_running(existing)
         {
             let result = Err(TunnelRuntimeError::AlreadyRunning {
                 id: existing.id.clone(),
@@ -258,11 +263,7 @@ pub fn tunnel_statuses(state_path: &Path) -> Result<Vec<TunnelRuntimeStatus>, Tu
         .tunnels
         .into_iter()
         .map(|state| {
-            let process_state = if process_is_running(state.pid) {
-                ProcessState::Running
-            } else {
-                ProcessState::Stale
-            };
+            let process_state = tunnel_process_state(&state);
 
             TunnelRuntimeStatus {
                 state,
@@ -278,7 +279,7 @@ pub fn stop_tunnel(id: &str, state_path: &Path) -> Result<StoppedTunnel, TunnelR
     let Some(state) = state_file.remove(id) else {
         return Err(TunnelRuntimeError::NotTracked { id: id.to_owned() });
     };
-    let previous_state = if process_is_running(state.pid) {
+    let previous_state = if tunnel_is_running(&state) {
         stop_process(&state)?;
         ProcessState::Running
     } else {
@@ -291,6 +292,36 @@ pub fn stop_tunnel(id: &str, state_path: &Path) -> Result<StoppedTunnel, TunnelR
         state,
         previous_state,
     })
+}
+
+/// トンネル状態から実行状態を判定する
+fn tunnel_process_state(state: &TunnelState) -> ProcessState {
+    let pid_is_running = process_is_running(state.pid);
+    let local_port_processes = if pid_is_running {
+        find_local_port_processes(state.local_port)
+    } else {
+        LocalPortProcesses::default()
+    };
+
+    process_state_from_probe(state.pid, pid_is_running, &local_port_processes)
+}
+
+/// トンネルPIDとLISTEN状態が一致するかを判定する
+fn tunnel_is_running(state: &TunnelState) -> bool {
+    tunnel_process_state(state) == ProcessState::Running
+}
+
+/// PID存在確認とLISTEN確認から実行状態を判定する
+fn process_state_from_probe(
+    pid: u32,
+    pid_is_running: bool,
+    local_port_processes: &LocalPortProcesses,
+) -> ProcessState {
+    if pid_is_running && local_port_processes.contains_pid(pid) {
+        ProcessState::Running
+    } else {
+        ProcessState::Stale
+    }
 }
 
 /// SSH 起動コマンドの引数を構築する
@@ -605,7 +636,7 @@ fn expand_home_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, process};
+    use std::{net::TcpListener, path::PathBuf, process};
 
     use crate::{ConfigSource, ConfigSourceKind, TimeoutConfig, TunnelConfig, TunnelStateFile};
     use tempfile::TempDir;
@@ -664,7 +695,9 @@ mod tests {
     fn start_tunnels_reports_already_running_tunnels() {
         let temp_dir = TempDir::new().expect("create state directory");
         let state_path = temp_dir.path().join("state.toml");
-        let resolved = resolved_tunnel();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let local_port = listener.local_addr().expect("read listener address").port();
+        let resolved = resolved_tunnel_with_local_port(local_port);
         let mut state = TunnelStateFile::new();
         state.upsert(TunnelState::from_resolved_tunnel(
             &resolved,
@@ -687,7 +720,9 @@ mod tests {
     fn start_tunnels_reports_progress_for_already_running_tunnels() {
         let temp_dir = TempDir::new().expect("create state directory");
         let state_path = temp_dir.path().join("state.toml");
-        let resolved = resolved_tunnel();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let local_port = listener.local_addr().expect("read listener address").port();
+        let resolved = resolved_tunnel_with_local_port(local_port);
         let mut state = TunnelStateFile::new();
         state.upsert(TunnelState::from_resolved_tunnel(
             &resolved,
@@ -703,6 +738,59 @@ mod tests {
         .expect("start tunnels");
 
         assert_eq!(reported_indexes, vec![0]);
+    }
+
+    /// PIDが存在し、同じPIDがLISTENしている場合にRunningと判定する
+    #[test]
+    fn process_state_from_probe_returns_running_for_listening_pid() {
+        let pid = 1234;
+        let processes = LocalPortProcesses::new(vec![LocalPortProcess {
+            command: "ssh".to_owned(),
+            pid,
+            endpoint: Some("127.0.0.1:15432 (LISTEN)".to_owned()),
+        }]);
+
+        let state = process_state_from_probe(pid, true, &processes);
+
+        assert_eq!(state, ProcessState::Running);
+    }
+
+    /// PIDが存在しても別PIDだけがLISTENしている場合にStaleと判定する
+    #[test]
+    fn process_state_from_probe_returns_stale_for_non_listening_pid() {
+        let processes = LocalPortProcesses::new(vec![LocalPortProcess {
+            command: "postgres".to_owned(),
+            pid: 5678,
+            endpoint: Some("127.0.0.1:15432 (LISTEN)".to_owned()),
+        }]);
+
+        let state = process_state_from_probe(1234, true, &processes);
+
+        assert_eq!(state, ProcessState::Stale);
+    }
+
+    /// PIDが存在しない場合にLISTEN状態へ依存せずStaleと判定する
+    #[test]
+    fn process_state_from_probe_returns_stale_for_missing_pid() {
+        let processes = LocalPortProcesses::new(vec![LocalPortProcess {
+            command: "ssh".to_owned(),
+            pid: 1234,
+            endpoint: Some("127.0.0.1:15432 (LISTEN)".to_owned()),
+        }]);
+
+        let state = process_state_from_probe(1234, false, &processes);
+
+        assert_eq!(state, ProcessState::Stale);
+    }
+
+    /// LISTEN検査結果が空の場合にStaleと判定する
+    #[test]
+    fn process_state_from_probe_returns_stale_for_empty_listen_probe() {
+        let processes = LocalPortProcesses::default();
+
+        let state = process_state_from_probe(1234, true, &processes);
+
+        assert_eq!(state, ProcessState::Stale);
     }
 
     /// lsof の field 出力から LISTEN プロセス情報を抽出できることを検証する
@@ -779,6 +867,11 @@ n*:15432 (LISTEN)
 
     /// テスト用の統合済みトンネル設定を生成する
     fn resolved_tunnel() -> ResolvedTunnelConfig {
+        resolved_tunnel_with_local_port(15432)
+    }
+
+    /// テスト用のローカルポートを指定して統合済みトンネル設定を生成する
+    fn resolved_tunnel_with_local_port(local_port: u16) -> ResolvedTunnelConfig {
         ResolvedTunnelConfig::new(
             ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml")),
             TunnelConfig {
@@ -786,7 +879,7 @@ n*:15432 (LISTEN)
                 description: None,
                 tags: Vec::new(),
                 local_host: Some("127.0.0.1".to_owned()),
-                local_port: 15432,
+                local_port,
                 remote_host: "db.internal".to_owned(),
                 remote_port: 5432,
                 ssh_user: "user".to_owned(),

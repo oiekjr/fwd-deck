@@ -1,7 +1,8 @@
 use std::{
     fs,
+    net::TcpListener,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{self, Command, Output},
 };
 
 use tempfile::TempDir;
@@ -370,6 +371,36 @@ fn json_output_keeps_absolute_home_paths() {
     );
 }
 
+/// status が記録PIDによるLISTEN状態をRUNNINGとして表示することを検証する
+#[test]
+fn status_displays_running_when_tracked_pid_listens_on_local_port() {
+    let workspace = TestWorkspace::new();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+    let local_port = listener.local_addr().expect("read listener address").port();
+    workspace.write_state(&state_file(process::id(), local_port));
+
+    let output = workspace.run(["--state", workspace.state_path_str(), "status"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("dev-db");
+    output.assert_stdout_contains("RUNNING");
+}
+
+/// status が記録PIDだけ存在する状態をSTALEとして表示することを検証する
+#[test]
+fn status_displays_stale_when_tracked_pid_does_not_listen_on_local_port() {
+    let workspace = TestWorkspace::new();
+    let local_port = unused_local_port();
+    workspace.write_state(&state_file(process::id(), local_port));
+
+    let output = workspace.run(["--state", workspace.state_path_str(), "status"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("dev-db");
+    output.assert_stdout_contains("STALE");
+    output.assert_stdout_not_contains("RUNNING");
+}
+
 struct TestWorkspace {
     temp_dir: TempDir,
     config_path: PathBuf,
@@ -393,6 +424,11 @@ impl TestWorkspace {
     /// テスト用設定ファイルを書き込む
     fn write_config(&self, content: &str) {
         fs::write(&self.config_path, content).expect("write test configuration");
+    }
+
+    /// テスト用状態ファイルを書き込む
+    fn write_state(&self, content: &str) {
+        fs::write(&self.state_path, content).expect("write test state");
     }
 
     /// fwd-deck を一時ワークスペース上で実行する
@@ -619,4 +655,32 @@ remote_port = 6379
 ssh_user = "ec2-user"
 ssh_host = "bastion.example.com"
 "#
+}
+
+/// テスト用状態ファイルを生成する
+fn state_file(pid: u32, local_port: u16) -> String {
+    format!(
+        r#"
+[[tunnels]]
+id = "dev-db"
+pid = {pid}
+local_host = "127.0.0.1"
+local_port = {local_port}
+remote_host = "127.0.0.1"
+remote_port = 5432
+ssh_user = "ec2-user"
+ssh_host = "bastion.example.com"
+ssh_port = 22
+source_kind = "local"
+source_path = "fwd-deck.toml"
+started_at_unix_seconds = 1700000000
+"#
+    )
+}
+
+/// 未使用のローカルポート番号を取得する
+fn unused_local_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+
+    listener.local_addr().expect("read listener address").port()
 }

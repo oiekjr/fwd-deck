@@ -3257,6 +3257,8 @@ fn trimmed_optional(value: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
+
     use fwd_deck_core::{
         ConfigSource, TunnelState, TunnelStateFile,
         state::{read_state_file, write_state_file},
@@ -3601,7 +3603,10 @@ use_global = true
     fn start_tunnel_result_for_app_reports_already_running_tunnel_as_success() {
         let temp_dir = TempDir::new().expect("create state directory");
         let state_path = temp_dir.path().join("state.toml");
-        let tunnel = resolved_tunnel("db", temp_dir.path().join("fwd-deck.toml"));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let local_port = listener.local_addr().expect("read listener address").port();
+        let tunnel =
+            resolved_tunnel_with_port("db", temp_dir.path().join("fwd-deck.toml"), local_port);
         let pid = std::process::id();
         let mut state_file = TunnelStateFile::new();
         state_file.upsert(TunnelState::from_resolved_tunnel(
@@ -3889,13 +3894,16 @@ use_global = true
         let temp_dir = TempDir::new().expect("create state directory");
         let global_state_path = temp_dir.path().join("global-state.toml");
         let global_config_path = temp_dir.path().join("global-fwd-deck.toml");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let local_port = listener.local_addr().expect("read listener address").port();
         write_state_file(
             &global_state_path,
-            &state_file(vec![tunnel_state(
+            &state_file(vec![tunnel_state_with_port(
                 "db",
                 ConfigSourceKind::Global,
                 global_config_path,
                 std::process::id(),
+                local_port,
             )]),
         )
         .expect("write global state");
@@ -3974,14 +3982,17 @@ use_global = true
         let local_config_path = workspace.path().join("fwd-deck.toml");
         let global_state_path = temp_dir.path().join("global-state.toml");
         let workspace_state_path = temp_dir.path().join("workspace-state.toml");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let local_port = listener.local_addr().expect("read listener address").port();
         fs::write(&local_config_path, "").expect("write local config");
         write_state_file(
             &workspace_state_path,
-            &state_file(vec![tunnel_state(
+            &state_file(vec![tunnel_state_with_port(
                 "db",
                 ConfigSourceKind::Local,
                 local_config_path.clone(),
                 std::process::id(),
+                local_port,
             )]),
         )
         .expect("write workspace state");
@@ -4205,11 +4216,22 @@ use_global = true
         source_path: PathBuf,
         pid: u32,
     ) -> TunnelState {
+        tunnel_state_with_port(id, source_kind, source_path, pid, 15432)
+    }
+
+    /// テスト用の local port 指定 tunnel state を生成する
+    fn tunnel_state_with_port(
+        id: &str,
+        source_kind: ConfigSourceKind,
+        source_path: PathBuf,
+        pid: u32,
+        local_port: u16,
+    ) -> TunnelState {
         TunnelState {
             id: id.to_owned(),
             pid,
             local_host: "127.0.0.1".to_owned(),
-            local_port: 15432,
+            local_port,
             remote_host: "127.0.0.1".to_owned(),
             remote_port: 5432,
             ssh_user: "user".to_owned(),
@@ -4266,11 +4288,6 @@ use_global = true
                     .unwrap_or(false)
             })
             .expect("workspace item should exist")
-    }
-
-    /// テスト用の resolved tunnel を生成する
-    fn resolved_tunnel(id: &str, source_path: PathBuf) -> ResolvedTunnelConfig {
-        resolved_tunnel_with_port(id, source_path, 15432)
     }
 
     /// テスト用の local port 指定 resolved tunnel を生成する

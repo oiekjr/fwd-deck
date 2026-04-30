@@ -280,6 +280,8 @@ type TunnelOperationCommand = "start_tunnels" | "stop_tunnels";
 interface RunOperationOptions {
   /** 成功した操作対象を選択状態から除外するか */
   clearSucceededSelections?: boolean;
+  /** Bulk actions 内の操作進捗を表示するか */
+  showSelectionProgress?: boolean;
 }
 
 interface OperationProgress {
@@ -870,15 +872,18 @@ function App(): ReactElement {
   ): Promise<void> {
     operationSequenceRef.current += 1;
     const operationId = `operation-${operationSequenceRef.current}`;
+    const shouldShowSelectionProgress = options.showSelectionProgress === true;
 
     operationInFlightRef.current = true;
     activeOperationIdRef.current = operationId;
-    setOperationProgress({
-      operationId,
-      command,
-      completedCount: 0,
-      totalCount: targets.length,
-    });
+    if (shouldShowSelectionProgress) {
+      setOperationProgress({
+        operationId,
+        command,
+        completedCount: 0,
+        totalCount: targets.length,
+      });
+    }
     setIsBusy(true);
     await waitForNextPaint();
 
@@ -906,7 +911,9 @@ function App(): ReactElement {
     } finally {
       operationInFlightRef.current = false;
       activeOperationIdRef.current = null;
-      setOperationProgress(null);
+      if (shouldShowSelectionProgress) {
+        setOperationProgress(null);
+      }
       setIsBusy(false);
     }
   }
@@ -1581,10 +1588,16 @@ function App(): ReactElement {
               onDeselectVisible={deselectVisibleTunnels}
               onToggleSelection={toggleSelection}
               onStartSelected={() =>
-                void startSelected(selectedIdList, { clearSucceededSelections: true })
+                void startSelected(selectedIdList, {
+                  clearSucceededSelections: true,
+                  showSelectionProgress: true,
+                })
               }
               onStopSelected={() =>
-                void stopSelected(selectedIdList, { clearSucceededSelections: true })
+                void stopSelected(selectedIdList, {
+                  clearSucceededSelections: true,
+                  showSelectionProgress: true,
+                })
               }
               onStartTunnel={(id) => void startSelected([id])}
               onStopTunnel={(id) => void stopSelected([id])}

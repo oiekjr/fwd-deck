@@ -43,6 +43,7 @@ import {
   Search,
   Server,
   Settings2,
+  Star,
   Trash2,
   X,
 } from "lucide-react";
@@ -97,6 +98,7 @@ type AppCommand =
   | "duplicate_tunnel_entry"
   | "update_tunnel_entry"
   | "remove_tunnel_entry"
+  | "set_tunnel_favorite"
   | "remove_workspace_history_entry"
   | "refresh_tray_menu";
 
@@ -155,6 +157,7 @@ interface ValidationIssueView {
 interface TunnelView {
   id: string;
   runtimeId: string;
+  isFavorite: boolean;
   description: string | null;
   tags: string[];
   localHost: string;
@@ -317,6 +320,7 @@ interface TunnelFilters {
   status: StatusFilter;
   scope: ScopeFilter;
   tags: string[];
+  favoritesOnly: boolean;
 }
 
 interface HighlightedTextPart {
@@ -369,6 +373,7 @@ const initialFilters: TunnelFilters = {
   status: "all",
   scope: "all",
   tags: [],
+  favoritesOnly: false,
 };
 
 const searchDebounceMilliseconds = 200;
@@ -434,6 +439,7 @@ function App(): ReactElement {
   const [operationToast, setOperationToast] = useState<OperationToastMessage | null>(null);
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
   const [runtimeNowUnixSeconds, setRuntimeNowUnixSeconds] = useState<number>(0);
+  const [favoriteUpdatingIds, setFavoriteUpdatingIds] = useState<Set<string>>(new Set());
   const [isBusy, setIsBusy] = useState<boolean>(false);
   const [hasCompletedInitialLoad, setHasCompletedInitialLoad] = useState<boolean>(false);
   const autoRefreshInFlightRef = useRef<boolean>(false);
@@ -1073,6 +1079,43 @@ function App(): ReactElement {
   }
 
   /**
+   * トンネルのお気に入り状態を切り替える
+   */
+  async function toggleTunnelFavorite(tunnel: TunnelView): Promise<void> {
+    if (favoriteUpdatingIds.has(tunnel.runtimeId)) {
+      return;
+    }
+
+    const nextIsFavorite = !tunnel.isFavorite;
+
+    setFavoriteUpdatingIds((current) => addSelections(current, [tunnel.runtimeId]));
+    setDashboard((current) =>
+      updateTunnelFavoriteInDashboard(current, tunnel.runtimeId, nextIsFavorite),
+    );
+
+    try {
+      const loaded = await invokeCommand<DashboardState>("set_tunnel_favorite", {
+        paths: normalizeWorkspaceSelection(paths),
+        runtimeId: tunnel.runtimeId,
+        isFavorite: nextIsFavorite,
+      });
+
+      if (hasActiveTunnelFilters(filters)) {
+        captureResultScrollPosition();
+      }
+
+      setPaths(loaded.paths);
+    } catch (error) {
+      setDashboard((current) =>
+        updateTunnelFavoriteInDashboard(current, tunnel.runtimeId, tunnel.isFavorite),
+      );
+      showOperationToast({ kind: "error", summary: stringifyError(error) });
+    } finally {
+      setFavoriteUpdatingIds((current) => removeSelection(current, tunnel.runtimeId));
+    }
+  }
+
+  /**
    * ワークスペース履歴の指定行を永続設定から削除する
    */
   async function removeWorkspaceHistoryEntry(workspacePath: string): Promise<void> {
@@ -1485,6 +1528,7 @@ function App(): ReactElement {
               availableTags={availableTags}
               operationProgress={operationProgress}
               runtimeNowUnixSeconds={runtimeNowUnixSeconds}
+              favoriteUpdatingIds={favoriteUpdatingIds}
               isBusy={isBusy}
               queryInput={queryInput}
               searchInputRef={searchInputRef}
@@ -1509,6 +1553,7 @@ function App(): ReactElement {
               onStopTunnel={(id) => void stopSelected([id])}
               onStartTracked={(id) => void startSelected([id])}
               onStopTracked={(target) => void stopTracked(target)}
+              onToggleFavorite={(tunnel) => void toggleTunnelFavorite(tunnel)}
               onEditTunnel={openEditTunnel}
               onDuplicateTunnel={openDuplicateTunnel}
               onRemoveTunnel={setDeleteTarget}
@@ -1882,6 +1927,26 @@ function IconButton({
   );
 }
 
+interface FavoriteButtonProps {
+  isFavorite: boolean;
+  disabled: boolean;
+  onPress: () => void;
+}
+
+/**
+ * お気に入り状態を切り替えるアイコンボタンを表示する
+ */
+function FavoriteButton({ isFavorite, disabled, onPress }: FavoriteButtonProps): ReactElement {
+  const label = isFavorite ? "お気に入りから解除" : "お気に入りに追加";
+  const iconClassName = isFavorite ? "fill-current text-warning" : "fill-transparent";
+
+  return (
+    <IconButton label={label} variant="ghost" onPress={onPress} disabled={disabled}>
+      <Star className={iconClassName} size={14} />
+    </IconButton>
+  );
+}
+
 interface SelectionCheckboxProps {
   label: string;
   isSelected: boolean;
@@ -1991,6 +2056,7 @@ interface DashboardViewProps {
   availableTags: string[];
   operationProgress: OperationProgress | null;
   runtimeNowUnixSeconds: number;
+  favoriteUpdatingIds: Set<string>;
   queryInput: string;
   searchInputRef: RefObject<HTMLInputElement | null>;
   filters: TunnelFilters;
@@ -2011,6 +2077,7 @@ interface DashboardViewProps {
   onStopTunnel: (id: string) => void;
   onStartTracked: (id: string) => void;
   onStopTracked: (target: OperationTarget) => void;
+  onToggleFavorite: (tunnel: TunnelView) => void;
   onEditTunnel: (tunnel: TunnelView) => void;
   onDuplicateTunnel: (tunnel: TunnelView) => void;
   onRemoveTunnel: (tunnel: TunnelView) => void;
@@ -2032,6 +2099,7 @@ function DashboardView({
   availableTags,
   operationProgress,
   runtimeNowUnixSeconds,
+  favoriteUpdatingIds,
   queryInput,
   searchInputRef,
   filters,
@@ -2052,6 +2120,7 @@ function DashboardView({
   onStopTunnel,
   onStartTracked,
   onStopTracked,
+  onToggleFavorite,
   onEditTunnel,
   onDuplicateTunnel,
   onRemoveTunnel,
@@ -2112,12 +2181,14 @@ function DashboardView({
         selectedIds={selectedIds}
         selectedVisibleCount={selectedVisibleCount}
         runtimeNowUnixSeconds={runtimeNowUnixSeconds}
+        favoriteUpdatingIds={favoriteUpdatingIds}
         isBusy={isBusy}
         onSelectVisible={onSelectVisible}
         onDeselectVisible={onDeselectVisible}
         onToggle={onToggleSelection}
         onStart={onStartTunnel}
         onStop={onStopTunnel}
+        onToggleFavorite={onToggleFavorite}
         onEdit={onEditTunnel}
         onDuplicate={onDuplicateTunnel}
         onRemove={onRemoveTunnel}
@@ -2630,7 +2701,7 @@ function TunnelOperationsPanel({
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-2 px-3 pb-3 lg:grid-cols-[minmax(16rem,1fr)_auto_auto] lg:items-center">
+        <div className="grid grid-cols-1 gap-2 px-3 pb-3 lg:grid-cols-[minmax(16rem,1fr)_auto_auto_auto] lg:items-center">
           <HeroTextField className="w-full" variant="secondary">
             <HeroLabel className="sr-only">Search tunnels</HeroLabel>
             <div className="relative">
@@ -2699,6 +2770,22 @@ function TunnelOperationsPanel({
               </HeroButton>
             ))}
           </div>
+
+          <HeroButton
+            type="button"
+            variant={filters.favoritesOnly ? "primary" : "outline"}
+            size="sm"
+            fullWidth
+            onPress={() => onFilterChange("favoritesOnly", !filters.favoritesOnly)}
+            aria-pressed={filters.favoritesOnly}
+            className="min-w-0 justify-center"
+          >
+            <Star
+              className={filters.favoritesOnly ? "fill-current" : "fill-transparent"}
+              size={14}
+            />
+            Favorites
+          </HeroButton>
         </div>
 
         <ActiveFilterChips
@@ -2802,8 +2889,15 @@ function ActiveFilterChips({
   const hasStatusFilter = filters.status !== initialFilters.status;
   const hasScopeFilter = filters.scope !== initialFilters.scope;
   const hasTagFilters = filters.tags.length > 0;
+  const hasFavoriteFilter = filters.favoritesOnly !== initialFilters.favoritesOnly;
 
-  if (query.length === 0 && !hasStatusFilter && !hasScopeFilter && !hasTagFilters) {
+  if (
+    query.length === 0 &&
+    !hasStatusFilter &&
+    !hasScopeFilter &&
+    !hasTagFilters &&
+    !hasFavoriteFilter
+  ) {
     return null;
   }
 
@@ -2823,6 +2917,12 @@ function ActiveFilterChips({
         <FilterChip
           label={`scope: ${filters.scope}`}
           onRemove={() => onFilterChange("scope", initialFilters.scope)}
+        />
+      ) : null}
+      {hasFavoriteFilter ? (
+        <FilterChip
+          label="favorites"
+          onRemove={() => onFilterChange("favoritesOnly", initialFilters.favoritesOnly)}
         />
       ) : null}
       {filters.tags.map((tag) => (
@@ -3153,12 +3253,14 @@ interface TunnelDeckProps {
   selectedIds: Set<string>;
   selectedVisibleCount: number;
   runtimeNowUnixSeconds: number;
+  favoriteUpdatingIds: Set<string>;
   isBusy: boolean;
   onSelectVisible: () => void;
   onDeselectVisible: () => void;
   onToggle: (id: string) => void;
   onStart: (id: string) => void;
   onStop: (id: string) => void;
+  onToggleFavorite: (tunnel: TunnelView) => void;
   onEdit: (tunnel: TunnelView) => void;
   onDuplicate: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
@@ -3180,12 +3282,14 @@ function TunnelDeck({
   selectedIds,
   selectedVisibleCount,
   runtimeNowUnixSeconds,
+  favoriteUpdatingIds,
   isBusy,
   onSelectVisible,
   onDeselectVisible,
   onToggle,
   onStart,
   onStop,
+  onToggleFavorite,
   onEdit,
   onDuplicate,
   onRemove,
@@ -3244,12 +3348,14 @@ function TunnelDeck({
         selectedIds={selectedIds}
         selectedVisibleCount={selectedVisibleCount}
         runtimeNowUnixSeconds={runtimeNowUnixSeconds}
+        favoriteUpdatingIds={favoriteUpdatingIds}
         isBusy={isBusy}
         onSelectVisible={onSelectVisible}
         onDeselectVisible={onDeselectVisible}
         onToggle={onToggle}
         onStart={onStart}
         onStop={onStop}
+        onToggleFavorite={onToggleFavorite}
         onEdit={onEdit}
         onDuplicate={onDuplicate}
         onRemove={onRemove}
@@ -3266,11 +3372,13 @@ function TunnelDeck({
           query={filters.query}
           homePath={homePath}
           runtimeNowUnixSeconds={runtimeNowUnixSeconds}
+          isFavoriteUpdating={favoriteUpdatingIds.has(tunnel.runtimeId)}
           checked={selectedIds.has(tunnel.runtimeId)}
           isBusy={isBusy}
           onToggle={onToggle}
           onStart={onStart}
           onStop={onStop}
+          onToggleFavorite={onToggleFavorite}
           onEdit={onEdit}
           onDuplicate={onDuplicate}
           onRemove={onRemove}
@@ -3286,12 +3394,14 @@ interface TunnelSlimListProps {
   selectedIds: Set<string>;
   selectedVisibleCount: number;
   runtimeNowUnixSeconds: number;
+  favoriteUpdatingIds: Set<string>;
   isBusy: boolean;
   onSelectVisible: () => void;
   onDeselectVisible: () => void;
   onToggle: (id: string) => void;
   onStart: (id: string) => void;
   onStop: (id: string) => void;
+  onToggleFavorite: (tunnel: TunnelView) => void;
   onEdit: (tunnel: TunnelView) => void;
   onDuplicate: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
@@ -3306,12 +3416,14 @@ function TunnelSlimList({
   selectedIds,
   selectedVisibleCount,
   runtimeNowUnixSeconds,
+  favoriteUpdatingIds,
   isBusy,
   onSelectVisible,
   onDeselectVisible,
   onToggle,
   onStart,
   onStop,
+  onToggleFavorite,
   onEdit,
   onDuplicate,
   onRemove,
@@ -3365,11 +3477,13 @@ function TunnelSlimList({
                   tunnel={tunnel}
                   query={query}
                   runtimeNowUnixSeconds={runtimeNowUnixSeconds}
+                  isFavoriteUpdating={favoriteUpdatingIds.has(tunnel.runtimeId)}
                   checked={selectedIds.has(tunnel.runtimeId)}
                   isBusy={isBusy}
                   onToggle={onToggle}
                   onStart={onStart}
                   onStop={onStop}
+                  onToggleFavorite={onToggleFavorite}
                   onEdit={onEdit}
                   onDuplicate={onDuplicate}
                   onRemove={onRemove}
@@ -3387,11 +3501,13 @@ interface TunnelSlimRowProps {
   tunnel: TunnelView;
   query: string;
   runtimeNowUnixSeconds: number;
+  isFavoriteUpdating: boolean;
   checked: boolean;
   isBusy: boolean;
   onToggle: (id: string) => void;
   onStart: (id: string) => void;
   onStop: (id: string) => void;
+  onToggleFavorite: (tunnel: TunnelView) => void;
   onEdit: (tunnel: TunnelView) => void;
   onDuplicate: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
@@ -3404,11 +3520,13 @@ function TunnelSlimRow({
   tunnel,
   query,
   runtimeNowUnixSeconds,
+  isFavoriteUpdating,
   checked,
   isBusy,
   onToggle,
   onStart,
   onStop,
+  onToggleFavorite,
   onEdit,
   onDuplicate,
   onRemove,
@@ -3463,6 +3581,11 @@ function TunnelSlimRow({
       </Table.Cell>
       <Table.Cell>
         <div className="flex min-w-max items-center justify-end gap-1">
+          <FavoriteButton
+            isFavorite={tunnel.isFavorite}
+            onPress={() => onToggleFavorite(tunnel)}
+            disabled={isBusy || isFavoriteUpdating}
+          />
           <HeroButton
             type="button"
             variant={running ? "ghost" : "primary"}
@@ -3542,11 +3665,13 @@ interface TunnelCardProps {
   query: string;
   homePath: string | null;
   runtimeNowUnixSeconds: number;
+  isFavoriteUpdating: boolean;
   checked: boolean;
   isBusy: boolean;
   onToggle: (id: string) => void;
   onStart: (id: string) => void;
   onStop: (id: string) => void;
+  onToggleFavorite: (tunnel: TunnelView) => void;
   onEdit: (tunnel: TunnelView) => void;
   onDuplicate: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
@@ -3560,11 +3685,13 @@ function TunnelCard({
   query,
   homePath,
   runtimeNowUnixSeconds,
+  isFavoriteUpdating,
   checked,
   isBusy,
   onToggle,
   onStart,
   onStop,
+  onToggleFavorite,
   onEdit,
   onDuplicate,
   onRemove,
@@ -3609,7 +3736,14 @@ function TunnelCard({
               </span>
             </Checkbox.Content>
           </Checkbox>
-          <StatusBadge status={status} />
+          <div className="flex shrink-0 items-center gap-1">
+            <FavoriteButton
+              isFavorite={tunnel.isFavorite}
+              onPress={() => onToggleFavorite(tunnel)}
+              disabled={isBusy || isFavoriteUpdating}
+            />
+            <StatusBadge status={status} />
+          </div>
         </div>
 
         <p className="min-h-10 text-sm leading-5 text-foreground/60">
@@ -4842,6 +4976,10 @@ function filterTunnels(
       return false;
     }
 
+    if (filters.favoritesOnly && !tunnel.isFavorite) {
+      return false;
+    }
+
     if (!tunnelMatchesRequiredTags(tunnel, requiredTags)) {
       return false;
     }
@@ -4910,6 +5048,7 @@ function hasActiveTunnelFilters(filters: TunnelFilters): boolean {
     filters.query.trim().length > 0 ||
     filters.status !== initialFilters.status ||
     filters.scope !== initialFilters.scope ||
+    filters.favoritesOnly !== initialFilters.favoritesOnly ||
     filters.tags.length > 0
   );
 }
@@ -5494,6 +5633,35 @@ function removeSelections(current: Set<string>, ids: string[]): Set<string> {
   const next = new Set(current);
   ids.forEach((id) => next.delete(id));
   return next;
+}
+
+/**
+ * ダッシュボード内の対象トンネルだけお気に入り状態を更新する
+ */
+function updateTunnelFavoriteInDashboard(
+  dashboard: DashboardState | null,
+  runtimeId: string,
+  isFavorite: boolean,
+): DashboardState | null {
+  if (dashboard === null) {
+    return dashboard;
+  }
+
+  let changed = false;
+  const tunnels = dashboard.tunnels.map((tunnel) => {
+    if (tunnel.runtimeId !== runtimeId || tunnel.isFavorite === isFavorite) {
+      return tunnel;
+    }
+
+    changed = true;
+    return { ...tunnel, isFavorite };
+  });
+
+  if (!changed) {
+    return dashboard;
+  }
+
+  return { ...dashboard, tunnels };
 }
 
 /**

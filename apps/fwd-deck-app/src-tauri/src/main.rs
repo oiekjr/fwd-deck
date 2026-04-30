@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -14,7 +14,8 @@ use fwd_deck_core::{
     add_tunnel_to_config_file, default_global_config_path, default_local_config_path,
     default_state_file_path, format_path_for_display, load_effective_config,
     remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel, start_tunnels_with_progress,
-    stop_tunnel, tag_is_valid, tunnel_statuses, update_tunnel_in_config_file, validate_config,
+    stop_tunnel, tag_is_valid, tunnel_runtime_id, tunnel_statuses, update_tunnel_in_config_file,
+    validate_config,
 };
 #[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
@@ -37,7 +38,7 @@ use tauri_plugin_dialog::{
 use thiserror::Error;
 
 const APP_PREFERENCES_FILE_NAME: &str = "preferences.toml";
-const APP_PREFERENCES_VERSION: u32 = 3;
+const APP_PREFERENCES_VERSION: u32 = 4;
 const WORKSPACE_HISTORY_LIMIT: usize = 10;
 const WORKSPACE_STATES_DIR: &str = "workspace-states";
 const STATE_FILE_NAME: &str = "state.toml";
@@ -59,8 +60,10 @@ const TRAY_MENU_QUIT: &str = "tray-quit";
 const TRAY_MENU_CURRENT_WORKSPACE: &str = "tray-current-workspace";
 const TRAY_MENU_WORKSPACE_BROWSE: &str = "tray-workspace-browse";
 const TRAY_MENU_NO_TUNNELS: &str = "tray-no-tunnels";
+const TRAY_MENU_NO_FAVORITE_TUNNELS: &str = "tray-no-favorite-tunnels";
 const TRAY_MENU_INVALID_CONFIG: &str = "tray-invalid-config";
 const TRAY_TUNNEL_ITEM_PREFIX: &str = "tray-tunnel-";
+const TRAY_FAVORITE_TUNNEL_ITEM_PREFIX: &str = "tray-favorite-tunnel-";
 const TRAY_WORKSPACE_ITEM_PREFIX: &str = "tray-workspace-";
 const TRAY_OPERATION_ID: &str = "tray";
 const APP_DISPLAY_NAME: &str = "Fwd Deck";
@@ -97,6 +100,7 @@ fn main() {
             duplicate_tunnel_entry,
             update_tunnel_entry,
             remove_tunnel_entry,
+            set_tunnel_favorite,
             remove_workspace_history_entry,
             refresh_tray_menu
         ])
@@ -641,6 +645,12 @@ fn build_tray_menu(
     let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
     let validation = validate_config(&config);
     let tunnel_items = tray_tunnel_menu_items(&config, &statuses, &validation);
+    let favorite_tunnel_items = tray_favorite_tunnel_menu_items(
+        &config,
+        &statuses,
+        &validation,
+        &runtime_paths.preferences,
+    );
     let workspace_items = tray_workspace_menu_items(&runtime_paths.preferences);
     let icon_kind = tray_icon_kind(&statuses);
     let mut actions = TrayMenuActions::default();
@@ -656,32 +666,26 @@ fn build_tray_menu(
     )?;
     let refresh = MenuItem::with_id(app, TRAY_MENU_REFRESH, "Refresh Status", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, TRAY_MENU_QUIT, "Quit", true, None::<&str>)?;
+    let favorites = Submenu::new(app, "Favorites", true)?;
     let tunnels = Submenu::new(app, "Tunnels", true)?;
     let workspaces = Submenu::new(app, "Workspaces", true)?;
 
-    if tunnel_items.is_empty() {
-        let empty = MenuItem::with_id(
-            app,
-            TRAY_MENU_NO_TUNNELS,
-            "No tunnels configured",
-            false,
-            None::<&str>,
-        )?;
-        tunnels.append(&empty)?;
-    } else {
-        for item in tunnel_items {
-            let menu_item = CheckMenuItem::with_id(
-                app,
-                item.menu_id.clone(),
-                item.label,
-                item.enabled,
-                item.checked,
-                None::<&str>,
-            )?;
-            actions.tunnel_actions.insert(item.menu_id, item.action);
-            tunnels.append(&menu_item)?;
-        }
-    }
+    append_tray_tunnel_menu_items(
+        app,
+        &favorites,
+        &mut actions,
+        favorite_tunnel_items,
+        TRAY_MENU_NO_FAVORITE_TUNNELS,
+        "No favorite tunnels",
+    )?;
+    append_tray_tunnel_menu_items(
+        app,
+        &tunnels,
+        &mut actions,
+        tunnel_items,
+        TRAY_MENU_NO_TUNNELS,
+        "No tunnels configured",
+    )?;
 
     if !validation.is_valid() {
         let invalid = MenuItem::with_id(
@@ -722,6 +726,7 @@ fn build_tray_menu(
     workspaces.append(&PredefinedMenuItem::separator(app)?)?;
     workspaces.append(&browse_workspace)?;
 
+    menu.append(&favorites)?;
     menu.append(&tunnels)?;
     menu.append(&refresh)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
@@ -733,6 +738,37 @@ fn build_tray_menu(
     menu.append(&quit)?;
 
     Ok((menu, actions, icon_kind))
+}
+
+/// トレイのトンネルサブメニューへ項目を追加する
+fn append_tray_tunnel_menu_items(
+    app: &tauri::AppHandle,
+    submenu: &Submenu<tauri::Wry>,
+    actions: &mut TrayMenuActions,
+    items: Vec<TrayTunnelMenuItem>,
+    empty_menu_id: &str,
+    empty_label: &str,
+) -> Result<(), AppError> {
+    if items.is_empty() {
+        let empty = MenuItem::with_id(app, empty_menu_id, empty_label, false, None::<&str>)?;
+        submenu.append(&empty)?;
+        return Ok(());
+    }
+
+    for item in items {
+        let menu_item = CheckMenuItem::with_id(
+            app,
+            item.menu_id.clone(),
+            item.label,
+            item.enabled,
+            item.checked,
+            None::<&str>,
+        )?;
+        actions.tunnel_actions.insert(item.menu_id, item.action);
+        submenu.append(&menu_item)?;
+    }
+
+    Ok(())
 }
 
 /// 接続状態からトレイアイコン種別を決定する
@@ -763,6 +799,48 @@ fn tray_tunnel_menu_items(
     statuses: &[ScopedRuntimeStatus],
     validation: &ValidationReport,
 ) -> Vec<TrayTunnelMenuItem> {
+    tray_tunnel_menu_items_matching(
+        config,
+        statuses,
+        validation,
+        TRAY_TUNNEL_ITEM_PREFIX,
+        |_| true,
+    )
+}
+
+/// お気に入りトンネルをトレイメニュー項目へ変換する
+fn tray_favorite_tunnel_menu_items(
+    config: &EffectiveConfig,
+    statuses: &[ScopedRuntimeStatus],
+    validation: &ValidationReport,
+    preferences: &AppPreferences,
+) -> Vec<TrayTunnelMenuItem> {
+    let favorite_runtime_ids = preferences
+        .favorite_tunnel_runtime_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+
+    tray_tunnel_menu_items_matching(
+        config,
+        statuses,
+        validation,
+        TRAY_FAVORITE_TUNNEL_ITEM_PREFIX,
+        |runtime_id| favorite_runtime_ids.contains(runtime_id),
+    )
+}
+
+/// 条件に一致する設定済みトンネルをトレイメニュー項目へ変換する
+fn tray_tunnel_menu_items_matching<F>(
+    config: &EffectiveConfig,
+    statuses: &[ScopedRuntimeStatus],
+    validation: &ValidationReport,
+    menu_id_prefix: &str,
+    include_runtime_id: F,
+) -> Vec<TrayTunnelMenuItem>
+where
+    F: Fn(&str) -> bool,
+{
     let status_by_key = statuses
         .iter()
         .map(|status| (runtime_status_lookup_key(status), status))
@@ -772,19 +850,26 @@ fn tray_tunnel_menu_items(
         .tunnels
         .iter()
         .enumerate()
-        .map(|(index, resolved)| {
+        .filter_map(|(index, resolved)| {
             let runtime_id = runtime_id_for_resolved_tunnel(resolved);
+            if !include_runtime_id(&runtime_id) {
+                return None;
+            }
+
             let runtime_key = (
                 runtime_scope_for_source(resolved.source.kind),
                 runtime_id.as_str(),
             );
             let status = status_by_key.get(&runtime_key).copied();
-            tray_tunnel_menu_item(index, resolved, status, can_start)
+            let sort_key = tray_tunnel_sort_key(resolved, &runtime_id);
+            let item = tray_tunnel_menu_item(menu_id_prefix, index, resolved, status, can_start);
+
+            Some((sort_key, item))
         })
         .collect::<Vec<_>>();
 
-    items.sort_by(|left, right| left.label.cmp(&right.label));
-    items
+    items.sort_by(|left, right| left.0.cmp(&right.0));
+    items.into_iter().map(|(_, item)| item).collect()
 }
 
 /// 保存済みワークスペースをトレイメニュー項目へ変換する
@@ -834,6 +919,7 @@ fn tray_workspace_menu_items(preferences: &AppPreferences) -> Vec<TrayWorkspaceM
 
 /// 1 件のトンネルをトレイメニュー項目へ変換する
 fn tray_tunnel_menu_item(
+    menu_id_prefix: &str,
     index: usize,
     resolved: &ResolvedTunnelConfig,
     status: Option<&ScopedRuntimeStatus>,
@@ -857,7 +943,7 @@ fn tray_tunnel_menu_item(
     let runtime_id = runtime_id_for_resolved_tunnel(resolved);
 
     TrayTunnelMenuItem {
-        menu_id: format!("{TRAY_TUNNEL_ITEM_PREFIX}{index}"),
+        menu_id: format!("{menu_id_prefix}{index}"),
         label: tray_tunnel_label(&resolved.tunnel.name, resolved.source.kind, is_stale),
         checked: is_running,
         enabled: is_running || can_start,
@@ -868,6 +954,18 @@ fn tray_tunnel_menu_item(
             operation,
         },
     }
+}
+
+/// トレイのトンネル項目の表示順キーを生成する
+fn tray_tunnel_sort_key(
+    resolved: &ResolvedTunnelConfig,
+    runtime_id: &str,
+) -> (String, String, String) {
+    (
+        resolved.tunnel.name.clone(),
+        resolved.source.kind.to_string(),
+        runtime_id.to_owned(),
+    )
 }
 
 /// トレイ表示用のトンネル名を生成する
@@ -1408,6 +1506,7 @@ struct AppPreferences {
     global_config_path: Option<PathBuf>,
     hide_dock_icon_when_window_hidden: bool,
     auto_stop_tunnels_on_quit: bool,
+    favorite_tunnel_runtime_ids: Vec<String>,
 }
 
 impl Default for AppPreferences {
@@ -1421,6 +1520,7 @@ impl Default for AppPreferences {
             global_config_path: None,
             hide_dock_icon_when_window_hidden: false,
             auto_stop_tunnels_on_quit: false,
+            favorite_tunnel_runtime_ids: Vec::new(),
         }
     }
 }
@@ -1495,6 +1595,7 @@ struct ValidationIssueView {
 struct TunnelView {
     id: String,
     runtime_id: String,
+    is_favorite: bool,
     description: Option<String>,
     tags: Vec<String>,
     local_host: String,
@@ -1973,6 +2074,20 @@ fn remove_tunnel_entry(
     command_result(result)
 }
 
+/// トンネルのお気に入り状態を保存する
+#[tauri::command]
+fn set_tunnel_favorite(
+    app: tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    runtime_id: String,
+    is_favorite: bool,
+) -> Result<DashboardState, String> {
+    let result = set_tunnel_favorite_inner(&app, paths, &runtime_id, is_favorite);
+    let _ = rebuild_tray_menu(&app);
+
+    command_result(result)
+}
+
 /// ワークスペース履歴から指定パスを削除する
 #[tauri::command]
 fn remove_workspace_history_entry(
@@ -2110,14 +2225,27 @@ fn update_tunnel_entry_inner(
     id: &str,
     tunnel: TunnelInput,
 ) -> Result<DashboardState, AppError> {
-    let runtime_paths = resolve_runtime_paths(app, paths.clone())?;
+    let mut runtime_paths = resolve_runtime_paths(app, paths.clone())?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
     let tunnel = tunnel.into_tunnel_config();
 
     let kind = ConfigSourceKind::from(scope);
     validate_updated_tunnel(&config, kind, id, &tunnel)?;
     let path = config_path_for_scope(&runtime_paths, kind)?;
+    let previous_runtime_id = configured_tunnel_runtime_id(&config, kind, id);
+    let next_runtime_id = tunnel_runtime_id(kind, &path, &tunnel.name);
     update_tunnel_in_config_file(&path, kind, id, tunnel)?;
+
+    if let Some(previous_runtime_id) = previous_runtime_id
+        && replace_favorite_tunnel_runtime_id(
+            &mut runtime_paths.preferences,
+            &previous_runtime_id,
+            next_runtime_id,
+        )
+    {
+        write_app_preferences(app, &runtime_paths.preferences)?;
+    }
+
     load_dashboard_inner(app, paths)
 }
 
@@ -2128,12 +2256,71 @@ fn remove_tunnel_entry_inner(
     scope: ConfigScopeInput,
     id: &str,
 ) -> Result<DashboardState, AppError> {
-    let runtime_paths = resolve_runtime_paths(app, paths.clone())?;
+    let mut runtime_paths = resolve_runtime_paths(app, paths.clone())?;
+    let config = load_effective_config(&runtime_paths.config_paths)?;
     let kind = ConfigSourceKind::from(scope);
     let path = config_path_for_scope(&runtime_paths, kind)?;
+    let runtime_id = configured_tunnel_runtime_id(&config, kind, id);
 
     remove_tunnel_from_config_file(&path, kind, id)?;
+
+    if let Some(runtime_id) = runtime_id
+        && remove_favorite_tunnel_runtime_id(&mut runtime_paths.preferences, &runtime_id)
+    {
+        write_app_preferences(app, &runtime_paths.preferences)?;
+    }
+
     load_dashboard_inner(app, paths)
+}
+
+/// トンネルのお気に入り状態を保存してダッシュボードを再構築する
+fn set_tunnel_favorite_inner(
+    app: &tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    runtime_id: &str,
+    is_favorite: bool,
+) -> Result<DashboardState, AppError> {
+    let app_config_dir = app_config_dir(app)?;
+
+    set_tunnel_favorite_for_app_config_dir(&app_config_dir, paths, runtime_id, is_favorite)
+}
+
+/// アプリ設定ディレクトリを起点にトンネルのお気に入り状態を保存する
+fn set_tunnel_favorite_for_app_config_dir(
+    app_config_dir: &Path,
+    paths: Option<WorkspaceSelection>,
+    runtime_id: &str,
+    is_favorite: bool,
+) -> Result<DashboardState, AppError> {
+    let preferences_path = preferences_path_from_app_config_dir(app_config_dir);
+    let mut preferences = read_preferences_file(&preferences_path)?;
+    let original_preferences = preferences.clone();
+
+    normalize_loaded_preferences(&mut preferences);
+    if let Some(selection) = paths {
+        apply_workspace_selection(&mut preferences, selection)?;
+    }
+
+    let mut runtime_paths = runtime_paths_from_preferences(app_config_dir, preferences)?;
+    let config = load_effective_config(&runtime_paths.config_paths)?;
+
+    ensure_configured_runtime_id(&config, runtime_id)?;
+    set_favorite_tunnel_runtime_id(&mut runtime_paths.preferences, runtime_id, is_favorite);
+    write_preferences_file_if_changed(
+        &preferences_path,
+        &original_preferences,
+        &runtime_paths.preferences,
+    )?;
+
+    let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
+    let validation = validate_config(&config);
+
+    Ok(build_dashboard_state(
+        runtime_paths,
+        config,
+        statuses,
+        validation,
+    ))
 }
 
 /// ワークスペース履歴の削除結果を表示用パスとして返す
@@ -2328,6 +2515,17 @@ fn write_preferences_file(path: &Path, preferences: &AppPreferences) -> Result<(
     })
 }
 
+/// アプリ設定ファイルへ現在の preferences を保存する
+fn write_app_preferences(
+    app: &tauri::AppHandle,
+    preferences: &AppPreferences,
+) -> Result<(), AppError> {
+    let app_config_dir = app_config_dir(app)?;
+    let preferences_path = preferences_path_from_app_config_dir(&app_config_dir);
+
+    write_preferences_file(&preferences_path, preferences)
+}
+
 /// 変更がある場合だけアプリ設定ファイルを書き込む
 fn write_preferences_file_if_changed(
     path: &Path,
@@ -2361,6 +2559,15 @@ fn normalize_loaded_preferences(preferences: &mut AppPreferences) {
     preferences
         .workspace_history
         .truncate(WORKSPACE_HISTORY_LIMIT);
+    normalize_favorite_tunnel_runtime_ids(&mut preferences.favorite_tunnel_runtime_ids);
+}
+
+/// お気に入り runtime ID の保存形式を正規化する
+fn normalize_favorite_tunnel_runtime_ids(runtime_ids: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+
+    runtime_ids
+        .retain(|runtime_id| !runtime_id.trim().is_empty() && seen.insert(runtime_id.clone()));
 }
 
 /// ワークスペース選択をアプリ設定へ反映する
@@ -2679,6 +2886,12 @@ fn build_dashboard_state(
     statuses: Vec<ScopedRuntimeStatus>,
     validation: ValidationReport,
 ) -> DashboardState {
+    let favorite_runtime_ids = runtime_paths
+        .preferences
+        .favorite_tunnel_runtime_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
     let status_by_key = statuses
         .iter()
         .map(|status| (runtime_status_lookup_key(status), status))
@@ -2692,7 +2905,11 @@ fn build_dashboard_state(
                 runtime_scope_for_source(resolved.source.kind),
                 runtime_id.as_str(),
             );
-            tunnel_view(resolved, status_by_key.get(&runtime_key).copied())
+            tunnel_view(
+                resolved,
+                favorite_runtime_ids.contains(runtime_id.as_str()),
+                status_by_key.get(&runtime_key).copied(),
+            )
         })
         .collect::<Vec<_>>();
     let mut tracked_statuses = statuses.iter().collect::<Vec<_>>();
@@ -2727,6 +2944,89 @@ fn build_dashboard_state(
         tunnels,
         tracked_tunnels,
     }
+}
+
+/// runtime ID がお気に入り設定に存在するかを判定する
+fn favorite_tunnel_runtime_id_exists(preferences: &AppPreferences, runtime_id: &str) -> bool {
+    preferences
+        .favorite_tunnel_runtime_ids
+        .iter()
+        .any(|existing| existing == runtime_id)
+}
+
+/// お気に入り runtime ID を追加または削除する
+fn set_favorite_tunnel_runtime_id(
+    preferences: &mut AppPreferences,
+    runtime_id: &str,
+    is_favorite: bool,
+) -> bool {
+    if is_favorite {
+        if favorite_tunnel_runtime_id_exists(preferences, runtime_id) {
+            return false;
+        }
+
+        preferences
+            .favorite_tunnel_runtime_ids
+            .push(runtime_id.to_owned());
+        return true;
+    }
+
+    remove_favorite_tunnel_runtime_id(preferences, runtime_id)
+}
+
+/// お気に入り runtime ID を削除する
+fn remove_favorite_tunnel_runtime_id(preferences: &mut AppPreferences, runtime_id: &str) -> bool {
+    let original_len = preferences.favorite_tunnel_runtime_ids.len();
+    preferences
+        .favorite_tunnel_runtime_ids
+        .retain(|existing| existing != runtime_id);
+
+    preferences.favorite_tunnel_runtime_ids.len() != original_len
+}
+
+/// お気に入り runtime ID を新しい値へ引き継ぐ
+fn replace_favorite_tunnel_runtime_id(
+    preferences: &mut AppPreferences,
+    previous_runtime_id: &str,
+    next_runtime_id: String,
+) -> bool {
+    if !remove_favorite_tunnel_runtime_id(preferences, previous_runtime_id) {
+        return false;
+    }
+
+    set_favorite_tunnel_runtime_id(preferences, &next_runtime_id, true)
+        || previous_runtime_id != next_runtime_id
+}
+
+/// 設定済みトンネルに対応する runtime ID を取得する
+fn configured_tunnel_runtime_id(
+    config: &EffectiveConfig,
+    kind: ConfigSourceKind,
+    name: &str,
+) -> Option<String> {
+    config
+        .tunnels
+        .iter()
+        .find(|resolved| resolved.source.kind == kind && resolved.tunnel.name == name)
+        .map(runtime_id_for_resolved_tunnel)
+}
+
+/// runtime ID が現在の設定済みトンネルに存在することを検証する
+fn ensure_configured_runtime_id(
+    config: &EffectiveConfig,
+    runtime_id: &str,
+) -> Result<(), AppError> {
+    if config
+        .tunnels
+        .iter()
+        .any(|resolved| runtime_id_for_resolved_tunnel(resolved) == runtime_id)
+    {
+        return Ok(());
+    }
+
+    Err(AppError::InvalidInput(format!(
+        "未定義の runtime ID です: {runtime_id}"
+    )))
 }
 
 /// runtime 状態を HashMap 検索用の借用キーへ変換する
@@ -2812,6 +3112,7 @@ fn validation_view(report: ValidationReport) -> ValidationView {
 /// 設定済みトンネルを表示用へ変換する
 fn tunnel_view(
     resolved: &ResolvedTunnelConfig,
+    is_favorite: bool,
     status: Option<&ScopedRuntimeStatus>,
 ) -> TunnelView {
     let tunnel = &resolved.tunnel;
@@ -2819,6 +3120,7 @@ fn tunnel_view(
     TunnelView {
         id: tunnel.name.clone(),
         runtime_id: runtime_id_for_resolved_tunnel(resolved),
+        is_favorite,
         description: tunnel.description.clone(),
         tags: tunnel.tags.clone(),
         local_host: tunnel.effective_local_host().to_owned(),
@@ -3520,6 +3822,7 @@ use_global = true
         assert_eq!(preferences.version, APP_PREFERENCES_VERSION);
         assert!(!preferences.hide_dock_icon_when_window_hidden);
         assert!(!preferences.auto_stop_tunnels_on_quit);
+        assert!(preferences.favorite_tunnel_runtime_ids.is_empty());
     }
 
     /// Dock 非表示設定が preferences に保存されることを検証する
@@ -3552,6 +3855,49 @@ use_global = true
         let persisted = read_preferences_file(&path).expect("read preferences");
 
         assert!(persisted.auto_stop_tunnels_on_quit);
+    }
+
+    /// お気に入り runtime ID が preferences に保存されることを検証する
+    #[test]
+    fn favorite_tunnel_runtime_ids_preference_is_persisted() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("preferences.toml");
+        let preferences = AppPreferences {
+            favorite_tunnel_runtime_ids: vec!["local:/workspace/fwd-deck.toml:db".to_owned()],
+            ..AppPreferences::default()
+        };
+
+        write_preferences_file(&path, &preferences).expect("write preferences");
+        let persisted = read_preferences_file(&path).expect("read preferences");
+
+        assert_eq!(
+            persisted.favorite_tunnel_runtime_ids,
+            vec!["local:/workspace/fwd-deck.toml:db".to_owned()]
+        );
+    }
+
+    /// お気に入り runtime ID の空値と重複が正規化されることを検証する
+    #[test]
+    fn favorite_tunnel_runtime_ids_are_normalized_without_duplicates() {
+        let mut preferences = AppPreferences {
+            favorite_tunnel_runtime_ids: vec![
+                "local:/workspace/fwd-deck.toml:db".to_owned(),
+                "".to_owned(),
+                "local:/workspace/fwd-deck.toml:db".to_owned(),
+                "global:/home/user/config.toml:cache".to_owned(),
+            ],
+            ..AppPreferences::default()
+        };
+
+        normalize_loaded_preferences(&mut preferences);
+
+        assert_eq!(
+            preferences.favorite_tunnel_runtime_ids,
+            vec![
+                "local:/workspace/fwd-deck.toml:db".to_owned(),
+                "global:/home/user/config.toml:cache".to_owned()
+            ]
+        );
     }
 
     /// ワークスペース選択入力から Dock 非表示設定が反映されることを検証する
@@ -3786,6 +4132,107 @@ use_global = true
 
         assert_eq!(local_config_path, workspace.path().join("fwd-deck.toml"));
         assert!(!local_config_path.exists());
+    }
+
+    /// お気に入り設定コマンドが保存内容と表示状態を更新することを検証する
+    #[test]
+    fn set_tunnel_favorite_persists_preference_and_updates_dashboard() {
+        let app_config_dir = TempDir::new().expect("create app config directory");
+        let workspace = TempDir::new().expect("create workspace");
+        let local_config_path = default_local_config_path(workspace.path());
+        add_tunnel_to_config_file(
+            &local_config_path,
+            ConfigSourceKind::Local,
+            tunnel_config("db", 15432),
+        )
+        .expect("write local tunnel");
+        let runtime_id = tunnel_runtime_id(ConfigSourceKind::Local, &local_config_path, "db");
+        let mut selection =
+            workspace_selection_for_path(workspace.path()).expect("select workspace");
+        selection.use_global = Some(false);
+
+        let dashboard = set_tunnel_favorite_for_app_config_dir(
+            app_config_dir.path(),
+            Some(selection),
+            &runtime_id,
+            true,
+        )
+        .expect("set favorite");
+        let preferences =
+            read_preferences_file(&app_config_dir.path().join(APP_PREFERENCES_FILE_NAME))
+                .expect("read preferences");
+
+        assert_eq!(preferences.favorite_tunnel_runtime_ids, vec![runtime_id]);
+        assert_eq!(dashboard.tunnels.len(), 1);
+        assert!(dashboard.tunnels[0].is_favorite);
+    }
+
+    /// お気に入り状態がトンネル一覧の名前順に影響しないことを検証する
+    #[test]
+    fn dashboard_tunnels_keep_name_sort_when_favorite_exists() {
+        let favorite = resolved_tunnel_with_port("zzz-db", PathBuf::from("fwd-deck.toml"), 15432);
+        let regular = resolved_tunnel_with_port("aaa-cache", PathBuf::from("fwd-deck.toml"), 16379);
+        let favorite_runtime_id = runtime_id_for_resolved_tunnel(&favorite);
+        let paths = runtime_paths_with_preferences(AppPreferences {
+            favorite_tunnel_runtime_ids: vec![favorite_runtime_id],
+            ..AppPreferences::default()
+        });
+
+        let dashboard = build_dashboard_state(
+            paths,
+            EffectiveConfig::new(Vec::new(), vec![regular, favorite]),
+            Vec::new(),
+            ValidationReport::valid(),
+        );
+
+        assert_eq!(dashboard.tunnels[0].id, "aaa-cache");
+        assert!(!dashboard.tunnels[0].is_favorite);
+        assert_eq!(dashboard.tunnels[1].id, "zzz-db");
+        assert!(dashboard.tunnels[1].is_favorite);
+    }
+
+    /// 編集時にお気に入り runtime ID が新しい ID へ引き継がれることを検証する
+    #[test]
+    fn favorite_runtime_id_is_replaced_for_updated_tunnel() {
+        let mut preferences = AppPreferences {
+            favorite_tunnel_runtime_ids: vec!["local:/workspace/fwd-deck.toml:db".to_owned()],
+            ..AppPreferences::default()
+        };
+
+        let changed = replace_favorite_tunnel_runtime_id(
+            &mut preferences,
+            "local:/workspace/fwd-deck.toml:db",
+            "local:/workspace/fwd-deck.toml:renamed-db".to_owned(),
+        );
+
+        assert!(changed);
+        assert_eq!(
+            preferences.favorite_tunnel_runtime_ids,
+            vec!["local:/workspace/fwd-deck.toml:renamed-db".to_owned()]
+        );
+    }
+
+    /// 削除時にお気に入り runtime ID が削除されることを検証する
+    #[test]
+    fn favorite_runtime_id_is_removed_for_deleted_tunnel() {
+        let mut preferences = AppPreferences {
+            favorite_tunnel_runtime_ids: vec![
+                "local:/workspace/fwd-deck.toml:db".to_owned(),
+                "local:/workspace/fwd-deck.toml:cache".to_owned(),
+            ],
+            ..AppPreferences::default()
+        };
+
+        let changed = remove_favorite_tunnel_runtime_id(
+            &mut preferences,
+            "local:/workspace/fwd-deck.toml:db",
+        );
+
+        assert!(changed);
+        assert_eq!(
+            preferences.favorite_tunnel_runtime_ids,
+            vec!["local:/workspace/fwd-deck.toml:cache".to_owned()]
+        );
     }
 
     /// 起動済みトンネルがアプリ操作では成功扱いになることを検証する
@@ -4024,6 +4471,66 @@ use_global = true
 
         let global_item = tray_item_by_id(&items, "global-db");
         assert_eq!(global_item.label, "global-db (global)");
+    }
+
+    /// トレイのお気に入り項目が保存済み runtime ID だけを表示順どおりに抽出することを検証する
+    #[test]
+    fn tray_favorite_menu_items_include_only_favorites_in_display_order() {
+        let favorite_local =
+            resolved_tunnel_with_port("same-db", PathBuf::from("fwd-deck.toml"), 15432);
+        let regular = resolved_tunnel_with_port("aaa-cache", PathBuf::from("fwd-deck.toml"), 16379);
+        let favorite_global = resolved_tunnel_with_source_and_port(
+            "same-db",
+            ConfigSourceKind::Global,
+            PathBuf::from("global-fwd-deck.toml"),
+            25432,
+        );
+        let favorite_late =
+            resolved_tunnel_with_port("zzz-search", PathBuf::from("fwd-deck.toml"), 15434);
+        let config = EffectiveConfig::new(
+            Vec::new(),
+            vec![
+                favorite_local.clone(),
+                regular,
+                favorite_global.clone(),
+                favorite_late.clone(),
+            ],
+        );
+        let statuses = vec![scoped_runtime_status(
+            &favorite_global,
+            RuntimeScope::Global,
+            ProcessState::Running,
+        )];
+        let validation = validate_config(&config);
+        let preferences = AppPreferences {
+            favorite_tunnel_runtime_ids: vec![
+                runtime_id_for_resolved_tunnel(&favorite_late),
+                runtime_id_for_resolved_tunnel(&favorite_local),
+                runtime_id_for_resolved_tunnel(&favorite_global),
+            ],
+            ..AppPreferences::default()
+        };
+
+        let items = tray_favorite_tunnel_menu_items(&config, &statuses, &validation, &preferences);
+
+        let labels = items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec!["same-db (global)", "same-db (local)", "zzz-search (local)"]
+        );
+        assert!(
+            items
+                .iter()
+                .all(|item| item.menu_id.starts_with(TRAY_FAVORITE_TUNNEL_ITEM_PREFIX))
+        );
+        assert!(items.iter().all(|item| item.action.id != "aaa-cache"));
+        assert_eq!(
+            tray_item_by_id(&items, "same-db").action.operation,
+            TrayTunnelOperation::Stop
+        );
     }
 
     /// トレイアイコン種別が起動中トンネルの有無に追従することを検証する
@@ -4553,6 +5060,18 @@ use_global = true
             preferences: AppPreferences::default(),
             config_paths: ConfigPaths::new(None, local_config_path.clone()),
             local_config_path: Some(local_config_path),
+            global_config_display_path: None,
+            global_state_path: PathBuf::from("global-state.toml"),
+            workspace_state_path: None,
+        }
+    }
+
+    /// テスト用の preferences 指定 runtime paths を生成する
+    fn runtime_paths_with_preferences(preferences: AppPreferences) -> RuntimePaths {
+        RuntimePaths {
+            preferences,
+            config_paths: ConfigPaths::new(None, PathBuf::from("fwd-deck.toml")),
+            local_config_path: Some(PathBuf::from("fwd-deck.toml")),
             global_config_display_path: None,
             global_state_path: PathBuf::from("global-state.toml"),
             workspace_state_path: None,

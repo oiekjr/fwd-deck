@@ -99,6 +99,7 @@ type AppCommand =
   | "update_tunnel_entry"
   | "remove_tunnel_entry"
   | "set_tunnel_favorite"
+  | "set_tunnel_auto_recover"
   | "remove_workspace_history_entry"
   | "refresh_tray_menu";
 
@@ -158,6 +159,7 @@ interface TunnelView {
   id: string;
   runtimeId: string;
   isFavorite: boolean;
+  autoRecoverEnabled: boolean;
   description: string | null;
   tags: string[];
   localHost: string;
@@ -440,6 +442,7 @@ function App(): ReactElement {
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
   const [runtimeNowUnixSeconds, setRuntimeNowUnixSeconds] = useState<number>(0);
   const [favoriteUpdatingIds, setFavoriteUpdatingIds] = useState<Set<string>>(new Set());
+  const [autoRecoverUpdatingIds, setAutoRecoverUpdatingIds] = useState<Set<string>>(new Set());
   const [isBusy, setIsBusy] = useState<boolean>(false);
   const [hasCompletedInitialLoad, setHasCompletedInitialLoad] = useState<boolean>(false);
   const autoRefreshInFlightRef = useRef<boolean>(false);
@@ -1116,6 +1119,39 @@ function App(): ReactElement {
   }
 
   /**
+   * トンネルの自動復旧状態を切り替える
+   */
+  async function toggleTunnelAutoRecover(tunnel: TunnelView): Promise<void> {
+    if (autoRecoverUpdatingIds.has(tunnel.runtimeId)) {
+      return;
+    }
+
+    const nextEnabled = !tunnel.autoRecoverEnabled;
+
+    setAutoRecoverUpdatingIds((current) => addSelections(current, [tunnel.runtimeId]));
+    setDashboard((current) =>
+      updateTunnelAutoRecoverInDashboard(current, tunnel.runtimeId, nextEnabled),
+    );
+
+    try {
+      const loaded = await invokeCommand<DashboardState>("set_tunnel_auto_recover", {
+        paths: normalizeWorkspaceSelection(paths),
+        runtimeId: tunnel.runtimeId,
+        enabled: nextEnabled,
+      });
+
+      setPaths(loaded.paths);
+    } catch (error) {
+      setDashboard((current) =>
+        updateTunnelAutoRecoverInDashboard(current, tunnel.runtimeId, tunnel.autoRecoverEnabled),
+      );
+      showOperationToast({ kind: "error", summary: stringifyError(error) });
+    } finally {
+      setAutoRecoverUpdatingIds((current) => removeSelection(current, tunnel.runtimeId));
+    }
+  }
+
+  /**
    * ワークスペース履歴の指定行を永続設定から削除する
    */
   async function removeWorkspaceHistoryEntry(workspacePath: string): Promise<void> {
@@ -1534,6 +1570,7 @@ function App(): ReactElement {
               searchInputRef={searchInputRef}
               filters={filters}
               displayMode={tunnelDisplayMode}
+              autoRecoverUpdatingIds={autoRecoverUpdatingIds}
               onQueryInputChange={updateQueryInput}
               onFilterChange={updateFilter}
               onToggleTag={toggleTagFilter}
@@ -1554,6 +1591,7 @@ function App(): ReactElement {
               onStartTracked={(id) => void startSelected([id])}
               onStopTracked={(target) => void stopTracked(target)}
               onToggleFavorite={(tunnel) => void toggleTunnelFavorite(tunnel)}
+              onToggleAutoRecover={(tunnel) => void toggleTunnelAutoRecover(tunnel)}
               onEditTunnel={openEditTunnel}
               onDuplicateTunnel={openDuplicateTunnel}
               onRemoveTunnel={setDeleteTarget}
@@ -2061,6 +2099,7 @@ interface DashboardViewProps {
   searchInputRef: RefObject<HTMLInputElement | null>;
   filters: TunnelFilters;
   displayMode: TunnelDisplayMode;
+  autoRecoverUpdatingIds: Set<string>;
   isBusy: boolean;
   onQueryInputChange: (value: string) => void;
   onFilterChange: <K extends keyof TunnelFilters>(field: K, value: TunnelFilters[K]) => void;
@@ -2078,6 +2117,7 @@ interface DashboardViewProps {
   onStartTracked: (id: string) => void;
   onStopTracked: (target: OperationTarget) => void;
   onToggleFavorite: (tunnel: TunnelView) => void;
+  onToggleAutoRecover: (tunnel: TunnelView) => void;
   onEditTunnel: (tunnel: TunnelView) => void;
   onDuplicateTunnel: (tunnel: TunnelView) => void;
   onRemoveTunnel: (tunnel: TunnelView) => void;
@@ -2104,6 +2144,7 @@ function DashboardView({
   searchInputRef,
   filters,
   displayMode,
+  autoRecoverUpdatingIds,
   isBusy,
   onQueryInputChange,
   onFilterChange,
@@ -2121,6 +2162,7 @@ function DashboardView({
   onStartTracked,
   onStopTracked,
   onToggleFavorite,
+  onToggleAutoRecover,
   onEditTunnel,
   onDuplicateTunnel,
   onRemoveTunnel,
@@ -2182,6 +2224,7 @@ function DashboardView({
         selectedVisibleCount={selectedVisibleCount}
         runtimeNowUnixSeconds={runtimeNowUnixSeconds}
         favoriteUpdatingIds={favoriteUpdatingIds}
+        autoRecoverUpdatingIds={autoRecoverUpdatingIds}
         isBusy={isBusy}
         onSelectVisible={onSelectVisible}
         onDeselectVisible={onDeselectVisible}
@@ -2189,6 +2232,7 @@ function DashboardView({
         onStart={onStartTunnel}
         onStop={onStopTunnel}
         onToggleFavorite={onToggleFavorite}
+        onToggleAutoRecover={onToggleAutoRecover}
         onEdit={onEditTunnel}
         onDuplicate={onDuplicateTunnel}
         onRemove={onRemoveTunnel}
@@ -3254,6 +3298,7 @@ interface TunnelDeckProps {
   selectedVisibleCount: number;
   runtimeNowUnixSeconds: number;
   favoriteUpdatingIds: Set<string>;
+  autoRecoverUpdatingIds: Set<string>;
   isBusy: boolean;
   onSelectVisible: () => void;
   onDeselectVisible: () => void;
@@ -3261,6 +3306,7 @@ interface TunnelDeckProps {
   onStart: (id: string) => void;
   onStop: (id: string) => void;
   onToggleFavorite: (tunnel: TunnelView) => void;
+  onToggleAutoRecover: (tunnel: TunnelView) => void;
   onEdit: (tunnel: TunnelView) => void;
   onDuplicate: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
@@ -3283,6 +3329,7 @@ function TunnelDeck({
   selectedVisibleCount,
   runtimeNowUnixSeconds,
   favoriteUpdatingIds,
+  autoRecoverUpdatingIds,
   isBusy,
   onSelectVisible,
   onDeselectVisible,
@@ -3290,6 +3337,7 @@ function TunnelDeck({
   onStart,
   onStop,
   onToggleFavorite,
+  onToggleAutoRecover,
   onEdit,
   onDuplicate,
   onRemove,
@@ -3349,6 +3397,7 @@ function TunnelDeck({
         selectedVisibleCount={selectedVisibleCount}
         runtimeNowUnixSeconds={runtimeNowUnixSeconds}
         favoriteUpdatingIds={favoriteUpdatingIds}
+        autoRecoverUpdatingIds={autoRecoverUpdatingIds}
         isBusy={isBusy}
         onSelectVisible={onSelectVisible}
         onDeselectVisible={onDeselectVisible}
@@ -3356,6 +3405,7 @@ function TunnelDeck({
         onStart={onStart}
         onStop={onStop}
         onToggleFavorite={onToggleFavorite}
+        onToggleAutoRecover={onToggleAutoRecover}
         onEdit={onEdit}
         onDuplicate={onDuplicate}
         onRemove={onRemove}
@@ -3373,12 +3423,14 @@ function TunnelDeck({
           homePath={homePath}
           runtimeNowUnixSeconds={runtimeNowUnixSeconds}
           isFavoriteUpdating={favoriteUpdatingIds.has(tunnel.runtimeId)}
+          isAutoRecoverUpdating={autoRecoverUpdatingIds.has(tunnel.runtimeId)}
           checked={selectedIds.has(tunnel.runtimeId)}
           isBusy={isBusy}
           onToggle={onToggle}
           onStart={onStart}
           onStop={onStop}
           onToggleFavorite={onToggleFavorite}
+          onToggleAutoRecover={onToggleAutoRecover}
           onEdit={onEdit}
           onDuplicate={onDuplicate}
           onRemove={onRemove}
@@ -3395,6 +3447,7 @@ interface TunnelSlimListProps {
   selectedVisibleCount: number;
   runtimeNowUnixSeconds: number;
   favoriteUpdatingIds: Set<string>;
+  autoRecoverUpdatingIds: Set<string>;
   isBusy: boolean;
   onSelectVisible: () => void;
   onDeselectVisible: () => void;
@@ -3402,6 +3455,7 @@ interface TunnelSlimListProps {
   onStart: (id: string) => void;
   onStop: (id: string) => void;
   onToggleFavorite: (tunnel: TunnelView) => void;
+  onToggleAutoRecover: (tunnel: TunnelView) => void;
   onEdit: (tunnel: TunnelView) => void;
   onDuplicate: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
@@ -3417,6 +3471,7 @@ function TunnelSlimList({
   selectedVisibleCount,
   runtimeNowUnixSeconds,
   favoriteUpdatingIds,
+  autoRecoverUpdatingIds,
   isBusy,
   onSelectVisible,
   onDeselectVisible,
@@ -3424,6 +3479,7 @@ function TunnelSlimList({
   onStart,
   onStop,
   onToggleFavorite,
+  onToggleAutoRecover,
   onEdit,
   onDuplicate,
   onRemove,
@@ -3451,7 +3507,7 @@ function TunnelSlimList({
     <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       <Table variant="secondary">
         <Table.ScrollContainer>
-          <Table.Content aria-label="Configured tunnels" className="min-w-[64rem]">
+          <Table.Content aria-label="Configured tunnels" className="min-w-[70rem]">
             <Table.Header>
               <Table.Column className="w-12">
                 <SelectionCheckbox
@@ -3468,6 +3524,7 @@ function TunnelSlimList({
               <Table.Column>Remote</Table.Column>
               <Table.Column>SSH</Table.Column>
               <Table.Column>Source</Table.Column>
+              <Table.Column>Watch</Table.Column>
               <Table.Column className="text-right">Actions</Table.Column>
             </Table.Header>
             <Table.Body>
@@ -3478,12 +3535,14 @@ function TunnelSlimList({
                   query={query}
                   runtimeNowUnixSeconds={runtimeNowUnixSeconds}
                   isFavoriteUpdating={favoriteUpdatingIds.has(tunnel.runtimeId)}
+                  isAutoRecoverUpdating={autoRecoverUpdatingIds.has(tunnel.runtimeId)}
                   checked={selectedIds.has(tunnel.runtimeId)}
                   isBusy={isBusy}
                   onToggle={onToggle}
                   onStart={onStart}
                   onStop={onStop}
                   onToggleFavorite={onToggleFavorite}
+                  onToggleAutoRecover={onToggleAutoRecover}
                   onEdit={onEdit}
                   onDuplicate={onDuplicate}
                   onRemove={onRemove}
@@ -3502,12 +3561,14 @@ interface TunnelSlimRowProps {
   query: string;
   runtimeNowUnixSeconds: number;
   isFavoriteUpdating: boolean;
+  isAutoRecoverUpdating: boolean;
   checked: boolean;
   isBusy: boolean;
   onToggle: (id: string) => void;
   onStart: (id: string) => void;
   onStop: (id: string) => void;
   onToggleFavorite: (tunnel: TunnelView) => void;
+  onToggleAutoRecover: (tunnel: TunnelView) => void;
   onEdit: (tunnel: TunnelView) => void;
   onDuplicate: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
@@ -3521,12 +3582,14 @@ function TunnelSlimRow({
   query,
   runtimeNowUnixSeconds,
   isFavoriteUpdating,
+  isAutoRecoverUpdating,
   checked,
   isBusy,
   onToggle,
   onStart,
   onStop,
   onToggleFavorite,
+  onToggleAutoRecover,
   onEdit,
   onDuplicate,
   onRemove,
@@ -3578,6 +3641,15 @@ function TunnelSlimRow({
       </Table.Cell>
       <Table.Cell className="font-semibold text-foreground/70">
         <HighlightedText text={tunnel.source} query={highlightQuery} />
+      </Table.Cell>
+      <Table.Cell>
+        <AutoRecoverSwitch
+          tunnel={tunnel}
+          isUpdating={isAutoRecoverUpdating}
+          isBusy={isBusy}
+          onToggle={onToggleAutoRecover}
+          compact
+        />
       </Table.Cell>
       <Table.Cell>
         <div className="flex min-w-max items-center justify-end gap-1">
@@ -3666,12 +3738,14 @@ interface TunnelCardProps {
   homePath: string | null;
   runtimeNowUnixSeconds: number;
   isFavoriteUpdating: boolean;
+  isAutoRecoverUpdating: boolean;
   checked: boolean;
   isBusy: boolean;
   onToggle: (id: string) => void;
   onStart: (id: string) => void;
   onStop: (id: string) => void;
   onToggleFavorite: (tunnel: TunnelView) => void;
+  onToggleAutoRecover: (tunnel: TunnelView) => void;
   onEdit: (tunnel: TunnelView) => void;
   onDuplicate: (tunnel: TunnelView) => void;
   onRemove: (tunnel: TunnelView) => void;
@@ -3686,12 +3760,14 @@ function TunnelCard({
   homePath,
   runtimeNowUnixSeconds,
   isFavoriteUpdating,
+  isAutoRecoverUpdating,
   checked,
   isBusy,
   onToggle,
   onStart,
   onStop,
   onToggleFavorite,
+  onToggleAutoRecover,
   onEdit,
   onDuplicate,
   onRemove,
@@ -3765,6 +3841,13 @@ function TunnelCard({
           <MetaItem label="Grace" value={`${tunnel.timeouts.startGraceMilliseconds}ms`} />
         </div>
 
+        <AutoRecoverSwitch
+          tunnel={tunnel}
+          isUpdating={isAutoRecoverUpdating}
+          isBusy={isBusy}
+          onToggle={onToggleAutoRecover}
+        />
+
         <div className="mt-auto flex items-center justify-end gap-2 pt-1">
           <HeroButton
             type="button"
@@ -3813,6 +3896,51 @@ function TunnelCard({
         </div>
       </div>
     </Card>
+  );
+}
+
+interface AutoRecoverSwitchProps {
+  tunnel: TunnelView;
+  isUpdating: boolean;
+  isBusy: boolean;
+  onToggle: (tunnel: TunnelView) => void;
+  compact?: boolean;
+}
+
+/**
+ * トンネル単位の自動復旧トグルを表示する
+ */
+function AutoRecoverSwitch({
+  tunnel,
+  isUpdating,
+  isBusy,
+  onToggle,
+  compact = false,
+}: AutoRecoverSwitchProps): ReactElement {
+  const label = `${tunnel.id} の Auto recover を切り替え`;
+  const className = compact
+    ? "justify-center"
+    : "rounded-lg border border-border bg-muted/35 px-2.5 py-2";
+
+  return (
+    <Switch
+      size="sm"
+      isSelected={tunnel.autoRecoverEnabled}
+      isDisabled={isBusy}
+      onChange={() => {
+        if (!isUpdating) {
+          onToggle(tunnel);
+        }
+      }}
+      className={className}
+    >
+      <Switch.Content className={compact ? "sr-only" : undefined}>
+        <span className="text-xs font-semibold text-foreground/70">Auto recover</span>
+      </Switch.Content>
+      <Switch.Control aria-busy={isUpdating} aria-label={label}>
+        <Switch.Thumb />
+      </Switch.Control>
+    </Switch>
   );
 }
 
@@ -5655,6 +5783,35 @@ function updateTunnelFavoriteInDashboard(
 
     changed = true;
     return { ...tunnel, isFavorite };
+  });
+
+  if (!changed) {
+    return dashboard;
+  }
+
+  return { ...dashboard, tunnels };
+}
+
+/**
+ * ダッシュボード内の対象トンネルだけ自動復旧状態を更新する
+ */
+function updateTunnelAutoRecoverInDashboard(
+  dashboard: DashboardState | null,
+  runtimeId: string,
+  enabled: boolean,
+): DashboardState | null {
+  if (dashboard === null) {
+    return dashboard;
+  }
+
+  let changed = false;
+  const tunnels = dashboard.tunnels.map((tunnel) => {
+    if (tunnel.runtimeId !== runtimeId || tunnel.autoRecoverEnabled === enabled) {
+      return tunnel;
+    }
+
+    changed = true;
+    return { ...tunnel, autoRecoverEnabled: enabled };
   });
 
   if (!changed) {

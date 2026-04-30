@@ -462,11 +462,13 @@ function SwitchContent({
 function SwitchControl({
   children,
   className,
+  ...props
 }: React.HTMLAttributes<HTMLButtonElement>): React.ReactElement {
   const context = useRequiredContext(SwitchContext, "Switch.Control");
 
   return (
     <RadixSwitchPrimitive.Root
+      {...props}
       checked={context.selected}
       className={cn(
         "peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-muted",

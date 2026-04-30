@@ -3,9 +3,9 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-#[cfg(target_os = "macos")]
-use std::{thread, time::Duration};
 
 use fwd_deck_core::{
     ConfigEditError, ConfigLoadError, ConfigPaths, ConfigSourceKind, EffectiveConfig, ProcessState,
@@ -13,9 +13,9 @@ use fwd_deck_core::{
     TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport,
     add_tunnel_to_config_file, default_global_config_path, default_local_config_path,
     default_state_file_path, format_path_for_display, load_effective_config,
-    remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel, start_tunnels_with_progress,
-    stop_tunnel, tag_is_valid, tunnel_runtime_id, tunnel_statuses, update_tunnel_in_config_file,
-    validate_config,
+    remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel, start_tunnel,
+    start_tunnels_with_progress, stop_tunnel, tag_is_valid, tunnel_runtime_id, tunnel_statuses,
+    update_tunnel_in_config_file, validate_config,
 };
 #[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
@@ -38,11 +38,17 @@ use tauri_plugin_dialog::{
 use thiserror::Error;
 
 const APP_PREFERENCES_FILE_NAME: &str = "preferences.toml";
-const APP_PREFERENCES_VERSION: u32 = 4;
+const APP_PREFERENCES_VERSION: u32 = 5;
 const WORKSPACE_HISTORY_LIMIT: usize = 10;
 const WORKSPACE_STATES_DIR: &str = "workspace-states";
 const STATE_FILE_NAME: &str = "state.toml";
 const START_TUNNELS_PARALLELISM: usize = 4;
+const AUTO_RECOVER_INTERVAL_SECONDS: u64 = 5;
+const AUTO_RECOVER_CONFIRMATION_SECONDS: u64 = 10;
+const AUTO_RECOVER_FIRST_BACKOFF_SECONDS: u64 = 5;
+const AUTO_RECOVER_SECOND_BACKOFF_SECONDS: u64 = 30;
+const AUTO_RECOVER_MAX_BACKOFF_SECONDS: u64 = 300;
+const AUTO_RECOVER_SYSTEM_FAILURE_ID: &str = "auto-recover";
 const OPERATION_PROGRESS_EVENT: &str = "operation-progress";
 const TRAY_OPERATION_RESULT_EVENT: &str = "tray-operation-result";
 const OPEN_SETTINGS_EVENT: &str = "open-settings";
@@ -61,9 +67,11 @@ const TRAY_MENU_CURRENT_WORKSPACE: &str = "tray-current-workspace";
 const TRAY_MENU_WORKSPACE_BROWSE: &str = "tray-workspace-browse";
 const TRAY_MENU_NO_TUNNELS: &str = "tray-no-tunnels";
 const TRAY_MENU_NO_FAVORITE_TUNNELS: &str = "tray-no-favorite-tunnels";
+const TRAY_MENU_NO_AUTO_RECOVER_TUNNELS: &str = "tray-no-auto-recover-tunnels";
 const TRAY_MENU_INVALID_CONFIG: &str = "tray-invalid-config";
 const TRAY_TUNNEL_ITEM_PREFIX: &str = "tray-tunnel-";
 const TRAY_FAVORITE_TUNNEL_ITEM_PREFIX: &str = "tray-favorite-tunnel-";
+const TRAY_AUTO_RECOVER_TUNNEL_ITEM_PREFIX: &str = "tray-auto-recover-tunnel-";
 const TRAY_WORKSPACE_ITEM_PREFIX: &str = "tray-workspace-";
 const TRAY_OPERATION_ID: &str = "tray";
 const APP_DISPLAY_NAME: &str = "Fwd Deck";
@@ -82,6 +90,7 @@ fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(OperationLockState::default())
+        .manage(AutoRecoverState::default())
         .manage(TrayState::default())
         .menu(build_app_menu)
         .on_menu_event(handle_app_menu_event)
@@ -89,6 +98,7 @@ fn main() {
             set_runtime_dock_icon();
             initialize_tray(app.handle())
                 .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
+            start_auto_recover_worker(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -101,6 +111,7 @@ fn main() {
             update_tunnel_entry,
             remove_tunnel_entry,
             set_tunnel_favorite,
+            set_tunnel_auto_recover,
             remove_workspace_history_entry,
             refresh_tray_menu
         ])
@@ -125,6 +136,10 @@ fn set_runtime_application_name() {}
 /// start / stop 操作の同時実行を防ぐ状態を保持する
 #[derive(Debug, Default)]
 struct OperationLockState(Mutex<()>);
+
+/// 自動復旧 worker の実行状態を保持する
+#[derive(Debug, Default)]
+struct AutoRecoverState(Mutex<AutoRecoverWorkerState>);
 
 /// トレイアイコンと動的メニュー操作を保持する
 #[derive(Default)]
@@ -202,6 +217,7 @@ struct TrayTunnelAction {
 enum TrayTunnelOperation {
     Start,
     Stop,
+    SetAutoRecover { enabled: bool },
 }
 
 /// トレイメニューへ表示するトンネル項目を表現する
@@ -418,8 +434,8 @@ fn run_tray_tunnel_action(
     action: TrayTunnelAction,
 ) -> Result<OperationReport, AppError> {
     let target = OperationTargetInput {
-        id: action.id,
-        runtime_id: action.runtime_id,
+        id: action.id.clone(),
+        runtime_id: action.runtime_id.clone(),
         runtime_scope: action.runtime_scope,
     };
 
@@ -428,6 +444,21 @@ fn run_tray_tunnel_action(
             start_tunnels_inner(app, None, vec![target], TRAY_OPERATION_ID)
         }
         TrayTunnelOperation::Stop => stop_tunnels_inner(app, None, vec![target], TRAY_OPERATION_ID),
+        TrayTunnelOperation::SetAutoRecover { enabled } => {
+            let runtime_id = action.runtime_id.as_deref().ok_or_else(|| {
+                AppError::InvalidInput(format!("未定義の runtime ID です: {}", action.id))
+            })?;
+
+            set_tunnel_auto_recover_inner(app, None, runtime_id, enabled)?;
+
+            Ok(OperationReport {
+                succeeded: vec![OperationSuccessView {
+                    id: action.id,
+                    message: auto_recover_toggle_message(enabled),
+                }],
+                failed: Vec::new(),
+            })
+        }
     }
 }
 
@@ -651,6 +682,8 @@ fn build_tray_menu(
         &validation,
         &runtime_paths.preferences,
     );
+    let auto_recover_tunnel_items =
+        tray_auto_recover_tunnel_menu_items(&config, &runtime_paths.preferences);
     let workspace_items = tray_workspace_menu_items(&runtime_paths.preferences);
     let icon_kind = tray_icon_kind(&statuses);
     let mut actions = TrayMenuActions::default();
@@ -668,6 +701,7 @@ fn build_tray_menu(
     let quit = MenuItem::with_id(app, TRAY_MENU_QUIT, "Quit", true, None::<&str>)?;
     let favorites = Submenu::new(app, "Favorites", true)?;
     let tunnels = Submenu::new(app, "Tunnels", true)?;
+    let auto_recover = Submenu::new(app, "Auto recover", true)?;
     let workspaces = Submenu::new(app, "Workspaces", true)?;
 
     append_tray_tunnel_menu_items(
@@ -684,6 +718,14 @@ fn build_tray_menu(
         &mut actions,
         tunnel_items,
         TRAY_MENU_NO_TUNNELS,
+        "No tunnels configured",
+    )?;
+    append_tray_tunnel_menu_items(
+        app,
+        &auto_recover,
+        &mut actions,
+        auto_recover_tunnel_items,
+        TRAY_MENU_NO_AUTO_RECOVER_TUNNELS,
         "No tunnels configured",
     )?;
 
@@ -728,6 +770,7 @@ fn build_tray_menu(
 
     menu.append(&favorites)?;
     menu.append(&tunnels)?;
+    menu.append(&auto_recover)?;
     menu.append(&refresh)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&workspaces)?;
@@ -828,6 +871,34 @@ fn tray_favorite_tunnel_menu_items(
         TRAY_FAVORITE_TUNNEL_ITEM_PREFIX,
         |runtime_id| favorite_runtime_ids.contains(runtime_id),
     )
+}
+
+/// 自動復旧トグル用のトレイメニュー項目を生成する
+fn tray_auto_recover_tunnel_menu_items(
+    config: &EffectiveConfig,
+    preferences: &AppPreferences,
+) -> Vec<TrayTunnelMenuItem> {
+    let auto_recover_runtime_ids = preferences
+        .auto_recover_tunnel_runtime_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut items = config
+        .tunnels
+        .iter()
+        .enumerate()
+        .map(|(index, resolved)| {
+            let runtime_id = runtime_id_for_resolved_tunnel(resolved);
+            let is_enabled = auto_recover_runtime_ids.contains(runtime_id.as_str());
+            let sort_key = tray_tunnel_sort_key(resolved, &runtime_id);
+            let item = tray_auto_recover_tunnel_menu_item(index, resolved, runtime_id, is_enabled);
+
+            (sort_key, item)
+        })
+        .collect::<Vec<_>>();
+
+    items.sort_by(|left, right| left.0.cmp(&right.0));
+    items.into_iter().map(|(_, item)| item).collect()
 }
 
 /// 条件に一致する設定済みトンネルをトレイメニュー項目へ変換する
@@ -939,6 +1010,7 @@ fn tray_tunnel_menu_item(
     let runtime_scope = match operation {
         TrayTunnelOperation::Start => None,
         TrayTunnelOperation::Stop => status.map(|status| status.runtime_scope),
+        TrayTunnelOperation::SetAutoRecover { .. } => None,
     };
     let runtime_id = runtime_id_for_resolved_tunnel(resolved);
 
@@ -952,6 +1024,29 @@ fn tray_tunnel_menu_item(
             runtime_id: Some(runtime_id),
             runtime_scope,
             operation,
+        },
+    }
+}
+
+/// 1 件のトンネルを自動復旧トグル用のトレイメニュー項目へ変換する
+fn tray_auto_recover_tunnel_menu_item(
+    index: usize,
+    resolved: &ResolvedTunnelConfig,
+    runtime_id: String,
+    is_enabled: bool,
+) -> TrayTunnelMenuItem {
+    TrayTunnelMenuItem {
+        menu_id: format!("{TRAY_AUTO_RECOVER_TUNNEL_ITEM_PREFIX}{index}"),
+        label: tray_tunnel_label(&resolved.tunnel.name, resolved.source.kind, false),
+        checked: is_enabled,
+        enabled: true,
+        action: TrayTunnelAction {
+            id: resolved.tunnel.name.clone(),
+            runtime_id: Some(runtime_id),
+            runtime_scope: None,
+            operation: TrayTunnelOperation::SetAutoRecover {
+                enabled: !is_enabled,
+            },
         },
     }
 }
@@ -1507,6 +1602,7 @@ struct AppPreferences {
     hide_dock_icon_when_window_hidden: bool,
     auto_stop_tunnels_on_quit: bool,
     favorite_tunnel_runtime_ids: Vec<String>,
+    auto_recover_tunnel_runtime_ids: Vec<String>,
 }
 
 impl Default for AppPreferences {
@@ -1521,6 +1617,7 @@ impl Default for AppPreferences {
             hide_dock_icon_when_window_hidden: false,
             auto_stop_tunnels_on_quit: false,
             favorite_tunnel_runtime_ids: Vec::new(),
+            auto_recover_tunnel_runtime_ids: Vec::new(),
         }
     }
 }
@@ -1596,6 +1693,7 @@ struct TunnelView {
     id: String,
     runtime_id: String,
     is_favorite: bool,
+    auto_recover_enabled: bool,
     description: Option<String>,
     tags: Vec<String>,
     local_host: String,
@@ -1790,6 +1888,99 @@ enum OperationOutcome {
     Succeeded(OperationSuccessView),
     Failed(OperationFailureView),
     Skipped,
+}
+
+/// 自動復旧 worker の監視状態を保持する
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AutoRecoverWorkerState {
+    notification: AutoRecoverNotificationState,
+    pending_confirmations: HashMap<String, AutoRecoverPendingConfirmation>,
+    backoffs: HashMap<String, AutoRecoverBackoff>,
+}
+
+impl AutoRecoverWorkerState {
+    /// 指定 runtime ID の確認待ち、バックオフ、通知抑制を破棄する
+    fn reset_runtime(&mut self, runtime_id: &str) {
+        self.pending_confirmations.remove(runtime_id);
+        self.backoffs.remove(runtime_id);
+        self.notification.clear_failure_notifications(runtime_id);
+    }
+}
+
+/// 自動復旧の重複失敗通知を抑制する状態を保持する
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AutoRecoverNotificationState {
+    notified_failure_keys: HashSet<String>,
+}
+
+impl AutoRecoverNotificationState {
+    /// 失敗通知が未通知の場合のみ記録する
+    fn insert_failure_notification(&mut self, failure: &AutoRecoverOperationFailure) -> bool {
+        self.notified_failure_keys
+            .insert(auto_recover_failure_key(failure))
+    }
+
+    /// 復旧済み runtime ID の過去失敗通知を再通知可能に戻す
+    fn clear_failure_notifications(&mut self, runtime_id: &str) {
+        self.notified_failure_keys
+            .remove(&auto_recover_runtime_failure_key(runtime_id));
+    }
+}
+
+/// 自動復旧後の状態確認待ちを表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AutoRecoverPendingConfirmation {
+    id: String,
+    runtime_scope: RuntimeScope,
+    confirm_after_unix_seconds: u64,
+}
+
+/// 自動復旧の再試行待ちを表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AutoRecoverBackoff {
+    failure_count: u32,
+    retry_after_unix_seconds: u64,
+}
+
+/// 自動復旧で再起動する stale トンネルを表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AutoRecoverTarget {
+    id: String,
+    runtime_id: String,
+    runtime_scope: RuntimeScope,
+    state_path: PathBuf,
+    tunnel: ResolvedTunnelConfig,
+}
+
+/// 自動復旧 worker の操作結果を表現する
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AutoRecoverReport {
+    succeeded: Vec<AutoRecoverOperationSuccess>,
+    failed: Vec<AutoRecoverOperationFailure>,
+}
+
+impl AutoRecoverReport {
+    /// 別レポートの結果を末尾へ追加する
+    fn extend(&mut self, other: Self) {
+        self.succeeded.extend(other.succeeded);
+        self.failed.extend(other.failed);
+    }
+}
+
+/// 確認済みの自動復旧成功を表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AutoRecoverOperationSuccess {
+    id: String,
+    runtime_id: String,
+    message: String,
+}
+
+/// 自動復旧の失敗を表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AutoRecoverOperationFailure {
+    id: String,
+    runtime_id: String,
+    message: String,
 }
 
 /// runtime scope を付与したトンネル状態を表現する
@@ -2088,6 +2279,20 @@ fn set_tunnel_favorite(
     command_result(result)
 }
 
+/// トンネルの自動復旧状態を保存する
+#[tauri::command]
+fn set_tunnel_auto_recover(
+    app: tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    runtime_id: String,
+    enabled: bool,
+) -> Result<DashboardState, String> {
+    let result = set_tunnel_auto_recover_inner(&app, paths, &runtime_id, enabled);
+    let _ = rebuild_tray_menu(&app);
+
+    command_result(result)
+}
+
 /// ワークスペース履歴から指定パスを削除する
 #[tauri::command]
 fn remove_workspace_history_entry(
@@ -2100,6 +2305,28 @@ fn remove_workspace_history_entry(
 /// command の内部エラーをフロントエンド用文字列へ変換する
 fn command_result<T>(result: Result<T, AppError>) -> Result<T, String> {
     result.map_err(|error| error.to_string())
+}
+
+/// 指定 runtime ID の自動復旧 worker 状態を初期化する
+fn reset_auto_recover_runtime_state(app: &tauri::AppHandle, runtime_id: &str) {
+    if let Some(state) = app.try_state::<AutoRecoverState>() {
+        state
+            .0
+            .lock()
+            .expect("auto recover state should not be poisoned")
+            .reset_runtime(runtime_id);
+    }
+}
+
+/// 指定 runtime ID 一覧の自動復旧 worker 状態を初期化する
+fn reset_auto_recover_runtime_states<I>(app: &tauri::AppHandle, runtime_ids: I)
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    for runtime_id in runtime_ids {
+        reset_auto_recover_runtime_state(app, runtime_id.as_ref());
+    }
 }
 
 /// ダッシュボード状態を組み立てる
@@ -2154,7 +2381,11 @@ fn start_tunnels_inner(
 
     ensure_valid_config(&config)?;
     let mut progress = OperationProgressEmitter::new(app, operation_id, targets.len());
-    run_start_tunnel_operations(&runtime_paths, &config, &targets, &mut progress)
+    let report = run_start_tunnel_operations(&runtime_paths, &config, &targets, &mut progress)?;
+    let reset_runtime_ids = auto_recover_runtime_ids_for_operation_targets(&config, &targets);
+    reset_auto_recover_runtime_states(app, reset_runtime_ids);
+
+    Ok(report)
 }
 
 /// トンネル停止処理を実行する
@@ -2167,8 +2398,10 @@ fn stop_tunnels_inner(
     let runtime_paths = resolve_runtime_paths(app, paths)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
     let mut progress = OperationProgressEmitter::new(app, operation_id, targets.len());
+    let reset_runtime_ids =
+        auto_recover_runtime_ids_for_stop_operation_targets(&runtime_paths, &config, &targets);
 
-    run_tunnel_operations_with_progress(
+    let report = run_tunnel_operations_with_progress(
         &targets,
         |target| {
             let (runtime_id, state_path) =
@@ -2177,7 +2410,10 @@ fn stop_tunnels_inner(
             stop_tunnel_for_app(&runtime_id, &state_path)
         },
         |_target| progress.advance(),
-    )
+    )?;
+    reset_auto_recover_runtime_states(app, reset_runtime_ids);
+
+    Ok(report)
 }
 
 /// トンネル追加処理を実行する
@@ -2236,15 +2472,27 @@ fn update_tunnel_entry_inner(
     let next_runtime_id = tunnel_runtime_id(kind, &path, &tunnel.name);
     update_tunnel_in_config_file(&path, kind, id, tunnel)?;
 
-    if let Some(previous_runtime_id) = previous_runtime_id
-        && replace_favorite_tunnel_runtime_id(
+    if let Some(previous_runtime_id) = previous_runtime_id {
+        let mut preferences_changed = false;
+        preferences_changed |= replace_favorite_tunnel_runtime_id(
             &mut runtime_paths.preferences,
             &previous_runtime_id,
-            next_runtime_id,
-        )
-    {
-        write_app_preferences(app, &runtime_paths.preferences)?;
+            next_runtime_id.clone(),
+        );
+        preferences_changed |= replace_auto_recover_tunnel_runtime_id(
+            &mut runtime_paths.preferences,
+            &previous_runtime_id,
+            next_runtime_id.clone(),
+        );
+
+        if preferences_changed {
+            write_app_preferences(app, &runtime_paths.preferences)?;
+        }
+
+        reset_auto_recover_runtime_state(app, &previous_runtime_id);
     }
+
+    reset_auto_recover_runtime_state(app, &next_runtime_id);
 
     load_dashboard_inner(app, paths)
 }
@@ -2264,10 +2512,18 @@ fn remove_tunnel_entry_inner(
 
     remove_tunnel_from_config_file(&path, kind, id)?;
 
-    if let Some(runtime_id) = runtime_id
-        && remove_favorite_tunnel_runtime_id(&mut runtime_paths.preferences, &runtime_id)
-    {
-        write_app_preferences(app, &runtime_paths.preferences)?;
+    if let Some(runtime_id) = runtime_id {
+        let mut preferences_changed = false;
+        preferences_changed |=
+            remove_favorite_tunnel_runtime_id(&mut runtime_paths.preferences, &runtime_id);
+        preferences_changed |=
+            remove_auto_recover_tunnel_runtime_id(&mut runtime_paths.preferences, &runtime_id);
+
+        if preferences_changed {
+            write_app_preferences(app, &runtime_paths.preferences)?;
+        }
+
+        reset_auto_recover_runtime_state(app, &runtime_id);
     }
 
     load_dashboard_inner(app, paths)
@@ -2306,6 +2562,60 @@ fn set_tunnel_favorite_for_app_config_dir(
 
     ensure_configured_runtime_id(&config, runtime_id)?;
     set_favorite_tunnel_runtime_id(&mut runtime_paths.preferences, runtime_id, is_favorite);
+    write_preferences_file_if_changed(
+        &preferences_path,
+        &original_preferences,
+        &runtime_paths.preferences,
+    )?;
+
+    let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
+    let validation = validate_config(&config);
+
+    Ok(build_dashboard_state(
+        runtime_paths,
+        config,
+        statuses,
+        validation,
+    ))
+}
+
+/// トンネルの自動復旧状態を保存してダッシュボードを再構築する
+fn set_tunnel_auto_recover_inner(
+    app: &tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    runtime_id: &str,
+    enabled: bool,
+) -> Result<DashboardState, AppError> {
+    let app_config_dir = app_config_dir(app)?;
+
+    let dashboard =
+        set_tunnel_auto_recover_for_app_config_dir(&app_config_dir, paths, runtime_id, enabled)?;
+    reset_auto_recover_runtime_state(app, runtime_id);
+
+    Ok(dashboard)
+}
+
+/// アプリ設定ディレクトリを起点にトンネルの自動復旧状態を保存する
+fn set_tunnel_auto_recover_for_app_config_dir(
+    app_config_dir: &Path,
+    paths: Option<WorkspaceSelection>,
+    runtime_id: &str,
+    enabled: bool,
+) -> Result<DashboardState, AppError> {
+    let preferences_path = preferences_path_from_app_config_dir(app_config_dir);
+    let mut preferences = read_preferences_file(&preferences_path)?;
+    let original_preferences = preferences.clone();
+
+    normalize_loaded_preferences(&mut preferences);
+    if let Some(selection) = paths {
+        apply_workspace_selection(&mut preferences, selection)?;
+    }
+
+    let mut runtime_paths = runtime_paths_from_preferences(app_config_dir, preferences)?;
+    let config = load_effective_config(&runtime_paths.config_paths)?;
+
+    ensure_configured_runtime_id(&config, runtime_id)?;
+    set_auto_recover_tunnel_runtime_id(&mut runtime_paths.preferences, runtime_id, enabled);
     write_preferences_file_if_changed(
         &preferences_path,
         &original_preferences,
@@ -2559,11 +2869,12 @@ fn normalize_loaded_preferences(preferences: &mut AppPreferences) {
     preferences
         .workspace_history
         .truncate(WORKSPACE_HISTORY_LIMIT);
-    normalize_favorite_tunnel_runtime_ids(&mut preferences.favorite_tunnel_runtime_ids);
+    normalize_stored_tunnel_runtime_ids(&mut preferences.favorite_tunnel_runtime_ids);
+    normalize_stored_tunnel_runtime_ids(&mut preferences.auto_recover_tunnel_runtime_ids);
 }
 
-/// お気に入り runtime ID の保存形式を正規化する
-fn normalize_favorite_tunnel_runtime_ids(runtime_ids: &mut Vec<String>) {
+/// 保存済み runtime ID の空値と重複を取り除く
+fn normalize_stored_tunnel_runtime_ids(runtime_ids: &mut Vec<String>) {
     let mut seen = HashSet::new();
 
     runtime_ids
@@ -2892,6 +3203,12 @@ fn build_dashboard_state(
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
+    let auto_recover_runtime_ids = runtime_paths
+        .preferences
+        .auto_recover_tunnel_runtime_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
     let status_by_key = statuses
         .iter()
         .map(|status| (runtime_status_lookup_key(status), status))
@@ -2908,6 +3225,7 @@ fn build_dashboard_state(
             tunnel_view(
                 resolved,
                 favorite_runtime_ids.contains(runtime_id.as_str()),
+                auto_recover_runtime_ids.contains(runtime_id.as_str()),
                 status_by_key.get(&runtime_key).copied(),
             )
         })
@@ -2946,42 +3264,22 @@ fn build_dashboard_state(
     }
 }
 
-/// runtime ID がお気に入り設定に存在するかを判定する
-fn favorite_tunnel_runtime_id_exists(preferences: &AppPreferences, runtime_id: &str) -> bool {
-    preferences
-        .favorite_tunnel_runtime_ids
-        .iter()
-        .any(|existing| existing == runtime_id)
-}
-
 /// お気に入り runtime ID を追加または削除する
 fn set_favorite_tunnel_runtime_id(
     preferences: &mut AppPreferences,
     runtime_id: &str,
     is_favorite: bool,
 ) -> bool {
-    if is_favorite {
-        if favorite_tunnel_runtime_id_exists(preferences, runtime_id) {
-            return false;
-        }
-
-        preferences
-            .favorite_tunnel_runtime_ids
-            .push(runtime_id.to_owned());
-        return true;
-    }
-
-    remove_favorite_tunnel_runtime_id(preferences, runtime_id)
+    set_stored_tunnel_runtime_id(
+        &mut preferences.favorite_tunnel_runtime_ids,
+        runtime_id,
+        is_favorite,
+    )
 }
 
 /// お気に入り runtime ID を削除する
 fn remove_favorite_tunnel_runtime_id(preferences: &mut AppPreferences, runtime_id: &str) -> bool {
-    let original_len = preferences.favorite_tunnel_runtime_ids.len();
-    preferences
-        .favorite_tunnel_runtime_ids
-        .retain(|existing| existing != runtime_id);
-
-    preferences.favorite_tunnel_runtime_ids.len() != original_len
+    remove_stored_tunnel_runtime_id(&mut preferences.favorite_tunnel_runtime_ids, runtime_id)
 }
 
 /// お気に入り runtime ID を新しい値へ引き継ぐ
@@ -2990,11 +3288,89 @@ fn replace_favorite_tunnel_runtime_id(
     previous_runtime_id: &str,
     next_runtime_id: String,
 ) -> bool {
-    if !remove_favorite_tunnel_runtime_id(preferences, previous_runtime_id) {
+    replace_stored_tunnel_runtime_id(
+        &mut preferences.favorite_tunnel_runtime_ids,
+        previous_runtime_id,
+        next_runtime_id,
+    )
+}
+
+/// 自動復旧 runtime ID を追加または削除する
+fn set_auto_recover_tunnel_runtime_id(
+    preferences: &mut AppPreferences,
+    runtime_id: &str,
+    enabled: bool,
+) -> bool {
+    set_stored_tunnel_runtime_id(
+        &mut preferences.auto_recover_tunnel_runtime_ids,
+        runtime_id,
+        enabled,
+    )
+}
+
+/// 自動復旧 runtime ID を削除する
+fn remove_auto_recover_tunnel_runtime_id(
+    preferences: &mut AppPreferences,
+    runtime_id: &str,
+) -> bool {
+    remove_stored_tunnel_runtime_id(&mut preferences.auto_recover_tunnel_runtime_ids, runtime_id)
+}
+
+/// 自動復旧 runtime ID を新しい値へ引き継ぐ
+fn replace_auto_recover_tunnel_runtime_id(
+    preferences: &mut AppPreferences,
+    previous_runtime_id: &str,
+    next_runtime_id: String,
+) -> bool {
+    replace_stored_tunnel_runtime_id(
+        &mut preferences.auto_recover_tunnel_runtime_ids,
+        previous_runtime_id,
+        next_runtime_id,
+    )
+}
+
+/// 保存済み runtime ID が存在するかを判定する
+fn stored_tunnel_runtime_id_exists(runtime_ids: &[String], runtime_id: &str) -> bool {
+    runtime_ids.iter().any(|existing| existing == runtime_id)
+}
+
+/// 保存済み runtime ID を追加または削除する
+fn set_stored_tunnel_runtime_id(
+    runtime_ids: &mut Vec<String>,
+    runtime_id: &str,
+    enabled: bool,
+) -> bool {
+    if enabled {
+        if stored_tunnel_runtime_id_exists(runtime_ids, runtime_id) {
+            return false;
+        }
+
+        runtime_ids.push(runtime_id.to_owned());
+        return true;
+    }
+
+    remove_stored_tunnel_runtime_id(runtime_ids, runtime_id)
+}
+
+/// 保存済み runtime ID を削除する
+fn remove_stored_tunnel_runtime_id(runtime_ids: &mut Vec<String>, runtime_id: &str) -> bool {
+    let original_len = runtime_ids.len();
+    runtime_ids.retain(|existing| existing != runtime_id);
+
+    runtime_ids.len() != original_len
+}
+
+/// 保存済み runtime ID を新しい値へ引き継ぐ
+fn replace_stored_tunnel_runtime_id(
+    runtime_ids: &mut Vec<String>,
+    previous_runtime_id: &str,
+    next_runtime_id: String,
+) -> bool {
+    if !remove_stored_tunnel_runtime_id(runtime_ids, previous_runtime_id) {
         return false;
     }
 
-    set_favorite_tunnel_runtime_id(preferences, &next_runtime_id, true)
+    set_stored_tunnel_runtime_id(runtime_ids, &next_runtime_id, true)
         || previous_runtime_id != next_runtime_id
 }
 
@@ -3011,16 +3387,23 @@ fn configured_tunnel_runtime_id(
         .map(runtime_id_for_resolved_tunnel)
 }
 
+/// runtime ID に対応する設定済みトンネルを取得する
+fn find_tunnel_by_runtime_id<'a>(
+    config: &'a EffectiveConfig,
+    runtime_id: &str,
+) -> Option<&'a ResolvedTunnelConfig> {
+    config
+        .tunnels
+        .iter()
+        .find(|resolved| runtime_id_for_resolved_tunnel(resolved) == runtime_id)
+}
+
 /// runtime ID が現在の設定済みトンネルに存在することを検証する
 fn ensure_configured_runtime_id(
     config: &EffectiveConfig,
     runtime_id: &str,
 ) -> Result<(), AppError> {
-    if config
-        .tunnels
-        .iter()
-        .any(|resolved| runtime_id_for_resolved_tunnel(resolved) == runtime_id)
-    {
+    if find_tunnel_by_runtime_id(config, runtime_id).is_some() {
         return Ok(());
     }
 
@@ -3113,6 +3496,7 @@ fn validation_view(report: ValidationReport) -> ValidationView {
 fn tunnel_view(
     resolved: &ResolvedTunnelConfig,
     is_favorite: bool,
+    auto_recover_enabled: bool,
     status: Option<&ScopedRuntimeStatus>,
 ) -> TunnelView {
     let tunnel = &resolved.tunnel;
@@ -3121,6 +3505,7 @@ fn tunnel_view(
         id: tunnel.name.clone(),
         runtime_id: runtime_id_for_resolved_tunnel(resolved),
         is_favorite,
+        auto_recover_enabled,
         description: tunnel.description.clone(),
         tags: tunnel.tags.clone(),
         local_host: tunnel.effective_local_host().to_owned(),
@@ -3465,6 +3850,39 @@ fn resolve_configured_tunnel_target<'a>(
         .ok_or_else(|| AppError::InvalidInput(format!("未定義のトンネル name です: {}", target.id)))
 }
 
+/// 手動開始対象に対応する runtime ID を取得する
+fn auto_recover_runtime_ids_for_operation_targets(
+    config: &EffectiveConfig,
+    targets: &[OperationTargetInput],
+) -> Vec<String> {
+    targets
+        .iter()
+        .filter_map(|target| {
+            resolve_configured_tunnel_target(config, target)
+                .ok()
+                .map(runtime_id_for_resolved_tunnel)
+        })
+        .collect()
+}
+
+/// 手動停止対象に対応する runtime ID を取得する
+fn auto_recover_runtime_ids_for_stop_operation_targets(
+    paths: &RuntimePaths,
+    config: &EffectiveConfig,
+    targets: &[OperationTargetInput],
+) -> Vec<String> {
+    targets
+        .iter()
+        .filter_map(|target| {
+            target.runtime_id.clone().or_else(|| {
+                resolve_stop_operation_target(paths, config, target)
+                    .ok()
+                    .map(|(runtime_id, _state_path)| runtime_id)
+            })
+        })
+        .collect()
+}
+
 /// bare name 指定時の優先順位に従って設定済みトンネルを取得する
 fn find_configured_tunnel_by_name<'a>(
     config: &'a EffectiveConfig,
@@ -3569,6 +3987,428 @@ fn start_tunnel_result_for_app(
         }
         Err(error) => Err(AppError::Runtime(error)),
     }
+}
+
+/// 自動復旧 worker をバックグラウンドで開始する
+fn start_auto_recover_worker(app: tauri::AppHandle) {
+    thread::spawn(move || {
+        let interval = Duration::from_secs(AUTO_RECOVER_INTERVAL_SECONDS);
+
+        loop {
+            thread::sleep(interval);
+            run_auto_recover_worker_cycle(&app);
+        }
+    });
+}
+
+/// 自動復旧 worker の監視周期 1 回分を実行する
+fn run_auto_recover_worker_cycle(app: &tauri::AppHandle) {
+    let operation_lock = app.state::<OperationLockState>();
+    let auto_recover_state = app.state::<AutoRecoverState>();
+    let now = current_unix_seconds_for_app();
+    let result = with_operation_lock(&operation_lock, || {
+        let mut worker_state = auto_recover_state
+            .0
+            .lock()
+            .expect("auto recover state should not be poisoned");
+
+        auto_recover_current_stale_tunnels(app, &mut worker_state, now)
+    });
+
+    let _ = rebuild_tray_menu(app);
+
+    let mut worker_state = auto_recover_state
+        .0
+        .lock()
+        .expect("auto recover state should not be poisoned");
+    let event = match result {
+        Ok(report) => auto_recover_notification_event(&mut worker_state, report),
+        Err(error) => auto_recover_error_notification_event(&mut worker_state, error.to_string()),
+    };
+
+    if let Some(event) = event {
+        let _ = app.emit(TRAY_OPERATION_RESULT_EVENT, event);
+    }
+}
+
+/// 現在の表示対象に含まれる watched stale トンネルを自動復旧する
+fn auto_recover_current_stale_tunnels(
+    app: &tauri::AppHandle,
+    worker_state: &mut AutoRecoverWorkerState,
+    now: u64,
+) -> Result<AutoRecoverReport, AppError> {
+    let runtime_paths = resolve_runtime_paths(app, None)?;
+    let config = load_effective_config(&runtime_paths.config_paths)?;
+
+    if !config.has_sources() {
+        return Ok(AutoRecoverReport::default());
+    }
+
+    ensure_valid_config(&config)?;
+
+    let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
+    let mut report = confirm_auto_recover_pending(worker_state, &statuses, now);
+    let targets = auto_recover_targets_from_statuses(&runtime_paths, &config, &statuses)?
+        .into_iter()
+        .filter(|target| auto_recover_target_is_retryable(worker_state, target, now))
+        .collect::<Vec<_>>();
+    report.extend(start_auto_recover_targets(&targets, worker_state, now));
+
+    Ok(report)
+}
+
+/// 現在の state から watched stale トンネルを収集する
+#[cfg(test)]
+fn collect_auto_recover_targets(
+    paths: &RuntimePaths,
+    config: &EffectiveConfig,
+) -> Result<Vec<AutoRecoverTarget>, AppError> {
+    let statuses = load_scoped_runtime_statuses(paths)?;
+
+    auto_recover_targets_from_statuses(paths, config, &statuses)
+}
+
+/// runtime 状態一覧から自動復旧対象だけを抽出する
+fn auto_recover_targets_from_statuses(
+    paths: &RuntimePaths,
+    config: &EffectiveConfig,
+    statuses: &[ScopedRuntimeStatus],
+) -> Result<Vec<AutoRecoverTarget>, AppError> {
+    let watched_runtime_ids = paths
+        .preferences
+        .auto_recover_tunnel_runtime_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+
+    if watched_runtime_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut targets = Vec::new();
+    for status in statuses {
+        if status.status.process_state != ProcessState::Stale {
+            continue;
+        }
+
+        let runtime_id = status.status.state.runtime_id.as_str();
+        if !watched_runtime_ids.contains(runtime_id) {
+            continue;
+        }
+
+        let Some(tunnel) = find_tunnel_by_runtime_id(config, runtime_id) else {
+            continue;
+        };
+
+        targets.push(AutoRecoverTarget {
+            id: status.status.state.name.clone(),
+            runtime_id: runtime_id.to_owned(),
+            runtime_scope: status.runtime_scope,
+            state_path: state_path_for_runtime_scope(paths, status.runtime_scope)?.to_path_buf(),
+            tunnel: tunnel.clone(),
+        });
+    }
+
+    Ok(targets)
+}
+
+impl AutoRecoverTarget {
+    /// 通知用 ID を生成する
+    fn display_id(&self) -> String {
+        runtime_status_key(self.runtime_scope, &self.id)
+    }
+}
+
+/// 確認待ちの自動復旧結果を確定する
+fn confirm_auto_recover_pending(
+    worker_state: &mut AutoRecoverWorkerState,
+    statuses: &[ScopedRuntimeStatus],
+    now: u64,
+) -> AutoRecoverReport {
+    let due_runtime_ids = worker_state
+        .pending_confirmations
+        .iter()
+        .filter(|(_runtime_id, pending)| pending.confirm_after_unix_seconds <= now)
+        .map(|(runtime_id, _pending)| runtime_id.clone())
+        .collect::<Vec<_>>();
+    let mut report = AutoRecoverReport::default();
+
+    for runtime_id in due_runtime_ids {
+        let Some(pending) = worker_state.pending_confirmations.remove(&runtime_id) else {
+            continue;
+        };
+        let status = find_scoped_runtime_status(statuses, pending.runtime_scope, &runtime_id);
+
+        match status.map(|status| status.status.process_state) {
+            Some(ProcessState::Running) => {
+                worker_state.backoffs.remove(&runtime_id);
+                worker_state
+                    .notification
+                    .clear_failure_notifications(&runtime_id);
+                report.succeeded.push(AutoRecoverOperationSuccess {
+                    id: pending.display_id(),
+                    runtime_id,
+                    message: status
+                        .map(auto_recover_confirmation_success_message)
+                        .unwrap_or_else(|| "running を確認しました".to_owned()),
+                });
+            }
+            Some(ProcessState::Stale) => {
+                let backoff_seconds = schedule_auto_recover_backoff(worker_state, &runtime_id, now);
+                report.failed.push(AutoRecoverOperationFailure {
+                    id: pending.display_id(),
+                    runtime_id,
+                    message: auto_recover_confirmation_failure_message(
+                        "起動後の確認で stale のままでした",
+                        backoff_seconds,
+                    ),
+                });
+            }
+            None => {
+                let backoff_seconds = schedule_auto_recover_backoff(worker_state, &runtime_id, now);
+                report.failed.push(AutoRecoverOperationFailure {
+                    id: pending.display_id(),
+                    runtime_id,
+                    message: auto_recover_confirmation_failure_message(
+                        "起動後の状態を確認できませんでした",
+                        backoff_seconds,
+                    ),
+                });
+            }
+        }
+    }
+
+    report
+}
+
+impl AutoRecoverPendingConfirmation {
+    /// 通知用 ID を生成する
+    fn display_id(&self) -> String {
+        runtime_status_key(self.runtime_scope, &self.id)
+    }
+}
+
+/// 自動復旧対象が再試行可能か判定する
+fn auto_recover_target_is_retryable(
+    worker_state: &AutoRecoverWorkerState,
+    target: &AutoRecoverTarget,
+    now: u64,
+) -> bool {
+    if worker_state
+        .pending_confirmations
+        .contains_key(&target.runtime_id)
+    {
+        return false;
+    }
+
+    worker_state
+        .backoffs
+        .get(&target.runtime_id)
+        .map(|backoff| backoff.retry_after_unix_seconds <= now)
+        .unwrap_or(true)
+}
+
+/// 自動復旧対象を現在の設定で再起動し、確認待ちへ移行する
+fn start_auto_recover_targets(
+    targets: &[AutoRecoverTarget],
+    worker_state: &mut AutoRecoverWorkerState,
+    now: u64,
+) -> AutoRecoverReport {
+    let mut report = AutoRecoverReport::default();
+
+    for target in targets {
+        match start_tunnel(&target.tunnel, &target.state_path) {
+            Ok(_) | Err(TunnelRuntimeError::AlreadyRunning { .. }) => {
+                mark_auto_recover_confirmation_pending(worker_state, target, now);
+            }
+            Err(error) => {
+                let backoff_seconds =
+                    schedule_auto_recover_backoff(worker_state, &target.runtime_id, now);
+                report.failed.push(AutoRecoverOperationFailure {
+                    id: target.display_id(),
+                    runtime_id: target.runtime_id.clone(),
+                    message: auto_recover_confirmation_failure_message(
+                        &AppError::Runtime(error).to_string(),
+                        backoff_seconds,
+                    ),
+                });
+            }
+        }
+    }
+
+    report
+}
+
+/// 自動復旧後の状態確認待ちを登録する
+fn mark_auto_recover_confirmation_pending(
+    worker_state: &mut AutoRecoverWorkerState,
+    target: &AutoRecoverTarget,
+    now: u64,
+) {
+    worker_state.pending_confirmations.insert(
+        target.runtime_id.clone(),
+        AutoRecoverPendingConfirmation {
+            id: target.id.clone(),
+            runtime_scope: target.runtime_scope,
+            confirm_after_unix_seconds: now + AUTO_RECOVER_CONFIRMATION_SECONDS,
+        },
+    );
+}
+
+/// 自動復旧のバックオフを更新して待機秒数を返す
+fn schedule_auto_recover_backoff(
+    worker_state: &mut AutoRecoverWorkerState,
+    runtime_id: &str,
+    now: u64,
+) -> u64 {
+    let failure_count = worker_state
+        .backoffs
+        .get(runtime_id)
+        .map(|backoff| backoff.failure_count.saturating_add(1))
+        .unwrap_or(1);
+    let backoff_seconds = auto_recover_backoff_seconds(failure_count);
+
+    worker_state.backoffs.insert(
+        runtime_id.to_owned(),
+        AutoRecoverBackoff {
+            failure_count,
+            retry_after_unix_seconds: now + backoff_seconds,
+        },
+    );
+
+    backoff_seconds
+}
+
+/// 自動復旧の失敗回数に対応するバックオフ秒数を返す
+fn auto_recover_backoff_seconds(failure_count: u32) -> u64 {
+    match failure_count {
+        0 | 1 => AUTO_RECOVER_FIRST_BACKOFF_SECONDS,
+        2 => AUTO_RECOVER_SECOND_BACKOFF_SECONDS,
+        _ => AUTO_RECOVER_MAX_BACKOFF_SECONDS,
+    }
+}
+
+/// runtime ID と scope に一致する状態を検索する
+fn find_scoped_runtime_status<'a>(
+    statuses: &'a [ScopedRuntimeStatus],
+    runtime_scope: RuntimeScope,
+    runtime_id: &str,
+) -> Option<&'a ScopedRuntimeStatus> {
+    statuses.iter().find(|status| {
+        status.runtime_scope == runtime_scope && status.status.state.runtime_id == runtime_id
+    })
+}
+
+/// 自動復旧確認成功の詳細文を生成する
+fn auto_recover_confirmation_success_message(status: &ScopedRuntimeStatus) -> String {
+    format!("running を確認しました (pid: {})", status.status.state.pid)
+}
+
+/// 自動復旧確認失敗の詳細文を生成する
+fn auto_recover_confirmation_failure_message(message: &str, backoff_seconds: u64) -> String {
+    format!("{message}。{backoff_seconds}秒後に再試行します")
+}
+
+/// 自動復旧結果を重複抑制済みの通知イベントへ変換する
+fn auto_recover_notification_event(
+    worker_state: &mut AutoRecoverWorkerState,
+    report: AutoRecoverReport,
+) -> Option<TrayOperationResultEvent> {
+    for success in &report.succeeded {
+        worker_state.reset_runtime(&success.runtime_id);
+    }
+
+    let new_failures = report
+        .failed
+        .into_iter()
+        .filter(|failure| {
+            worker_state
+                .notification
+                .insert_failure_notification(failure)
+        })
+        .collect::<Vec<_>>();
+    let success_count = report.succeeded.len();
+    let failure_count = new_failures.len();
+
+    if success_count == 0 && failure_count == 0 {
+        return None;
+    }
+
+    if failure_count == 0 {
+        return Some(TrayOperationResultEvent {
+            kind: "success".to_owned(),
+            summary: format!("Auto recover で {success_count} 件を復旧しました"),
+            detail: Some(auto_recover_success_detail(&report.succeeded)),
+        });
+    }
+
+    Some(TrayOperationResultEvent {
+        kind: if success_count > 0 { "info" } else { "error" }.to_owned(),
+        summary: if success_count > 0 {
+            format!("Auto recover で {success_count} 件復旧、{failure_count} 件失敗しました")
+        } else {
+            format!("Auto recover で {failure_count} 件の復旧に失敗しました")
+        },
+        detail: Some(auto_recover_failure_detail(&new_failures)),
+    })
+}
+
+/// 自動復旧全体の失敗を重複抑制済みの通知イベントへ変換する
+fn auto_recover_error_notification_event(
+    worker_state: &mut AutoRecoverWorkerState,
+    message: String,
+) -> Option<TrayOperationResultEvent> {
+    auto_recover_notification_event(
+        worker_state,
+        AutoRecoverReport {
+            succeeded: Vec::new(),
+            failed: vec![AutoRecoverOperationFailure {
+                id: AUTO_RECOVER_SYSTEM_FAILURE_ID.to_owned(),
+                runtime_id: AUTO_RECOVER_SYSTEM_FAILURE_ID.to_owned(),
+                message,
+            }],
+        },
+    )
+}
+
+/// 自動復旧の成功詳細を生成する
+fn auto_recover_success_detail(successes: &[AutoRecoverOperationSuccess]) -> String {
+    successes
+        .iter()
+        .map(|success| format!("{}: {}", success.id, success.message))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 自動復旧の失敗詳細を生成する
+fn auto_recover_failure_detail(failures: &[AutoRecoverOperationFailure]) -> String {
+    failures
+        .iter()
+        .map(|failure| format!("{}: {}", failure.id, failure.message))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 自動復旧の失敗通知キーを生成する
+fn auto_recover_failure_key(failure: &AutoRecoverOperationFailure) -> String {
+    if failure.runtime_id == AUTO_RECOVER_SYSTEM_FAILURE_ID {
+        return format!("system\0{}", failure.message);
+    }
+
+    auto_recover_runtime_failure_key(&failure.runtime_id)
+}
+
+/// runtime ID に対応する失敗通知キーを生成する
+fn auto_recover_runtime_failure_key(runtime_id: &str) -> String {
+    format!("runtime\0{runtime_id}")
+}
+
+/// 現在時刻を UNIX 秒で取得する
+fn current_unix_seconds_for_app() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
 }
 
 /// アプリの停止操作としてトンネルを停止する
@@ -3689,6 +4529,15 @@ fn stop_success_message(stopped: StoppedTunnel) -> String {
 /// 停止済みの場合の成功メッセージを生成する
 fn stop_already_stopped_message(id: &str) -> String {
     format!("{id} はすでに停止済みです")
+}
+
+/// 自動復旧トグルの成功メッセージを生成する
+fn auto_recover_toggle_message(enabled: bool) -> String {
+    if enabled {
+        "Auto recover を有効にしました".to_owned()
+    } else {
+        "Auto recover を無効にしました".to_owned()
+    }
 }
 
 /// トンネル設定の local endpoint を生成する
@@ -3823,6 +4672,7 @@ use_global = true
         assert!(!preferences.hide_dock_icon_when_window_hidden);
         assert!(!preferences.auto_stop_tunnels_on_quit);
         assert!(preferences.favorite_tunnel_runtime_ids.is_empty());
+        assert!(preferences.auto_recover_tunnel_runtime_ids.is_empty());
     }
 
     /// Dock 非表示設定が preferences に保存されることを検証する
@@ -3876,15 +4726,39 @@ use_global = true
         );
     }
 
-    /// お気に入り runtime ID の空値と重複が正規化されることを検証する
+    /// 自動復旧 runtime ID が preferences に保存されることを検証する
     #[test]
-    fn favorite_tunnel_runtime_ids_are_normalized_without_duplicates() {
+    fn auto_recover_tunnel_runtime_ids_preference_is_persisted() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("preferences.toml");
+        let preferences = AppPreferences {
+            auto_recover_tunnel_runtime_ids: vec!["local:/workspace/fwd-deck.toml:db".to_owned()],
+            ..AppPreferences::default()
+        };
+
+        write_preferences_file(&path, &preferences).expect("write preferences");
+        let persisted = read_preferences_file(&path).expect("read preferences");
+
+        assert_eq!(
+            persisted.auto_recover_tunnel_runtime_ids,
+            vec!["local:/workspace/fwd-deck.toml:db".to_owned()]
+        );
+    }
+
+    /// 保存済み runtime ID の空値と重複が正規化されることを検証する
+    #[test]
+    fn stored_tunnel_runtime_ids_are_normalized_without_duplicates() {
         let mut preferences = AppPreferences {
             favorite_tunnel_runtime_ids: vec![
                 "local:/workspace/fwd-deck.toml:db".to_owned(),
                 "".to_owned(),
                 "local:/workspace/fwd-deck.toml:db".to_owned(),
                 "global:/home/user/config.toml:cache".to_owned(),
+            ],
+            auto_recover_tunnel_runtime_ids: vec![
+                "local:/workspace/fwd-deck.toml:db".to_owned(),
+                "local:/workspace/fwd-deck.toml:db".to_owned(),
+                "".to_owned(),
             ],
             ..AppPreferences::default()
         };
@@ -3897,6 +4771,10 @@ use_global = true
                 "local:/workspace/fwd-deck.toml:db".to_owned(),
                 "global:/home/user/config.toml:cache".to_owned()
             ]
+        );
+        assert_eq!(
+            preferences.auto_recover_tunnel_runtime_ids,
+            vec!["local:/workspace/fwd-deck.toml:db".to_owned()]
         );
     }
 
@@ -4167,6 +5045,70 @@ use_global = true
         assert!(dashboard.tunnels[0].is_favorite);
     }
 
+    /// 自動復旧設定コマンドが保存内容と表示状態を更新することを検証する
+    #[test]
+    fn set_tunnel_auto_recover_persists_preference_and_updates_dashboard() {
+        let app_config_dir = TempDir::new().expect("create app config directory");
+        let workspace = TempDir::new().expect("create workspace");
+        let local_config_path = default_local_config_path(workspace.path());
+        add_tunnel_to_config_file(
+            &local_config_path,
+            ConfigSourceKind::Local,
+            tunnel_config("db", 15432),
+        )
+        .expect("write local tunnel");
+        let runtime_id = tunnel_runtime_id(ConfigSourceKind::Local, &local_config_path, "db");
+        let mut selection =
+            workspace_selection_for_path(workspace.path()).expect("select workspace");
+        selection.use_global = Some(false);
+
+        let dashboard = set_tunnel_auto_recover_for_app_config_dir(
+            app_config_dir.path(),
+            Some(selection),
+            &runtime_id,
+            true,
+        )
+        .expect("set auto recover");
+        let preferences =
+            read_preferences_file(&app_config_dir.path().join(APP_PREFERENCES_FILE_NAME))
+                .expect("read preferences");
+
+        assert_eq!(
+            preferences.auto_recover_tunnel_runtime_ids,
+            vec![runtime_id]
+        );
+        assert_eq!(dashboard.tunnels.len(), 1);
+        assert!(dashboard.tunnels[0].auto_recover_enabled);
+    }
+
+    /// 未定義 runtime ID の自動復旧設定が拒否されることを検証する
+    #[test]
+    fn set_tunnel_auto_recover_rejects_unknown_runtime_id() {
+        let app_config_dir = TempDir::new().expect("create app config directory");
+        let workspace = TempDir::new().expect("create workspace");
+        let local_config_path = default_local_config_path(workspace.path());
+        add_tunnel_to_config_file(
+            &local_config_path,
+            ConfigSourceKind::Local,
+            tunnel_config("db", 15432),
+        )
+        .expect("write local tunnel");
+        let mut selection =
+            workspace_selection_for_path(workspace.path()).expect("select workspace");
+        selection.use_global = Some(false);
+
+        let result = set_tunnel_auto_recover_for_app_config_dir(
+            app_config_dir.path(),
+            Some(selection),
+            "local:/workspace/fwd-deck.toml:missing",
+            true,
+        );
+
+        assert!(
+            matches!(result, Err(AppError::InvalidInput(message)) if message.contains("未定義"))
+        );
+    }
+
     /// お気に入り状態がトンネル一覧の名前順に影響しないことを検証する
     #[test]
     fn dashboard_tunnels_keep_name_sort_when_favorite_exists() {
@@ -4191,6 +5133,30 @@ use_global = true
         assert!(dashboard.tunnels[1].is_favorite);
     }
 
+    /// 自動復旧状態がトンネル一覧の名前順に影響しないことを検証する
+    #[test]
+    fn dashboard_tunnels_include_auto_recover_enabled_state() {
+        let watched = resolved_tunnel_with_port("zzz-db", PathBuf::from("fwd-deck.toml"), 15432);
+        let regular = resolved_tunnel_with_port("aaa-cache", PathBuf::from("fwd-deck.toml"), 16379);
+        let watched_runtime_id = runtime_id_for_resolved_tunnel(&watched);
+        let paths = runtime_paths_with_preferences(AppPreferences {
+            auto_recover_tunnel_runtime_ids: vec![watched_runtime_id],
+            ..AppPreferences::default()
+        });
+
+        let dashboard = build_dashboard_state(
+            paths,
+            EffectiveConfig::new(Vec::new(), vec![regular, watched]),
+            Vec::new(),
+            ValidationReport::valid(),
+        );
+
+        assert_eq!(dashboard.tunnels[0].id, "aaa-cache");
+        assert!(!dashboard.tunnels[0].auto_recover_enabled);
+        assert_eq!(dashboard.tunnels[1].id, "zzz-db");
+        assert!(dashboard.tunnels[1].auto_recover_enabled);
+    }
+
     /// 編集時にお気に入り runtime ID が新しい ID へ引き継がれることを検証する
     #[test]
     fn favorite_runtime_id_is_replaced_for_updated_tunnel() {
@@ -4208,6 +5174,27 @@ use_global = true
         assert!(changed);
         assert_eq!(
             preferences.favorite_tunnel_runtime_ids,
+            vec!["local:/workspace/fwd-deck.toml:renamed-db".to_owned()]
+        );
+    }
+
+    /// 編集時に自動復旧 runtime ID が新しい ID へ引き継がれることを検証する
+    #[test]
+    fn auto_recover_runtime_id_is_replaced_for_updated_tunnel() {
+        let mut preferences = AppPreferences {
+            auto_recover_tunnel_runtime_ids: vec!["local:/workspace/fwd-deck.toml:db".to_owned()],
+            ..AppPreferences::default()
+        };
+
+        let changed = replace_auto_recover_tunnel_runtime_id(
+            &mut preferences,
+            "local:/workspace/fwd-deck.toml:db",
+            "local:/workspace/fwd-deck.toml:renamed-db".to_owned(),
+        );
+
+        assert!(changed);
+        assert_eq!(
+            preferences.auto_recover_tunnel_runtime_ids,
             vec!["local:/workspace/fwd-deck.toml:renamed-db".to_owned()]
         );
     }
@@ -4231,6 +5218,29 @@ use_global = true
         assert!(changed);
         assert_eq!(
             preferences.favorite_tunnel_runtime_ids,
+            vec!["local:/workspace/fwd-deck.toml:cache".to_owned()]
+        );
+    }
+
+    /// 削除時に自動復旧 runtime ID が削除されることを検証する
+    #[test]
+    fn auto_recover_runtime_id_is_removed_for_deleted_tunnel() {
+        let mut preferences = AppPreferences {
+            auto_recover_tunnel_runtime_ids: vec![
+                "local:/workspace/fwd-deck.toml:db".to_owned(),
+                "local:/workspace/fwd-deck.toml:cache".to_owned(),
+            ],
+            ..AppPreferences::default()
+        };
+
+        let changed = remove_auto_recover_tunnel_runtime_id(
+            &mut preferences,
+            "local:/workspace/fwd-deck.toml:db",
+        );
+
+        assert!(changed);
+        assert_eq!(
+            preferences.auto_recover_tunnel_runtime_ids,
             vec!["local:/workspace/fwd-deck.toml:cache".to_owned()]
         );
     }
@@ -4533,6 +5543,39 @@ use_global = true
         );
     }
 
+    /// トレイの自動復旧項目が保存済み runtime ID の checked 状態を反映することを検証する
+    #[test]
+    fn tray_auto_recover_menu_items_reflect_enabled_runtime_ids() {
+        let watched =
+            resolved_tunnel_with_port("watched-db", PathBuf::from("fwd-deck.toml"), 15432);
+        let regular =
+            resolved_tunnel_with_port("regular-db", PathBuf::from("fwd-deck.toml"), 15433);
+        let config = EffectiveConfig::new(Vec::new(), vec![regular.clone(), watched.clone()]);
+        let preferences = AppPreferences {
+            auto_recover_tunnel_runtime_ids: vec![runtime_id_for_resolved_tunnel(&watched)],
+            ..AppPreferences::default()
+        };
+
+        let items = tray_auto_recover_tunnel_menu_items(&config, &preferences);
+
+        let watched_item = tray_item_by_id(&items, "watched-db");
+        let regular_item = tray_item_by_id(&items, "regular-db");
+        assert!(watched_item.checked);
+        assert!(!regular_item.checked);
+        assert_eq!(
+            watched_item.action.operation,
+            TrayTunnelOperation::SetAutoRecover { enabled: false }
+        );
+        assert_eq!(
+            regular_item.action.operation,
+            TrayTunnelOperation::SetAutoRecover { enabled: true }
+        );
+        assert!(items.iter().all(|item| {
+            item.menu_id
+                .starts_with(TRAY_AUTO_RECOVER_TUNNEL_ITEM_PREFIX)
+        }));
+    }
+
     /// トレイアイコン種別が起動中トンネルの有無に追従することを検証する
     #[test]
     fn tray_icon_kind_reflects_running_tunnels() {
@@ -4823,6 +5866,352 @@ use_global = true
             runtime_status_key(RuntimeScope::Workspace, "db"),
             "workspace:db"
         );
+    }
+
+    /// watched かつ stale のトンネルだけが自動復旧対象になることを検証する
+    #[test]
+    fn auto_recover_targets_include_only_watched_stale_tunnels() {
+        let watched_stale =
+            resolved_tunnel_with_port("watched-stale", PathBuf::from("fwd-deck.toml"), 15432);
+        let watched_running =
+            resolved_tunnel_with_port("watched-running", PathBuf::from("fwd-deck.toml"), 15433);
+        let unwatched_stale =
+            resolved_tunnel_with_port("unwatched-stale", PathBuf::from("fwd-deck.toml"), 15434);
+        let paths = runtime_paths_for_state_paths(
+            Some(PathBuf::from("fwd-deck.toml")),
+            PathBuf::from("global-state.toml"),
+            Some(PathBuf::from("workspace-state.toml")),
+        );
+        let config = EffectiveConfig::new(
+            Vec::new(),
+            vec![
+                watched_stale.clone(),
+                watched_running.clone(),
+                unwatched_stale.clone(),
+            ],
+        );
+        let mut paths = paths;
+        paths.preferences.auto_recover_tunnel_runtime_ids = vec![
+            runtime_id_for_resolved_tunnel(&watched_stale),
+            runtime_id_for_resolved_tunnel(&watched_running),
+        ];
+        let statuses = vec![
+            scoped_runtime_status(&watched_stale, RuntimeScope::Workspace, ProcessState::Stale),
+            scoped_runtime_status(
+                &watched_running,
+                RuntimeScope::Workspace,
+                ProcessState::Running,
+            ),
+            scoped_runtime_status(
+                &unwatched_stale,
+                RuntimeScope::Workspace,
+                ProcessState::Stale,
+            ),
+        ];
+
+        let targets = auto_recover_targets_from_statuses(&paths, &config, &statuses)
+            .expect("collect targets");
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "watched-stale");
+        assert_eq!(targets[0].runtime_scope, RuntimeScope::Workspace);
+        assert_eq!(targets[0].state_path, PathBuf::from("workspace-state.toml"));
+    }
+
+    /// 自動復旧対象収集が現在の Workspace と global state に限定されることを検証する
+    #[test]
+    fn auto_recover_targets_exclude_other_workspace_state() {
+        let active_workspace = TempDir::new().expect("create active workspace");
+        let other_workspace = TempDir::new().expect("create other workspace");
+        let temp_dir = TempDir::new().expect("create state directory");
+        let active_config_path = active_workspace.path().join("fwd-deck.toml");
+        let other_config_path = other_workspace.path().join("fwd-deck.toml");
+        let global_config_path = temp_dir.path().join("global-fwd-deck.toml");
+        let global_state_path = temp_dir.path().join("global-state.toml");
+        let workspace_state_path = temp_dir.path().join("workspace-state.toml");
+        fs::write(&active_config_path, "").expect("write active config");
+        fs::write(&other_config_path, "").expect("write other config");
+        let active = resolved_tunnel_with_source_and_port(
+            "active-db",
+            ConfigSourceKind::Local,
+            active_config_path.clone(),
+            15432,
+        );
+        let global = resolved_tunnel_with_source_and_port(
+            "global-db",
+            ConfigSourceKind::Global,
+            global_config_path.clone(),
+            25432,
+        );
+        write_state_file(
+            &global_state_path,
+            &state_file(vec![
+                tunnel_state(
+                    "other-db",
+                    ConfigSourceKind::Local,
+                    other_config_path,
+                    u32::MAX,
+                ),
+                tunnel_state(
+                    "global-db",
+                    ConfigSourceKind::Global,
+                    global_config_path,
+                    u32::MAX,
+                ),
+            ]),
+        )
+        .expect("write global state");
+        write_state_file(
+            &workspace_state_path,
+            &state_file(vec![tunnel_state(
+                "active-db",
+                ConfigSourceKind::Local,
+                active_config_path.clone(),
+                u32::MAX,
+            )]),
+        )
+        .expect("write workspace state");
+        let mut paths = runtime_paths_for_state_paths(
+            Some(active_config_path),
+            global_state_path,
+            Some(workspace_state_path),
+        );
+        paths.preferences.auto_recover_tunnel_runtime_ids = vec![
+            runtime_id_for_resolved_tunnel(&active),
+            runtime_id_for_resolved_tunnel(&global),
+            fwd_deck_core::tunnel_runtime_id(
+                ConfigSourceKind::Local,
+                other_workspace.path().join("fwd-deck.toml").as_path(),
+                "other-db",
+            ),
+        ];
+        let config = EffectiveConfig::new(Vec::new(), vec![active, global]);
+
+        let targets = collect_auto_recover_targets(&paths, &config).expect("collect targets");
+        let ids = targets
+            .iter()
+            .map(|target| target.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["global-db", "active-db"]);
+    }
+
+    /// 確認待ちの自動復旧が running 確認後に成功になることを検証する
+    #[test]
+    fn auto_recover_pending_confirmation_reports_success_when_still_running() {
+        let resolved = resolved_tunnel_with_port("db", PathBuf::from("fwd-deck.toml"), 15432);
+        let runtime_id = runtime_id_for_resolved_tunnel(&resolved);
+        let mut worker_state = AutoRecoverWorkerState::default();
+        worker_state.pending_confirmations.insert(
+            runtime_id.clone(),
+            AutoRecoverPendingConfirmation {
+                id: "db".to_owned(),
+                runtime_scope: RuntimeScope::Workspace,
+                confirm_after_unix_seconds: 100,
+            },
+        );
+        worker_state.backoffs.insert(
+            runtime_id.clone(),
+            AutoRecoverBackoff {
+                failure_count: 2,
+                retry_after_unix_seconds: 200,
+            },
+        );
+        let statuses = vec![scoped_runtime_status(
+            &resolved,
+            RuntimeScope::Workspace,
+            ProcessState::Running,
+        )];
+
+        let report = confirm_auto_recover_pending(&mut worker_state, &statuses, 100);
+
+        assert_eq!(report.succeeded.len(), 1);
+        assert_eq!(report.succeeded[0].runtime_id, runtime_id);
+        assert!(report.failed.is_empty());
+        assert!(worker_state.pending_confirmations.is_empty());
+        assert!(worker_state.backoffs.is_empty());
+    }
+
+    /// 確認待ちの自動復旧が stale 継続時に失敗とバックオフになることを検証する
+    #[test]
+    fn auto_recover_pending_confirmation_reports_failure_when_stale_again() {
+        let resolved = resolved_tunnel_with_port("db", PathBuf::from("fwd-deck.toml"), 15432);
+        let runtime_id = runtime_id_for_resolved_tunnel(&resolved);
+        let mut worker_state = AutoRecoverWorkerState::default();
+        worker_state.pending_confirmations.insert(
+            runtime_id.clone(),
+            AutoRecoverPendingConfirmation {
+                id: "db".to_owned(),
+                runtime_scope: RuntimeScope::Workspace,
+                confirm_after_unix_seconds: 100,
+            },
+        );
+        let statuses = vec![scoped_runtime_status(
+            &resolved,
+            RuntimeScope::Workspace,
+            ProcessState::Stale,
+        )];
+
+        let report = confirm_auto_recover_pending(&mut worker_state, &statuses, 100);
+
+        assert!(report.succeeded.is_empty());
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].runtime_id, runtime_id);
+        assert!(report.failed[0].message.contains("stale"));
+        assert_eq!(
+            worker_state
+                .backoffs
+                .get(&runtime_id)
+                .map(|backoff| backoff.retry_after_unix_seconds),
+            Some(105)
+        );
+    }
+
+    /// 自動復旧のバックオフが失敗回数に応じて伸長することを検証する
+    #[test]
+    fn auto_recover_backoff_seconds_escalates_by_failure_count() {
+        assert_eq!(auto_recover_backoff_seconds(1), 5);
+        assert_eq!(auto_recover_backoff_seconds(2), 30);
+        assert_eq!(auto_recover_backoff_seconds(3), 300);
+        assert_eq!(auto_recover_backoff_seconds(10), 300);
+    }
+
+    /// 自動復旧対象が確認待ちまたはバックオフ中に再試行されないことを検証する
+    #[test]
+    fn auto_recover_targets_skip_pending_and_backoff_until_retry_time() {
+        let target = auto_recover_target_for_test("db");
+        let mut worker_state = AutoRecoverWorkerState::default();
+        worker_state.pending_confirmations.insert(
+            target.runtime_id.clone(),
+            AutoRecoverPendingConfirmation {
+                id: target.id.clone(),
+                runtime_scope: target.runtime_scope,
+                confirm_after_unix_seconds: 110,
+            },
+        );
+
+        assert!(!auto_recover_target_is_retryable(
+            &worker_state,
+            &target,
+            100
+        ));
+
+        worker_state.pending_confirmations.clear();
+        worker_state.backoffs.insert(
+            target.runtime_id.clone(),
+            AutoRecoverBackoff {
+                failure_count: 1,
+                retry_after_unix_seconds: 130,
+            },
+        );
+
+        assert!(!auto_recover_target_is_retryable(
+            &worker_state,
+            &target,
+            120
+        ));
+        assert!(auto_recover_target_is_retryable(
+            &worker_state,
+            &target,
+            130
+        ));
+    }
+
+    /// 起動直後の自動復旧は成功通知を出さず確認待ちへ移行することを検証する
+    #[test]
+    fn auto_recover_started_target_waits_for_confirmation_before_success_notification() {
+        let target = auto_recover_target_for_test("db");
+        let mut worker_state = AutoRecoverWorkerState::default();
+
+        mark_auto_recover_confirmation_pending(&mut worker_state, &target, 100);
+        let event =
+            auto_recover_notification_event(&mut worker_state, AutoRecoverReport::default());
+
+        assert!(event.is_none());
+        assert_eq!(
+            worker_state
+                .pending_confirmations
+                .get(&target.runtime_id)
+                .map(|pending| pending.confirm_after_unix_seconds),
+            Some(110)
+        );
+    }
+
+    /// 自動復旧の同一失敗通知が成功まで抑制されることを検証する
+    #[test]
+    fn auto_recover_notifications_suppress_repeated_failures_until_success() {
+        let mut worker_state = AutoRecoverWorkerState::default();
+        let runtime_id = "local:fwd-deck.toml:db".to_owned();
+        let failure = AutoRecoverOperationFailure {
+            id: "workspace:db".to_owned(),
+            runtime_id: runtime_id.clone(),
+            message: "start failed".to_owned(),
+        };
+        let changed_failure = AutoRecoverOperationFailure {
+            id: "workspace:db".to_owned(),
+            runtime_id: runtime_id.clone(),
+            message: "still stale".to_owned(),
+        };
+        let failed_report = AutoRecoverReport {
+            succeeded: Vec::new(),
+            failed: vec![failure.clone()],
+        };
+
+        let first = auto_recover_notification_event(&mut worker_state, failed_report.clone());
+        let second = auto_recover_notification_event(
+            &mut worker_state,
+            AutoRecoverReport {
+                succeeded: Vec::new(),
+                failed: vec![changed_failure],
+            },
+        );
+
+        assert!(first.is_some());
+        assert!(second.is_none());
+
+        let success = AutoRecoverReport {
+            succeeded: vec![AutoRecoverOperationSuccess {
+                id: "workspace:db".to_owned(),
+                runtime_id,
+                message: "running を確認しました (pid: 1000)".to_owned(),
+            }],
+            failed: Vec::new(),
+        };
+        let after_success =
+            auto_recover_notification_event(&mut worker_state, success).expect("success");
+        let after_reset = auto_recover_notification_event(
+            &mut worker_state,
+            AutoRecoverReport {
+                succeeded: Vec::new(),
+                failed: vec![failure],
+            },
+        );
+
+        assert_eq!(after_success.kind, "success");
+        assert!(after_reset.is_some());
+    }
+
+    /// 手動リセットにより自動復旧のバックオフと通知抑制が解除されることを検証する
+    #[test]
+    fn auto_recover_worker_state_reset_clears_backoff_and_notification() {
+        let runtime_id = "local:fwd-deck.toml:db";
+        let mut worker_state = AutoRecoverWorkerState::default();
+        worker_state.backoffs.insert(
+            runtime_id.to_owned(),
+            AutoRecoverBackoff {
+                failure_count: 2,
+                retry_after_unix_seconds: 200,
+            },
+        );
+        worker_state
+            .notification
+            .notified_failure_keys
+            .insert(auto_recover_runtime_failure_key(runtime_id));
+
+        worker_state.reset_runtime(runtime_id);
+
+        assert!(worker_state.backoffs.is_empty());
+        assert!(worker_state.notification.notified_failure_keys.is_empty());
     }
 
     /// 複製時に編集可能項目を差し替え、非表示設定を保持することを検証する
@@ -5161,6 +6550,19 @@ use_global = true
                 state: TunnelState::from_resolved_tunnel(resolved, 1000, 1_700_000_000),
                 process_state,
             },
+        }
+    }
+
+    /// テスト用の自動復旧対象を生成する
+    fn auto_recover_target_for_test(id: &str) -> AutoRecoverTarget {
+        let tunnel = resolved_tunnel_with_port(id, PathBuf::from("fwd-deck.toml"), 15432);
+
+        AutoRecoverTarget {
+            id: id.to_owned(),
+            runtime_id: runtime_id_for_resolved_tunnel(&tunnel),
+            runtime_scope: RuntimeScope::Workspace,
+            state_path: PathBuf::from("workspace-state.toml"),
+            tunnel,
         }
     }
 

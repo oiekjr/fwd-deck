@@ -239,6 +239,56 @@ impl TrayState {
         Ok(TrayInPlaceMenuUpdate::Apply)
     }
 
+    /// 既存の一部トンネル項目へ状態を反映する
+    fn update_tunnel_item_subset_in_place(
+        &self,
+        items: &[TrayTunnelMenuItem],
+        required_menu_id_prefix: &str,
+    ) -> Result<TrayInPlaceMenuUpdate, AppError> {
+        let item_handles = self
+            .tunnel_items
+            .lock()
+            .expect("tray item state should not be poisoned")
+            .clone();
+        let current_item_ids = item_handles
+            .keys()
+            .filter(|id| id.starts_with(required_menu_id_prefix))
+            .cloned()
+            .collect::<HashSet<_>>();
+        let next_item_ids = items
+            .iter()
+            .map(|item| item.menu_id.clone())
+            .collect::<HashSet<_>>();
+
+        if current_item_ids != next_item_ids {
+            return Ok(TrayInPlaceMenuUpdate::RebuildRequired);
+        }
+
+        for item in items {
+            if let Some(menu_item) = item_handles.get(&item.menu_id) {
+                menu_item.set_text(&item.label)?;
+                menu_item.set_enabled(item.enabled)?;
+                menu_item.set_checked(item.checked)?;
+            }
+        }
+
+        self.upsert_tunnel_actions(items);
+
+        Ok(TrayInPlaceMenuUpdate::Apply)
+    }
+
+    /// 既存のトレイ操作へ指定項目の操作だけを反映する
+    fn upsert_tunnel_actions(&self, items: &[TrayTunnelMenuItem]) {
+        let mut actions = self
+            .tunnel_actions
+            .lock()
+            .expect("tray action state should not be poisoned");
+
+        for item in items {
+            actions.insert(item.menu_id.clone(), item.action.clone());
+        }
+    }
+
     /// トレイメニュー ID に対応する操作を取得する
     fn tunnel_action(&self, menu_id: &str) -> Option<TrayTunnelAction> {
         self.tunnel_actions
@@ -484,11 +534,17 @@ fn handle_tray_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent)
 /// トレイからの単体トンネル操作を実行する
 fn handle_tray_tunnel_action(app: &tauri::AppHandle, action: TrayTunnelAction) {
     let operation_lock = app.state::<OperationLockState>();
+    let updates_auto_recover_only =
+        matches!(action.operation, TrayTunnelOperation::SetAutoRecover { .. });
     let result = with_operation_lock(&operation_lock, || {
         run_tray_tunnel_action(app, action.clone())
     });
 
-    let _ = refresh_tray_menu_in_place(app);
+    let _ = if updates_auto_recover_only {
+        refresh_tray_auto_recover_items_in_place_or_rebuild(app)
+    } else {
+        refresh_tray_menu_in_place_or_rebuild(app)
+    };
 
     match result {
         Ok(report) => emit_tray_operation_report(app, report),
@@ -878,16 +934,38 @@ fn load_tray_menu_model(app: &tauri::AppHandle) -> Result<TrayMenuModel, AppErro
 }
 
 /// トレイメニューの表示中に変更可能な状態だけを反映する
-fn refresh_tray_menu_in_place(app: &tauri::AppHandle) -> Result<(), AppError> {
+fn refresh_tray_menu_in_place(app: &tauri::AppHandle) -> Result<TrayInPlaceMenuUpdate, AppError> {
     let model = load_tray_menu_model(app)?;
     let tunnel_items = tray_menu_model_tunnel_items(&model);
 
     update_tray_icon_if_changed(app, model.icon_kind)?;
-    let _ = app
-        .state::<TrayState>()
-        .update_tunnel_items_in_place(&tunnel_items)?;
+    app.state::<TrayState>()
+        .update_tunnel_items_in_place(&tunnel_items)
+}
 
-    Ok(())
+/// インプレース更新できない場合だけトレイメニュー全体を再構築する
+fn refresh_tray_menu_in_place_or_rebuild(app: &tauri::AppHandle) -> Result<(), AppError> {
+    match refresh_tray_menu_in_place(app)? {
+        TrayInPlaceMenuUpdate::Apply => Ok(()),
+        TrayInPlaceMenuUpdate::RebuildRequired => rebuild_tray_menu(app),
+    }
+}
+
+/// Auto recover 項目だけを更新できない場合にトレイメニュー全体を再構築する
+fn refresh_tray_auto_recover_items_in_place_or_rebuild(
+    app: &tauri::AppHandle,
+) -> Result<(), AppError> {
+    let runtime_paths = resolve_runtime_paths(app, None)?;
+    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let items = tray_auto_recover_tunnel_menu_items(&config, &runtime_paths.preferences);
+    let tray_state = app.state::<TrayState>();
+
+    match tray_state
+        .update_tunnel_item_subset_in_place(&items, TRAY_AUTO_RECOVER_TUNNEL_ITEM_PREFIX)?
+    {
+        TrayInPlaceMenuUpdate::Apply => Ok(()),
+        TrayInPlaceMenuUpdate::RebuildRequired => rebuild_tray_menu(app),
+    }
 }
 
 /// 必要な場合だけトレイアイコン画像を差し替える
@@ -2455,9 +2533,11 @@ fn set_tunnel_favorite(
     paths: Option<WorkspaceSelection>,
     runtime_id: String,
     is_favorite: bool,
-) -> Result<DashboardState, String> {
+) -> Result<PathView, String> {
     let result = set_tunnel_favorite_inner(&app, paths, &runtime_id, is_favorite);
-    let _ = rebuild_tray_menu(&app);
+    if result.is_ok() {
+        let _ = rebuild_tray_menu(&app);
+    }
 
     command_result(result)
 }
@@ -2469,9 +2549,11 @@ fn set_tunnel_auto_recover(
     paths: Option<WorkspaceSelection>,
     runtime_id: String,
     enabled: bool,
-) -> Result<DashboardState, String> {
+) -> Result<PathView, String> {
     let result = set_tunnel_auto_recover_inner(&app, paths, &runtime_id, enabled);
-    let _ = rebuild_tray_menu(&app);
+    if result.is_ok() {
+        let _ = refresh_tray_auto_recover_items_in_place_or_rebuild(&app);
+    }
 
     command_result(result)
 }
@@ -2718,7 +2800,7 @@ fn set_tunnel_favorite_inner(
     paths: Option<WorkspaceSelection>,
     runtime_id: &str,
     is_favorite: bool,
-) -> Result<DashboardState, AppError> {
+) -> Result<PathView, AppError> {
     let app_config_dir = app_config_dir(app)?;
 
     set_tunnel_favorite_for_app_config_dir(&app_config_dir, paths, runtime_id, is_favorite)
@@ -2730,52 +2812,31 @@ fn set_tunnel_favorite_for_app_config_dir(
     paths: Option<WorkspaceSelection>,
     runtime_id: &str,
     is_favorite: bool,
-) -> Result<DashboardState, AppError> {
-    let preferences_path = preferences_path_from_app_config_dir(app_config_dir);
-    let mut preferences = read_preferences_file(&preferences_path)?;
-    let original_preferences = preferences.clone();
-
-    normalize_loaded_preferences(&mut preferences);
-    if let Some(selection) = paths {
-        apply_workspace_selection(&mut preferences, selection)?;
-    }
-
-    let mut runtime_paths = runtime_paths_from_preferences(app_config_dir, preferences)?;
-    let config = load_effective_config(&runtime_paths.config_paths)?;
-
-    ensure_configured_runtime_id(&config, runtime_id)?;
-    set_favorite_tunnel_runtime_id(&mut runtime_paths.preferences, runtime_id, is_favorite);
-    write_preferences_file_if_changed(
-        &preferences_path,
-        &original_preferences,
-        &runtime_paths.preferences,
-    )?;
-
-    let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
-    let validation = validate_config(&config);
-
-    Ok(build_dashboard_state(
-        runtime_paths,
-        config,
-        statuses,
-        validation,
-    ))
+) -> Result<PathView, AppError> {
+    update_tunnel_runtime_preference_for_app_config_dir(
+        app_config_dir,
+        paths,
+        runtime_id,
+        |preferences| {
+            set_favorite_tunnel_runtime_id(preferences, runtime_id, is_favorite);
+        },
+    )
 }
 
-/// トンネルの自動復旧状態を保存してダッシュボードを再構築する
+/// トンネルの自動復旧状態を保存して解決済みパスを返す
 fn set_tunnel_auto_recover_inner(
     app: &tauri::AppHandle,
     paths: Option<WorkspaceSelection>,
     runtime_id: &str,
     enabled: bool,
-) -> Result<DashboardState, AppError> {
+) -> Result<PathView, AppError> {
     let app_config_dir = app_config_dir(app)?;
 
-    let dashboard =
+    let paths =
         set_tunnel_auto_recover_for_app_config_dir(&app_config_dir, paths, runtime_id, enabled)?;
     reset_auto_recover_runtime_state(app, runtime_id);
 
-    Ok(dashboard)
+    Ok(paths)
 }
 
 /// アプリ設定ディレクトリを起点にトンネルの自動復旧状態を保存する
@@ -2784,7 +2845,27 @@ fn set_tunnel_auto_recover_for_app_config_dir(
     paths: Option<WorkspaceSelection>,
     runtime_id: &str,
     enabled: bool,
-) -> Result<DashboardState, AppError> {
+) -> Result<PathView, AppError> {
+    update_tunnel_runtime_preference_for_app_config_dir(
+        app_config_dir,
+        paths,
+        runtime_id,
+        |preferences| {
+            set_auto_recover_tunnel_runtime_id(preferences, runtime_id, enabled);
+        },
+    )
+}
+
+/// トンネル単位のアプリ設定を保存して解決済みパスを返す
+fn update_tunnel_runtime_preference_for_app_config_dir<F>(
+    app_config_dir: &Path,
+    paths: Option<WorkspaceSelection>,
+    runtime_id: &str,
+    update_preference: F,
+) -> Result<PathView, AppError>
+where
+    F: FnOnce(&mut AppPreferences),
+{
     let preferences_path = preferences_path_from_app_config_dir(app_config_dir);
     let mut preferences = read_preferences_file(&preferences_path)?;
     let original_preferences = preferences.clone();
@@ -2798,22 +2879,14 @@ fn set_tunnel_auto_recover_for_app_config_dir(
     let config = load_effective_config(&runtime_paths.config_paths)?;
 
     ensure_configured_runtime_id(&config, runtime_id)?;
-    set_auto_recover_tunnel_runtime_id(&mut runtime_paths.preferences, runtime_id, enabled);
+    update_preference(&mut runtime_paths.preferences);
     write_preferences_file_if_changed(
         &preferences_path,
         &original_preferences,
         &runtime_paths.preferences,
     )?;
 
-    let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
-    let validation = validate_config(&config);
-
-    Ok(build_dashboard_state(
-        runtime_paths,
-        config,
-        statuses,
-        validation,
-    ))
+    Ok(path_view(&runtime_paths))
 }
 
 /// ワークスペース履歴の削除結果を表示用パスとして返す
@@ -5195,9 +5268,9 @@ use_global = true
         assert!(!local_config_path.exists());
     }
 
-    /// お気に入り設定コマンドが保存内容と表示状態を更新することを検証する
+    /// お気に入り設定コマンドが保存内容と解決済みパスを更新することを検証する
     #[test]
-    fn set_tunnel_favorite_persists_preference_and_updates_dashboard() {
+    fn set_tunnel_favorite_persists_preference_and_returns_paths() {
         let app_config_dir = TempDir::new().expect("create app config directory");
         let workspace = TempDir::new().expect("create workspace");
         let local_config_path = default_local_config_path(workspace.path());
@@ -5212,7 +5285,7 @@ use_global = true
             workspace_selection_for_path(workspace.path()).expect("select workspace");
         selection.use_global = Some(false);
 
-        let dashboard = set_tunnel_favorite_for_app_config_dir(
+        let paths = set_tunnel_favorite_for_app_config_dir(
             app_config_dir.path(),
             Some(selection),
             &runtime_id,
@@ -5224,13 +5297,18 @@ use_global = true
                 .expect("read preferences");
 
         assert_eq!(preferences.favorite_tunnel_runtime_ids, vec![runtime_id]);
-        assert_eq!(dashboard.tunnels.len(), 1);
-        assert!(dashboard.tunnels[0].is_favorite);
+        let workspace_path = fs::canonicalize(workspace.path()).expect("canonical workspace");
+        let expected_local_config_path = default_local_config_path(&workspace_path);
+        assert_eq!(paths.workspace_path, display_path(&workspace_path));
+        assert_eq!(
+            paths.local_config_path,
+            display_path(&expected_local_config_path)
+        );
     }
 
-    /// 自動復旧設定コマンドが保存内容と表示状態を更新することを検証する
+    /// 自動復旧設定コマンドが保存内容と解決済みパスを更新することを検証する
     #[test]
-    fn set_tunnel_auto_recover_persists_preference_and_updates_dashboard() {
+    fn set_tunnel_auto_recover_persists_preference_and_returns_paths() {
         let app_config_dir = TempDir::new().expect("create app config directory");
         let workspace = TempDir::new().expect("create workspace");
         let local_config_path = default_local_config_path(workspace.path());
@@ -5245,7 +5323,7 @@ use_global = true
             workspace_selection_for_path(workspace.path()).expect("select workspace");
         selection.use_global = Some(false);
 
-        let dashboard = set_tunnel_auto_recover_for_app_config_dir(
+        let paths = set_tunnel_auto_recover_for_app_config_dir(
             app_config_dir.path(),
             Some(selection),
             &runtime_id,
@@ -5260,8 +5338,13 @@ use_global = true
             preferences.auto_recover_tunnel_runtime_ids,
             vec![runtime_id]
         );
-        assert_eq!(dashboard.tunnels.len(), 1);
-        assert!(dashboard.tunnels[0].auto_recover_enabled);
+        let workspace_path = fs::canonicalize(workspace.path()).expect("canonical workspace");
+        let expected_local_config_path = default_local_config_path(&workspace_path);
+        assert_eq!(paths.workspace_path, display_path(&workspace_path));
+        assert_eq!(
+            paths.local_config_path,
+            display_path(&expected_local_config_path)
+        );
     }
 
     /// 未定義 runtime ID の自動復旧設定が拒否されることを検証する

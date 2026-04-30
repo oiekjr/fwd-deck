@@ -1091,23 +1091,23 @@ function App(): ReactElement {
 
     const nextIsFavorite = !tunnel.isFavorite;
 
+    if (hasActiveTunnelFilters(filters)) {
+      captureResultScrollPosition();
+    }
+
     setFavoriteUpdatingIds((current) => addSelections(current, [tunnel.runtimeId]));
     setDashboard((current) =>
       updateTunnelFavoriteInDashboard(current, tunnel.runtimeId, nextIsFavorite),
     );
 
     try {
-      const loaded = await invokeCommand<DashboardState>("set_tunnel_favorite", {
+      const loadedPaths = await invokeCommand<WorkspaceSelection>("set_tunnel_favorite", {
         paths: normalizeWorkspaceSelection(paths),
         runtimeId: tunnel.runtimeId,
         isFavorite: nextIsFavorite,
       });
 
-      if (hasActiveTunnelFilters(filters)) {
-        captureResultScrollPosition();
-      }
-
-      setPaths(loaded.paths);
+      setPaths(loadedPaths);
     } catch (error) {
       setDashboard((current) =>
         updateTunnelFavoriteInDashboard(current, tunnel.runtimeId, tunnel.isFavorite),
@@ -1134,13 +1134,13 @@ function App(): ReactElement {
     );
 
     try {
-      const loaded = await invokeCommand<DashboardState>("set_tunnel_auto_recover", {
+      const loadedPaths = await invokeCommand<WorkspaceSelection>("set_tunnel_auto_recover", {
         paths: normalizeWorkspaceSelection(paths),
         runtimeId: tunnel.runtimeId,
         enabled: nextEnabled,
       });
 
-      setPaths(loaded.paths);
+      setPaths(loadedPaths);
     } catch (error) {
       setDashboard((current) =>
         updateTunnelAutoRecoverInDashboard(current, tunnel.runtimeId, tunnel.autoRecoverEnabled),

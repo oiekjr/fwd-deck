@@ -1360,6 +1360,7 @@ function App(): ReactElement {
               onStopSelected={() => void stopSelected(selectedIdList)}
               onStartTunnel={(id) => void startSelected([id])}
               onStopTunnel={(id) => void stopSelected([id])}
+              onStartTracked={(id) => void startSelected([id])}
               onStopTracked={(target) => void stopTracked(target)}
               onEditTunnel={openEditTunnel}
               onRemoveTunnel={setDeleteTarget}
@@ -1842,6 +1843,7 @@ interface DashboardViewProps {
   onStopSelected: () => void;
   onStartTunnel: (id: string) => void;
   onStopTunnel: (id: string) => void;
+  onStartTracked: (id: string) => void;
   onStopTracked: (target: OperationTarget) => void;
   onEditTunnel: (tunnel: TunnelView) => void;
   onRemoveTunnel: (tunnel: TunnelView) => void;
@@ -1880,6 +1882,7 @@ function DashboardView({
   onStopSelected,
   onStartTunnel,
   onStopTunnel,
+  onStartTracked,
   onStopTracked,
   onEditTunnel,
   onRemoveTunnel,
@@ -1953,6 +1956,7 @@ function DashboardView({
         panelRef={trackedPanelRef}
         isBusy={isBusy}
         onToggleCollapsed={() => setIsTrackedPanelCollapsed((current) => !current)}
+        onStart={onStartTracked}
         onStop={onStopTracked}
       />
     </section>
@@ -3581,6 +3585,7 @@ interface TrackedPanelProps {
   panelRef: RefObject<HTMLDivElement | null>;
   isBusy: boolean;
   onToggleCollapsed: () => void;
+  onStart: (id: string) => void;
   onStop: (target: OperationTarget) => void;
 }
 
@@ -3593,6 +3598,7 @@ function TrackedPanel({
   panelRef,
   isBusy,
   onToggleCollapsed,
+  onStart,
   onStop,
 }: TrackedPanelProps): ReactElement | null {
   if (dashboard === null || dashboard.trackedTunnels.length === 0) {
@@ -3645,36 +3651,54 @@ function TrackedPanel({
                     <Table.Column className="text-right">Actions</Table.Column>
                   </Table.Header>
                   <Table.Body>
-                    {dashboard.trackedTunnels.map((tracked) => (
-                      <Table.Row id={tracked.runtimeKey} key={tracked.runtimeKey}>
-                        <Table.Cell className="font-bold">
-                          <div>{tracked.id}</div>
-                          <div className="text-[0.65rem] font-normal text-foreground/50">
-                            {tracked.runtimeScope}
-                          </div>
-                        </Table.Cell>
-                        <Table.Cell className="max-w-md truncate font-mono text-xs">
-                          {tracked.local} {" -> "} {tracked.remote}
-                        </Table.Cell>
-                        <Table.Cell>
-                          <StatusBadge status={tracked.status.state} />
-                        </Table.Cell>
-                        <Table.Cell className="text-right">
-                          <HeroButton
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onPress={() =>
-                              onStop({ id: tracked.id, runtimeScope: tracked.runtimeScope })
-                            }
-                            isDisabled={isBusy}
-                          >
-                            <CircleStop size={13} />
-                            Stop
-                          </HeroButton>
-                        </Table.Cell>
-                      </Table.Row>
-                    ))}
+                    {dashboard.trackedTunnels.map((tracked) => {
+                      const isStale = tracked.status.state === "stale";
+
+                      return (
+                        <Table.Row id={tracked.runtimeKey} key={tracked.runtimeKey}>
+                          <Table.Cell className="font-bold">
+                            <div>{tracked.id}</div>
+                            <div className="text-[0.65rem] font-normal text-foreground/50">
+                              {tracked.runtimeScope}
+                            </div>
+                          </Table.Cell>
+                          <Table.Cell className="max-w-md truncate font-mono text-xs">
+                            {tracked.local} {" -> "} {tracked.remote}
+                          </Table.Cell>
+                          <Table.Cell>
+                            <StatusBadge status={tracked.status.state} />
+                          </Table.Cell>
+                          <Table.Cell className="text-right">
+                            <div className="flex min-w-max items-center justify-end gap-1">
+                              {isStale ? (
+                                <HeroButton
+                                  type="button"
+                                  variant="primary"
+                                  size="sm"
+                                  onPress={() => onStart(tracked.id)}
+                                  isDisabled={isBusy}
+                                >
+                                  <Play size={13} />
+                                  Start
+                                </HeroButton>
+                              ) : null}
+                              <HeroButton
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onPress={() =>
+                                  onStop({ id: tracked.id, runtimeScope: tracked.runtimeScope })
+                                }
+                                isDisabled={isBusy}
+                              >
+                                <CircleStop size={13} />
+                                Stop
+                              </HeroButton>
+                            </div>
+                          </Table.Cell>
+                        </Table.Row>
+                      );
+                    })}
                   </Table.Body>
                 </Table.Content>
               </Table.ScrollContainer>

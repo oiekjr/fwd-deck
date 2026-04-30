@@ -318,6 +318,12 @@ interface HighlightedTextPart {
   isMatch: boolean;
 }
 
+interface RuntimeDisplayInfo {
+  value: string;
+  title: string;
+  ariaLabel: string;
+}
+
 interface ViewportScrollSnapshot {
   left: number;
   top: number;
@@ -360,6 +366,20 @@ const initialFilters: TunnelFilters = {
 const searchDebounceMilliseconds = 200;
 const autoRefreshIntervalMilliseconds = 2_000;
 const operationToastDismissMilliseconds = 4_000;
+const millisecondsPerSecond = 1_000;
+const secondsPerMinute = 60;
+const secondsPerHour = secondsPerMinute * 60;
+const secondsPerDay = secondsPerHour * 24;
+
+const runtimeStartTimestampFormatter = new Intl.DateTimeFormat(undefined, {
+  year: "numeric",
+  month: "short",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  timeZoneName: "short",
+});
 const operationProgressEventName = "operation-progress";
 const trayOperationResultEventName = "tray-operation-result";
 const openSettingsEventName = "open-settings";
@@ -401,6 +421,7 @@ function App(): ReactElement {
   const [message, setMessage] = useState<AppMessage | null>(null);
   const [operationToast, setOperationToast] = useState<OperationToastMessage | null>(null);
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
+  const [runtimeNowUnixSeconds, setRuntimeNowUnixSeconds] = useState<number>(0);
   const [isBusy, setIsBusy] = useState<boolean>(false);
   const [hasCompletedInitialLoad, setHasCompletedInitialLoad] = useState<boolean>(false);
   const autoRefreshInFlightRef = useRef<boolean>(false);
@@ -464,6 +485,7 @@ function App(): ReactElement {
       }
 
       setDashboard(loaded);
+      setRuntimeNowUnixSeconds(currentUnixSeconds());
       setPaths(loaded.paths);
       setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
     },
@@ -729,6 +751,7 @@ function App(): ReactElement {
         });
 
         setDashboard(loaded);
+        setRuntimeNowUnixSeconds(currentUnixSeconds());
         setPaths(loaded.paths);
         setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
         setMessage(null);
@@ -900,6 +923,7 @@ function App(): ReactElement {
       });
 
       setDashboard(loaded);
+      setRuntimeNowUnixSeconds(currentUnixSeconds());
       setPaths(loaded.paths);
       setForm({ ...initialForm, scope: form.scope });
       setFormFeedback(null);
@@ -946,6 +970,7 @@ function App(): ReactElement {
       }
 
       setDashboard(loaded);
+      setRuntimeNowUnixSeconds(currentUnixSeconds());
       setPaths(loaded.paths);
       setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
       setEditTarget(null);
@@ -977,6 +1002,7 @@ function App(): ReactElement {
       }
 
       setDashboard(loaded);
+      setRuntimeNowUnixSeconds(currentUnixSeconds());
       setPaths(loaded.paths);
       setSelectedIds((current) => removeSelection(current, tunnel.runtimeId));
       showOperationToast({ kind: "success", summary: `${tunnel.id} を設定から削除しました` });
@@ -1361,6 +1387,7 @@ function App(): ReactElement {
               selectedVisibleCount={selectedVisibleCount}
               availableTags={availableTags}
               operationProgress={operationProgress}
+              runtimeNowUnixSeconds={runtimeNowUnixSeconds}
               isBusy={isBusy}
               queryInput={queryInput}
               searchInputRef={searchInputRef}
@@ -1850,6 +1877,7 @@ interface DashboardViewProps {
   selectedVisibleCount: number;
   availableTags: string[];
   operationProgress: OperationProgress | null;
+  runtimeNowUnixSeconds: number;
   queryInput: string;
   searchInputRef: RefObject<HTMLInputElement | null>;
   filters: TunnelFilters;
@@ -1889,6 +1917,7 @@ function DashboardView({
   selectedVisibleCount,
   availableTags,
   operationProgress,
+  runtimeNowUnixSeconds,
   queryInput,
   searchInputRef,
   filters,
@@ -1967,6 +1996,7 @@ function DashboardView({
         homePath={homePath}
         selectedIds={selectedIds}
         selectedVisibleCount={selectedVisibleCount}
+        runtimeNowUnixSeconds={runtimeNowUnixSeconds}
         isBusy={isBusy}
         onSelectVisible={onSelectVisible}
         onDeselectVisible={onDeselectVisible}
@@ -1980,6 +2010,7 @@ function DashboardView({
       />
       <TrackedPanel
         dashboard={dashboard}
+        runtimeNowUnixSeconds={runtimeNowUnixSeconds}
         isCollapsed={isTrackedPanelCollapsed}
         panelRef={trackedPanelRef}
         isBusy={isBusy}
@@ -3005,6 +3036,7 @@ interface TunnelDeckProps {
   homePath: string | null;
   selectedIds: Set<string>;
   selectedVisibleCount: number;
+  runtimeNowUnixSeconds: number;
   isBusy: boolean;
   onSelectVisible: () => void;
   onDeselectVisible: () => void;
@@ -3030,6 +3062,7 @@ function TunnelDeck({
   homePath,
   selectedIds,
   selectedVisibleCount,
+  runtimeNowUnixSeconds,
   isBusy,
   onSelectVisible,
   onDeselectVisible,
@@ -3092,6 +3125,7 @@ function TunnelDeck({
         query={filters.query}
         selectedIds={selectedIds}
         selectedVisibleCount={selectedVisibleCount}
+        runtimeNowUnixSeconds={runtimeNowUnixSeconds}
         isBusy={isBusy}
         onSelectVisible={onSelectVisible}
         onDeselectVisible={onDeselectVisible}
@@ -3112,6 +3146,7 @@ function TunnelDeck({
           tunnel={tunnel}
           query={filters.query}
           homePath={homePath}
+          runtimeNowUnixSeconds={runtimeNowUnixSeconds}
           checked={selectedIds.has(tunnel.runtimeId)}
           isBusy={isBusy}
           onToggle={onToggle}
@@ -3130,6 +3165,7 @@ interface TunnelSlimListProps {
   query: string;
   selectedIds: Set<string>;
   selectedVisibleCount: number;
+  runtimeNowUnixSeconds: number;
   isBusy: boolean;
   onSelectVisible: () => void;
   onDeselectVisible: () => void;
@@ -3148,6 +3184,7 @@ function TunnelSlimList({
   query,
   selectedIds,
   selectedVisibleCount,
+  runtimeNowUnixSeconds,
   isBusy,
   onSelectVisible,
   onDeselectVisible,
@@ -3205,6 +3242,7 @@ function TunnelSlimList({
                   key={tunnel.runtimeId}
                   tunnel={tunnel}
                   query={query}
+                  runtimeNowUnixSeconds={runtimeNowUnixSeconds}
                   checked={selectedIds.has(tunnel.runtimeId)}
                   isBusy={isBusy}
                   onToggle={onToggle}
@@ -3225,6 +3263,7 @@ function TunnelSlimList({
 interface TunnelSlimRowProps {
   tunnel: TunnelView;
   query: string;
+  runtimeNowUnixSeconds: number;
   checked: boolean;
   isBusy: boolean;
   onToggle: (id: string) => void;
@@ -3240,6 +3279,7 @@ interface TunnelSlimRowProps {
 function TunnelSlimRow({
   tunnel,
   query,
+  runtimeNowUnixSeconds,
   checked,
   isBusy,
   onToggle,
@@ -3267,7 +3307,16 @@ function TunnelSlimRow({
         </div>
       </Table.Cell>
       <Table.Cell>
-        <StatusBadge status={status} />
+        <div className="flex flex-col items-start gap-1">
+          <StatusBadge status={status} />
+          {tunnel.status ? (
+            <RuntimeSummary
+              status={tunnel.status}
+              nowUnixSeconds={runtimeNowUnixSeconds}
+              className="max-w-40 truncate font-mono text-[0.65rem] text-foreground/50"
+            />
+          ) : null}
+        </div>
       </Table.Cell>
       <Table.Cell className="max-w-44 truncate font-mono text-xs">
         <span title={tunnel.local}>
@@ -3359,6 +3408,7 @@ interface TunnelCardProps {
   tunnel: TunnelView;
   query: string;
   homePath: string | null;
+  runtimeNowUnixSeconds: number;
   checked: boolean;
   isBusy: boolean;
   onToggle: (id: string) => void;
@@ -3375,6 +3425,7 @@ function TunnelCard({
   tunnel,
   query,
   homePath,
+  runtimeNowUnixSeconds,
   checked,
   isBusy,
   onToggle,
@@ -3387,6 +3438,9 @@ function TunnelCard({
   const status = tunnel.status?.state ?? "idle";
   const highlightQuery = query.trim();
   const sourceDisplayPath = formatPathForDisplay(tunnel.sourcePath, homePath);
+  const runtimeInfo = tunnel.status
+    ? runtimeDisplayInfo(tunnel.status, runtimeNowUnixSeconds)
+    : null;
   const statusBorderClassName =
     status === "running"
       ? "border-l-success"
@@ -3432,7 +3486,12 @@ function TunnelCard({
 
         <div className="grid grid-cols-2 gap-2 text-xs xl:grid-cols-4">
           <MetaItem label="Source" value={tunnel.source} query={highlightQuery} />
-          <MetaItem label="Runtime" value={tunnel.status ? `pid ${tunnel.status.pid}` : "none"} />
+          <MetaItem
+            label="Runtime"
+            value={runtimeInfo?.value ?? "none"}
+            title={runtimeInfo?.title}
+            ariaLabel={runtimeInfo?.ariaLabel}
+          />
           <MetaItem label="Connect" value={`${tunnel.timeouts.connectTimeoutSeconds}s`} />
           <MetaItem label="Grace" value={`${tunnel.timeouts.startGraceMilliseconds}ms`} />
         </div>
@@ -3484,18 +3543,47 @@ interface MetaItemProps {
   label: string;
   value: string;
   query?: string;
+  title?: string;
+  ariaLabel?: string;
 }
 
 /**
  * トンネルカード内の補助情報を一定幅で表示する
  */
-function MetaItem({ label, value, query = "" }: MetaItemProps): ReactElement {
+function MetaItem({ label, value, query = "", title, ariaLabel }: MetaItemProps): ReactElement {
   return (
     <div className="min-w-0 rounded-lg border border-border bg-muted/35 px-2.5 py-2">
       <div className="font-semibold text-foreground/50">{label}</div>
-      <div className="mt-1 truncate font-mono text-foreground/80" title={value}>
+      <div
+        className="mt-1 truncate font-mono text-foreground/80"
+        title={title ?? value}
+        aria-label={ariaLabel}
+      >
         <HighlightedText text={value} query={query} />
       </div>
+    </div>
+  );
+}
+
+interface RuntimeSummaryProps {
+  status: RuntimeStatusView;
+  nowUnixSeconds: number;
+  className?: string;
+}
+
+/**
+ * runtime の PID と起動経過を短い補助情報として表示する
+ */
+function RuntimeSummary({
+  status,
+  nowUnixSeconds,
+  className = "",
+}: RuntimeSummaryProps): ReactElement {
+  const runtimeInfo = runtimeDisplayInfo(status, nowUnixSeconds);
+
+  return (
+    <div className={className} title={runtimeInfo.title} aria-label={runtimeInfo.ariaLabel}>
+      {runtimeInfo.value}
     </div>
   );
 }
@@ -3651,6 +3739,7 @@ function RouteConnector({ horizontalAt = "xl" }: RouteConnectorProps): ReactElem
 
 interface TrackedPanelProps {
   dashboard: DashboardState | null;
+  runtimeNowUnixSeconds: number;
   isCollapsed: boolean;
   panelRef: RefObject<HTMLDivElement | null>;
   isBusy: boolean;
@@ -3664,6 +3753,7 @@ interface TrackedPanelProps {
  */
 function TrackedPanel({
   dashboard,
+  runtimeNowUnixSeconds,
   isCollapsed,
   panelRef,
   isBusy,
@@ -3736,7 +3826,14 @@ function TrackedPanel({
                             {tracked.local} {" -> "} {tracked.remote}
                           </Table.Cell>
                           <Table.Cell>
-                            <StatusBadge status={tracked.status.state} />
+                            <div className="flex flex-col items-start gap-1">
+                              <StatusBadge status={tracked.status.state} />
+                              <RuntimeSummary
+                                status={tracked.status}
+                                nowUnixSeconds={runtimeNowUnixSeconds}
+                                className="max-w-40 truncate font-mono text-[0.65rem] text-foreground/50"
+                              />
+                            </div>
                           </Table.Cell>
                           <Table.Cell className="text-right">
                             <div className="flex min-w-max items-center justify-end gap-1">
@@ -4443,6 +4540,73 @@ function hasActiveTunnelFilters(filters: TunnelFilters): boolean {
  */
 function tunnelStatus(tunnel: TunnelView): TunnelStatus {
   return tunnel.status?.state ?? "idle";
+}
+
+/**
+ * 現在時刻を Unix 秒へ丸めて取得する
+ */
+function currentUnixSeconds(): number {
+  return Math.floor(Date.now() / millisecondsPerSecond);
+}
+
+/**
+ * runtime 状態から PID と起動経過を表示用に整形する
+ */
+function runtimeDisplayInfo(status: RuntimeStatusView, nowUnixSeconds: number): RuntimeDisplayInfo {
+  const age = formatRuntimeAge(status.startedAtUnixSeconds, nowUnixSeconds);
+  const startedAt = formatRuntimeStartTimestamp(status.startedAtUnixSeconds);
+
+  return {
+    value: `pid ${status.pid} / ${age}`,
+    title: `Started at ${startedAt}`,
+    ariaLabel: `Runtime pid ${status.pid}, started ${age} (${startedAt})`,
+  };
+}
+
+/**
+ * Unix 秒の起動時刻から短い相対経過時間を生成する
+ */
+function formatRuntimeAge(startedAtUnixSeconds: number, nowUnixSeconds: number): string {
+  if (
+    !Number.isFinite(startedAtUnixSeconds) ||
+    startedAtUnixSeconds <= 0 ||
+    !Number.isFinite(nowUnixSeconds) ||
+    nowUnixSeconds <= 0
+  ) {
+    return "just now";
+  }
+
+  const elapsedSeconds = Math.max(0, Math.floor(nowUnixSeconds - startedAtUnixSeconds));
+
+  if (elapsedSeconds < secondsPerMinute) {
+    return "just now";
+  }
+
+  if (elapsedSeconds < secondsPerHour) {
+    return `${Math.floor(elapsedSeconds / secondsPerMinute)}m ago`;
+  }
+
+  if (elapsedSeconds < secondsPerDay) {
+    return `${Math.floor(elapsedSeconds / secondsPerHour)}h ago`;
+  }
+
+  return `${Math.floor(elapsedSeconds / secondsPerDay)}d ago`;
+}
+
+/**
+ * Unix 秒の起動時刻から正確な表示用日時を生成する
+ */
+function formatRuntimeStartTimestamp(startedAtUnixSeconds: number): string {
+  if (!Number.isFinite(startedAtUnixSeconds) || startedAtUnixSeconds <= 0) {
+    return "Unknown start time";
+  }
+
+  const startedAt = new Date(startedAtUnixSeconds * millisecondsPerSecond);
+  if (Number.isNaN(startedAt.getTime())) {
+    return "Unknown start time";
+  }
+
+  return runtimeStartTimestampFormatter.format(startedAt);
 }
 
 /**

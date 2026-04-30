@@ -282,6 +282,7 @@ type DuplicateTunnelInput = TunnelInput;
 type DuplicateTunnelEditableField = Exclude<keyof DuplicateTunnelFormState, "scope">;
 
 type AppMessageKind = "success" | "error" | "info";
+type OperationToastKind = AppMessageKind | "warning";
 
 interface AppMessage {
   kind: AppMessageKind;
@@ -290,7 +291,7 @@ interface AppMessage {
 
 interface OperationToastMessage {
   id: number;
-  kind: AppMessageKind;
+  kind: OperationToastKind;
   summary: string;
   detail?: string;
 }
@@ -6891,7 +6892,7 @@ function operationMessage(report: OperationReport): OperationToastInput | null {
 
   const failed = report.failed.map((failure) => `${failure.id}: ${failure.message}`).join("\n");
   return {
-    kind: successCount > 0 ? "info" : "error",
+    kind: successCount > 0 ? "warning" : "error",
     summary: `${successCount} 件成功、${failureCount} 件失敗しました`,
     detail: failed,
   };

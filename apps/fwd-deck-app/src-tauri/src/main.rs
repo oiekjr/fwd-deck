@@ -933,7 +933,12 @@ fn tray_operation_event_from_report(report: OperationReport) -> Option<TrayOpera
     }
 
     Some(TrayOperationResultEvent {
-        kind: if success_count > 0 { "info" } else { "error" }.to_owned(),
+        kind: if success_count > 0 {
+            "warning"
+        } else {
+            "error"
+        }
+        .to_owned(),
         summary: format!("{success_count} 件成功、{failure_count} 件失敗しました"),
         detail: Some(
             report
@@ -5368,7 +5373,12 @@ fn auto_recover_notification_event(
     }
 
     Some(TrayOperationResultEvent {
-        kind: if success_count > 0 { "info" } else { "error" }.to_owned(),
+        kind: if success_count > 0 {
+            "warning"
+        } else {
+            "error"
+        }
+        .to_owned(),
         summary: if success_count > 0 {
             format!("Auto recover で {success_count} 件復旧、{failure_count} 件失敗しました")
         } else {
@@ -6843,6 +6853,25 @@ show_tracked_runtime_bar = true
         }));
     }
 
+    /// 部分成功したトレイ操作が警告通知になることを検証する
+    #[test]
+    fn tray_operation_event_from_report_marks_partial_success_as_warning() {
+        let event = tray_operation_event_from_report(OperationReport {
+            succeeded: vec![OperationSuccessView {
+                id: "workspace:db".to_owned(),
+                message: "started".to_owned(),
+            }],
+            failed: vec![OperationFailureView {
+                id: "workspace:cache".to_owned(),
+                message: "port is busy".to_owned(),
+            }],
+        })
+        .expect("partial report should emit notification");
+
+        assert_eq!(event.kind, "warning");
+        assert_eq!(event.summary, "1 件成功、1 件失敗しました");
+    }
+
     /// トレイアイコン種別が起動中トンネルの有無に追従することを検証する
     #[test]
     fn tray_icon_kind_reflects_running_tunnels() {
@@ -7505,6 +7534,31 @@ show_tracked_runtime_bar = true
 
         assert_eq!(after_success.kind, "success");
         assert!(after_reset.is_some());
+    }
+
+    /// 部分成功した自動復旧が警告通知になることを検証する
+    #[test]
+    fn auto_recover_notification_event_marks_partial_success_as_warning() {
+        let mut worker_state = AutoRecoverWorkerState::default();
+        let event = auto_recover_notification_event(
+            &mut worker_state,
+            AutoRecoverReport {
+                succeeded: vec![AutoRecoverOperationSuccess {
+                    id: "workspace:db".to_owned(),
+                    runtime_id: "local:fwd-deck.toml:db".to_owned(),
+                    message: "running を確認しました (pid: 1000)".to_owned(),
+                }],
+                failed: vec![AutoRecoverOperationFailure {
+                    id: "workspace:cache".to_owned(),
+                    runtime_id: "local:fwd-deck.toml:cache".to_owned(),
+                    message: "start failed".to_owned(),
+                }],
+            },
+        )
+        .expect("partial report should emit notification");
+
+        assert_eq!(event.kind, "warning");
+        assert_eq!(event.summary, "Auto recover で 1 件復旧、1 件失敗しました");
     }
 
     /// 手動リセットにより自動復旧のバックオフと通知抑制が解除されることを検証する

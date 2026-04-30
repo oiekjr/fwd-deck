@@ -68,10 +68,6 @@ type RuntimeScope = "global" | "workspace";
 
 type TunnelStatus = RuntimeState | "idle";
 
-type StatusFilter = "all" | TunnelStatus;
-
-type ScopeFilter = "all" | ConfigScope;
-
 type TagFilterMode = "any" | "all";
 
 type AppView = "dashboard" | "add";
@@ -325,8 +321,8 @@ interface TauriRuntimeWindow extends Window {
 
 interface TunnelFilters {
   query: string;
-  status: StatusFilter;
-  scope: ScopeFilter;
+  statuses: TunnelStatus[];
+  scopes: ConfigScope[];
   tags: string[];
   tagMode: TagFilterMode;
   favoritesOnly: boolean;
@@ -378,10 +374,17 @@ const initialForm: TunnelFormState = {
 
 const initialDuplicateForm: DuplicateTunnelFormState = initialForm;
 
+const allStatusFilters = [
+  "running",
+  "stale",
+  "idle",
+] as const satisfies ReadonlyArray<TunnelStatus>;
+const allScopeFilters = ["local", "global"] as const satisfies ReadonlyArray<ConfigScope>;
+
 const initialFilters: TunnelFilters = {
   query: "",
-  status: "all",
-  scope: "all",
+  statuses: [...allStatusFilters],
+  scopes: [...allScopeFilters],
   tags: [],
   tagMode: "any",
   favoritesOnly: false,
@@ -410,15 +413,13 @@ const openSettingsEventName = "open-settings";
 const missingTauriRuntimeMessage =
   "Tauri 実行環境が見つかりません。アプリの操作確認は npm run tauri dev またはビルド済みアプリから実行してください";
 
-const statusFilterOptions: ReadonlyArray<{ value: StatusFilter; label: string }> = [
-  { value: "all", label: "All" },
+const statusFilterOptions: ReadonlyArray<{ value: TunnelStatus; label: string }> = [
   { value: "running", label: "Running" },
   { value: "stale", label: "Stale" },
   { value: "idle", label: "Idle" },
 ];
 
-const scopeFilterOptions: ReadonlyArray<{ value: ScopeFilter; label: string }> = [
-  { value: "all", label: "All scopes" },
+const scopeFilterOptions: ReadonlyArray<{ value: ConfigScope; label: string }> = [
   { value: "local", label: "Local" },
   { value: "global", label: "Global" },
 ];
@@ -1527,6 +1528,28 @@ function App(): ReactElement {
   }
 
   /**
+   * ステータス絞り込みの選択状態を切り替える
+   */
+  function toggleStatusFilter(status: TunnelStatus): void {
+    captureResultScrollPosition();
+    setFilters((current) => ({
+      ...current,
+      statuses: toggleRequiredFilterValue(current.statuses, status),
+    }));
+  }
+
+  /**
+   * スコープ絞り込みの選択状態を切り替える
+   */
+  function toggleScopeFilter(scope: ConfigScope): void {
+    captureResultScrollPosition();
+    setFilters((current) => ({
+      ...current,
+      scopes: toggleRequiredFilterValue(current.scopes, scope),
+    }));
+  }
+
+  /**
    * 検索入力値を即時反映し、一覧への適用は遅延させる
    */
   function updateQueryInput(value: string): void {
@@ -1548,7 +1571,12 @@ function App(): ReactElement {
   function resetFilters(): void {
     captureResultScrollPosition();
     setQueryInput(initialFilters.query);
-    setFilters((current) => ({ ...initialFilters, tagMode: current.tagMode }));
+    setFilters((current) => ({
+      ...initialFilters,
+      statuses: [...allStatusFilters],
+      scopes: [...allScopeFilters],
+      tagMode: current.tagMode,
+    }));
   }
 
   return (
@@ -1592,6 +1620,8 @@ function App(): ReactElement {
               autoRecoverUpdatingIds={autoRecoverUpdatingIds}
               onQueryInputChange={updateQueryInput}
               onFilterChange={updateFilter}
+              onToggleStatusFilter={toggleStatusFilter}
+              onToggleScopeFilter={toggleScopeFilter}
               onToggleTag={toggleTagFilter}
               onResetFilters={resetFilters}
               onDisplayModeChange={setTunnelDisplayMode}
@@ -2128,6 +2158,8 @@ interface DashboardViewProps {
   isBusy: boolean;
   onQueryInputChange: (value: string) => void;
   onFilterChange: <K extends keyof TunnelFilters>(field: K, value: TunnelFilters[K]) => void;
+  onToggleStatusFilter: (status: TunnelStatus) => void;
+  onToggleScopeFilter: (scope: ConfigScope) => void;
   onToggleTag: (tag: string) => void;
   onResetFilters: () => void;
   onDisplayModeChange: (mode: TunnelDisplayMode) => void;
@@ -2173,6 +2205,8 @@ function DashboardView({
   isBusy,
   onQueryInputChange,
   onFilterChange,
+  onToggleStatusFilter,
+  onToggleScopeFilter,
   onToggleTag,
   onResetFilters,
   onDisplayModeChange,
@@ -2220,6 +2254,8 @@ function DashboardView({
         hasActiveFilters={hasActiveFilters}
         onQueryInputChange={onQueryInputChange}
         onFilterChange={onFilterChange}
+        onToggleStatusFilter={onToggleStatusFilter}
+        onToggleScopeFilter={onToggleScopeFilter}
         onToggleTag={onToggleTag}
         onResetFilters={onResetFilters}
         onDisplayModeChange={onDisplayModeChange}
@@ -2735,6 +2771,8 @@ interface TunnelOperationsPanelProps {
   hasActiveFilters: boolean;
   onQueryInputChange: (value: string) => void;
   onFilterChange: <K extends keyof TunnelFilters>(field: K, value: TunnelFilters[K]) => void;
+  onToggleStatusFilter: (status: TunnelStatus) => void;
+  onToggleScopeFilter: (scope: ConfigScope) => void;
   onToggleTag: (tag: string) => void;
   onResetFilters: () => void;
   onDisplayModeChange: (mode: TunnelDisplayMode) => void;
@@ -2754,6 +2792,8 @@ function TunnelOperationsPanel({
   hasActiveFilters,
   onQueryInputChange,
   onFilterChange,
+  onToggleStatusFilter,
+  onToggleScopeFilter,
   onToggleTag,
   onResetFilters,
   onDisplayModeChange,
@@ -2826,38 +2866,56 @@ function TunnelOperationsPanel({
             </div>
           </HeroTextField>
 
-          <div className="grid grid-cols-4 gap-0.5 rounded-lg border border-border bg-muted p-0.5">
-            {statusFilterOptions.map((option) => (
-              <HeroButton
-                key={option.value}
-                type="button"
-                variant={filters.status === option.value ? "primary" : "ghost"}
-                size="sm"
-                fullWidth
-                onPress={() => onFilterChange("status", option.value)}
-                aria-pressed={filters.status === option.value}
-                className="min-w-0 justify-center"
-              >
-                {option.label}
-              </HeroButton>
-            ))}
+          <div
+            className="grid grid-cols-3 gap-0.5 rounded-lg border border-border bg-muted p-0.5"
+            role="group"
+            aria-label="Status filters"
+          >
+            {statusFilterOptions.map((option) => {
+              const selected = filters.statuses.includes(option.value);
+
+              return (
+                <HeroButton
+                  key={option.value}
+                  type="button"
+                  variant={selected ? "primary" : "ghost"}
+                  size="sm"
+                  fullWidth
+                  onPress={() => onToggleStatusFilter(option.value)}
+                  aria-pressed={selected}
+                  isDisabled={selected && filters.statuses.length === 1}
+                  className="min-w-0 justify-center"
+                >
+                  {option.label}
+                </HeroButton>
+              );
+            })}
           </div>
 
-          <div className="grid grid-cols-3 gap-0.5 rounded-lg border border-border bg-muted p-0.5">
-            {scopeFilterOptions.map((option) => (
-              <HeroButton
-                key={option.value}
-                type="button"
-                variant={filters.scope === option.value ? "primary" : "ghost"}
-                size="sm"
-                fullWidth
-                onPress={() => onFilterChange("scope", option.value)}
-                aria-pressed={filters.scope === option.value}
-                className="min-w-0 justify-center"
-              >
-                {option.label}
-              </HeroButton>
-            ))}
+          <div
+            className="grid grid-cols-2 gap-0.5 rounded-lg border border-border bg-muted p-0.5"
+            role="group"
+            aria-label="Scope filters"
+          >
+            {scopeFilterOptions.map((option) => {
+              const selected = filters.scopes.includes(option.value);
+
+              return (
+                <HeroButton
+                  key={option.value}
+                  type="button"
+                  variant={selected ? "primary" : "ghost"}
+                  size="sm"
+                  fullWidth
+                  onPress={() => onToggleScopeFilter(option.value)}
+                  aria-pressed={selected}
+                  isDisabled={selected && filters.scopes.length === 1}
+                  className="min-w-0 justify-center"
+                >
+                  {option.label}
+                </HeroButton>
+              );
+            })}
           </div>
 
           <HeroButton
@@ -3021,8 +3079,8 @@ function ActiveFilterChips({
   onToggleTag,
 }: ActiveFilterChipsProps): ReactElement | null {
   const query = queryInput.trim();
-  const hasStatusFilter = filters.status !== initialFilters.status;
-  const hasScopeFilter = filters.scope !== initialFilters.scope;
+  const hasStatusFilter = !hasCompleteFilterSelection(filters.statuses, allStatusFilters);
+  const hasScopeFilter = !hasCompleteFilterSelection(filters.scopes, allScopeFilters);
   const hasTagFilters = filters.tags.length > 0;
   const hasFavoriteFilter = filters.favoritesOnly !== initialFilters.favoritesOnly;
 
@@ -3044,14 +3102,14 @@ function ActiveFilterChips({
       ) : null}
       {hasStatusFilter ? (
         <FilterChip
-          label={`status: ${filters.status}`}
-          onRemove={() => onFilterChange("status", initialFilters.status)}
+          label={`status: ${filterSelectionLabels(filters.statuses, statusFilterOptions)}`}
+          onRemove={() => onFilterChange("statuses", [...allStatusFilters])}
         />
       ) : null}
       {hasScopeFilter ? (
         <FilterChip
-          label={`scope: ${filters.scope}`}
-          onRemove={() => onFilterChange("scope", initialFilters.scope)}
+          label={`scope: ${filterSelectionLabels(filters.scopes, scopeFilterOptions)}`}
+          onRemove={() => onFilterChange("scopes", [...allScopeFilters])}
         />
       ) : null}
       {hasFavoriteFilter ? (
@@ -5176,16 +5234,18 @@ function filterTunnels(
   homePath: string | null,
 ): TunnelView[] {
   const query = filters.query.trim().toLowerCase();
+  const selectedStatuses = new Set(filters.statuses);
+  const selectedScopes = new Set(filters.scopes);
   const selectedTags = new Set(filters.tags);
 
   return tunnels.filter((tunnel) => {
     const status = tunnelStatus(tunnel);
 
-    if (filters.status !== "all" && filters.status !== status) {
+    if (!selectedStatuses.has(status)) {
       return false;
     }
 
-    if (filters.scope !== "all" && filters.scope !== tunnel.source) {
+    if (!selectedScopes.has(tunnel.source)) {
       return false;
     }
 
@@ -5199,6 +5259,51 @@ function filterTunnels(
 
     return query.length === 0 || tunnelContainsQuery(tunnel, query, homePath);
   });
+}
+
+/**
+ * 必須の複数選択条件を1件以上残して切り替える
+ */
+function toggleRequiredFilterValue<Value extends string>(
+  selectedValues: Value[],
+  value: Value,
+): Value[] {
+  if (!selectedValues.includes(value)) {
+    return [...selectedValues, value];
+  }
+
+  if (selectedValues.length <= 1) {
+    return selectedValues;
+  }
+
+  return selectedValues.filter((selectedValue) => selectedValue !== value);
+}
+
+/**
+ * 複数選択条件が全候補を含むか判定する
+ */
+function hasCompleteFilterSelection<Value extends string>(
+  selectedValues: readonly Value[],
+  allValues: ReadonlyArray<Value>,
+): boolean {
+  const selected = new Set(selectedValues);
+
+  return selected.size === allValues.length && allValues.every((value) => selected.has(value));
+}
+
+/**
+ * 複数選択条件の表示ラベルを候補順に生成する
+ */
+function filterSelectionLabels<Value extends string>(
+  selectedValues: readonly Value[],
+  options: ReadonlyArray<{ value: Value; label: string }>,
+): string {
+  const selected = new Set(selectedValues);
+
+  return options
+    .filter((option) => selected.has(option.value))
+    .map((option) => option.label)
+    .join(", ");
 }
 
 /**
@@ -5267,8 +5372,8 @@ function orderTagsBySelection(tags: string[], selectedTags: string[]): string[] 
 function hasActiveTunnelFilters(filters: TunnelFilters): boolean {
   return (
     filters.query.trim().length > 0 ||
-    filters.status !== initialFilters.status ||
-    filters.scope !== initialFilters.scope ||
+    !hasCompleteFilterSelection(filters.statuses, allStatusFilters) ||
+    !hasCompleteFilterSelection(filters.scopes, allScopeFilters) ||
     filters.favoritesOnly !== initialFilters.favoritesOnly ||
     filters.tags.length > 0
   );

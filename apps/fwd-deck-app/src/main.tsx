@@ -364,6 +364,8 @@ interface RuntimeDisplayInfo {
   ariaLabel: string;
 }
 
+type TunnelSearchIndex = ReadonlyMap<string, readonly string[]>;
+
 interface ViewportScrollSnapshot {
   left: number;
   top: number;
@@ -398,6 +400,7 @@ const initialForm: TunnelFormState = {
 };
 
 const initialDuplicateForm: DuplicateTunnelFormState = initialForm;
+const emptyTunnelViews: readonly TunnelView[] = [];
 
 const allStatusFilters = [
   "running",
@@ -512,15 +515,20 @@ function App(): ReactElement {
   const resultScrollSnapshotRef = useRef<ViewportScrollSnapshot | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
+  const dashboardTunnels = dashboard?.tunnels ?? emptyTunnelViews;
   const stats = useMemo<DashboardStats>(() => calculateStats(dashboard), [dashboard]);
   const selectedIdList = useMemo<string[]>(() => Array.from(selectedIds), [selectedIds]);
   const availableTags = useMemo<string[]>(
-    () => collectAvailableTags(dashboard?.tunnels ?? []),
-    [dashboard],
+    () => collectAvailableTags(dashboardTunnels),
+    [dashboardTunnels],
+  );
+  const tunnelSearchIndex = useMemo<TunnelSearchIndex>(
+    () => buildTunnelSearchIndex(dashboardTunnels, homePath),
+    [dashboardTunnels, homePath],
   );
   const filteredTunnels = useMemo<TunnelView[]>(
-    () => filterTunnels(dashboard?.tunnels ?? [], filters, homePath),
-    [dashboard, filters, homePath],
+    () => filterTunnels(dashboardTunnels, filters, tunnelSearchIndex, homePath),
+    [dashboardTunnels, filters, tunnelSearchIndex, homePath],
   );
   const filteredTunnelIds = useMemo<string[]>(
     () => filteredTunnels.map((tunnel) => tunnel.runtimeId),
@@ -3243,7 +3251,10 @@ function TunnelOperationsPanel({
   onResetFilters,
   onDisplayModeChange,
 }: TunnelOperationsPanelProps): ReactElement {
-  const visibleTags = orderTagsBySelection(availableTags, filters.tags);
+  const visibleTags = useMemo(
+    () => orderTagsBySelection(availableTags, filters.tags),
+    [availableTags, filters.tags],
+  );
 
   return (
     <section className="rounded-xl border border-border bg-card shadow-sm">
@@ -5852,8 +5863,9 @@ function stringArraysEqual(left: readonly string[], right: readonly string[]): b
  * トンネル一覧を画面上の絞り込み条件で抽出する
  */
 function filterTunnels(
-  tunnels: TunnelView[],
+  tunnels: readonly TunnelView[],
   filters: TunnelFilters,
+  searchIndex: TunnelSearchIndex,
   homePath: string | null,
 ): TunnelView[] {
   const query = filters.query.trim().toLowerCase();
@@ -5880,7 +5892,7 @@ function filterTunnels(
       return false;
     }
 
-    return query.length === 0 || tunnelContainsQuery(tunnel, query, homePath);
+    return query.length === 0 || tunnelContainsQuery(tunnel, query, searchIndex, homePath);
   });
 }
 
@@ -5961,7 +5973,7 @@ function tunnelMatchesSelectedTags(
 /**
  * 設定済みトンネルから利用可能なタグ一覧を抽出する
  */
-function collectAvailableTags(tunnels: TunnelView[]): string[] {
+function collectAvailableTags(tunnels: readonly TunnelView[]): string[] {
   const tags = new Set<string>();
 
   tunnels.forEach((tunnel) => {
@@ -6077,29 +6089,60 @@ function formatRuntimeStartTimestamp(startedAtUnixSeconds: number): string {
 }
 
 /**
- * トンネルが検索語を含むか判定する
+ * トンネル検索で参照する文字列を事前に正規化する
  */
-function tunnelContainsQuery(tunnel: TunnelView, query: string, homePath: string | null): boolean {
-  const sourceDisplayPath = formatPathForDisplay(tunnel.sourcePath, homePath);
+function buildTunnelSearchIndex(
+  tunnels: readonly TunnelView[],
+  homePath: string | null,
+): TunnelSearchIndex {
+  const valuesByRuntimeId = new Map<string, readonly string[]>();
 
-  return (
-    stringContainsQuery(tunnel.id, query) ||
-    stringContainsQuery(tunnel.description ?? "", query) ||
-    stringContainsQuery(tunnel.local, query) ||
-    stringContainsQuery(tunnel.remote, query) ||
-    stringContainsQuery(tunnel.ssh, query) ||
-    stringContainsQuery(tunnel.source, query) ||
-    stringContainsQuery(tunnel.sourcePath, query) ||
-    stringContainsQuery(sourceDisplayPath, query) ||
-    tunnel.tags.some((tag) => stringContainsQuery(tag, query))
-  );
+  for (const tunnel of tunnels) {
+    valuesByRuntimeId.set(tunnel.runtimeId, buildTunnelSearchValues(tunnel, homePath));
+  }
+
+  return valuesByRuntimeId;
 }
 
 /**
- * 文字列が正規化済み検索語を含むか判定する
+ * 1件のトンネルから検索対象文字列を抽出する
  */
-function stringContainsQuery(value: string, query: string): boolean {
-  return value.toLowerCase().includes(query);
+function buildTunnelSearchValues(tunnel: TunnelView, homePath: string | null): readonly string[] {
+  const sourceDisplayPath = formatPathForDisplay(tunnel.sourcePath, homePath);
+
+  return [
+    tunnel.id,
+    tunnel.description ?? "",
+    tunnel.local,
+    tunnel.remote,
+    tunnel.ssh,
+    tunnel.source,
+    tunnel.sourcePath,
+    sourceDisplayPath,
+    ...tunnel.tags,
+  ].map(normalizeSearchValue);
+}
+
+/**
+ * トンネルが検索語を含むか判定する
+ */
+function tunnelContainsQuery(
+  tunnel: TunnelView,
+  query: string,
+  searchIndex: TunnelSearchIndex,
+  homePath: string | null,
+): boolean {
+  const searchValues =
+    searchIndex.get(tunnel.runtimeId) ?? buildTunnelSearchValues(tunnel, homePath);
+
+  return searchValues.some((value) => value.includes(query));
+}
+
+/**
+ * 検索対象文字列を比較用に正規化する
+ */
+function normalizeSearchValue(value: string): string {
+  return value.toLowerCase();
 }
 
 /**

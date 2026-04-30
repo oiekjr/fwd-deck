@@ -205,12 +205,13 @@ where
         .map(|_| None)
         .collect::<Vec<_>>();
     let mut pending_jobs = Vec::new();
+    let existing_state_probe = RuntimeStatusProbe::from_states(&state_file.tunnels);
 
     for (index, resolved) in resolved_tunnels.iter().enumerate() {
         let runtime_id = runtime_id_for_resolved_tunnel(resolved);
 
         if let Some(existing) = state_file.get(&runtime_id)
-            && tunnel_is_running(existing)
+            && existing_state_probe.process_state_for(existing) == ProcessState::Running
         {
             let result = Err(TunnelRuntimeError::AlreadyRunning {
                 runtime_id: existing.runtime_id.clone(),
@@ -327,7 +328,10 @@ impl RuntimeStatusProbe {
     fn from_states(states: &[TunnelState]) -> Self {
         let pid_is_running = states
             .iter()
-            .map(|state| (state.pid, process_is_running(state.pid)))
+            .map(|state| state.pid)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .map(|pid| (pid, process_is_running(pid)))
             .collect::<HashMap<_, _>>();
         let local_ports = states
             .iter()

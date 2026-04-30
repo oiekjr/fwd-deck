@@ -853,7 +853,7 @@ fn tray_tunnel_menu_item(
 
     TrayTunnelMenuItem {
         menu_id: format!("{TRAY_TUNNEL_ITEM_PREFIX}{index}"),
-        label: tray_tunnel_label(&resolved.tunnel.id, is_stale),
+        label: tray_tunnel_label(&resolved.tunnel.id, resolved.source.kind, is_stale),
         checked: is_running,
         enabled: is_running || can_start,
         action: TrayTunnelAction {
@@ -865,11 +865,11 @@ fn tray_tunnel_menu_item(
 }
 
 /// トレイ表示用のトンネル名を生成する
-fn tray_tunnel_label(id: &str, is_stale: bool) -> String {
+fn tray_tunnel_label(id: &str, source: ConfigSourceKind, is_stale: bool) -> String {
     if is_stale {
-        format!("{id} (stale)")
+        format!("{id} ({source}, stale)")
     } else {
-        id.to_owned()
+        format!("{id} ({source})")
     }
 }
 
@@ -3804,9 +3804,15 @@ use_global = true
             resolved_tunnel_with_port("running-db", PathBuf::from("fwd-deck.toml"), 15432);
         let stale = resolved_tunnel_with_port("stale-db", PathBuf::from("fwd-deck.toml"), 15433);
         let idle = resolved_tunnel_with_port("idle-db", PathBuf::from("fwd-deck.toml"), 15434);
+        let global = resolved_tunnel_with_source_and_port(
+            "global-db",
+            ConfigSourceKind::Global,
+            PathBuf::from("global-fwd-deck.toml"),
+            15435,
+        );
         let config = EffectiveConfig::new(
             Vec::new(),
-            vec![running.clone(), stale.clone(), idle.clone()],
+            vec![running.clone(), stale.clone(), idle.clone(), global.clone()],
         );
         let statuses = vec![
             scoped_runtime_status(&running, RuntimeScope::Workspace, ProcessState::Running),
@@ -3817,6 +3823,7 @@ use_global = true
         let items = tray_tunnel_menu_items(&config, &statuses, &validation);
 
         let running_item = tray_item_by_id(&items, "running-db");
+        assert_eq!(running_item.label, "running-db (local)");
         assert!(running_item.checked);
         assert!(running_item.enabled);
         assert_eq!(running_item.action.operation, TrayTunnelOperation::Stop);
@@ -3826,15 +3833,19 @@ use_global = true
         );
 
         let stale_item = tray_item_by_id(&items, "stale-db");
-        assert_eq!(stale_item.label, "stale-db (stale)");
+        assert_eq!(stale_item.label, "stale-db (local, stale)");
         assert!(!stale_item.checked);
         assert!(stale_item.enabled);
         assert_eq!(stale_item.action.operation, TrayTunnelOperation::Start);
 
         let idle_item = tray_item_by_id(&items, "idle-db");
+        assert_eq!(idle_item.label, "idle-db (local)");
         assert!(!idle_item.checked);
         assert!(idle_item.enabled);
         assert_eq!(idle_item.action.operation, TrayTunnelOperation::Start);
+
+        let global_item = tray_item_by_id(&items, "global-db");
+        assert_eq!(global_item.label, "global-db (global)");
     }
 
     /// トレイアイコン種別が起動中トンネルの有無に追従することを検証する
@@ -4351,8 +4362,18 @@ use_global = true
         source_path: PathBuf,
         local_port: u16,
     ) -> ResolvedTunnelConfig {
+        resolved_tunnel_with_source_and_port(id, ConfigSourceKind::Local, source_path, local_port)
+    }
+
+    /// テスト用の設定ソースと local port 指定 resolved tunnel を生成する
+    fn resolved_tunnel_with_source_and_port(
+        id: &str,
+        source_kind: ConfigSourceKind,
+        source_path: PathBuf,
+        local_port: u16,
+    ) -> ResolvedTunnelConfig {
         ResolvedTunnelConfig::new(
-            ConfigSource::new(ConfigSourceKind::Local, source_path),
+            ConfigSource::new(source_kind, source_path),
             TunnelConfig {
                 id: id.to_owned(),
                 description: None,

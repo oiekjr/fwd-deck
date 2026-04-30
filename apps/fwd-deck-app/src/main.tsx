@@ -3603,26 +3603,31 @@ function TrackedPanel({
     <section className="pointer-events-none fixed right-4 bottom-4 left-4 z-40">
       <div
         ref={panelRef}
-        className="pointer-events-auto mx-auto w-full max-w-[96rem] overflow-hidden rounded-xl border border-border bg-card/95 shadow-2xl backdrop-blur"
+        className="pointer-events-auto mx-auto w-full max-w-[96rem] overflow-hidden rounded-xl border border-foreground/15 bg-card shadow-2xl ring-1 ring-foreground/5 backdrop-blur"
       >
         <HeroButton
           type="button"
           variant="ghost"
           fullWidth
-          className="h-auto justify-between gap-3 rounded-none bg-muted/35 px-3 py-2 text-left"
+          className="h-auto justify-between gap-3 rounded-none bg-card px-3 py-2.5 text-left hover:bg-muted/60"
           onPress={onToggleCollapsed}
           aria-expanded={!isCollapsed}
         >
           <span className="flex min-w-0 items-center gap-2">
-            <span className="rounded-md bg-muted p-1.5 text-foreground/70">
+            <span className="rounded-md border border-foreground/10 bg-primary/10 p-1.5 text-foreground shadow-sm">
               <Activity className="shrink-0" size={16} />
             </span>
-            <span className="truncate text-sm font-semibold">Tracked runtime</span>
-            <Chip color="accent" size="sm" variant="soft">
+            <span className="truncate text-sm font-bold text-foreground">Tracked runtime</span>
+            <Chip
+              className="border border-foreground/10 bg-primary/15 text-foreground"
+              color="accent"
+              size="sm"
+              variant="soft"
+            >
               {dashboard.trackedTunnels.length}
             </Chip>
           </span>
-          <span className="flex shrink-0 items-center gap-2 text-xs text-foreground/60">
+          <span className="flex shrink-0 items-center gap-2 rounded-md bg-muted px-2 py-1 text-xs font-semibold text-foreground/75 ring-1 ring-foreground/10">
             {isCollapsed ? "Show" : "Hide"}
             {isCollapsed ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
           </span>

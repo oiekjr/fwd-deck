@@ -283,6 +283,7 @@ type DuplicateTunnelEditableField = keyof DuplicateTunnelFormState;
 
 type AppMessageKind = "success" | "error" | "info";
 type OperationToastKind = AppMessageKind | "warning";
+type OperationToastStatus = "visible" | "exiting";
 
 interface AppMessage {
   kind: AppMessageKind;
@@ -297,6 +298,15 @@ interface OperationToastMessage {
 }
 
 type OperationToastInput = Omit<OperationToastMessage, "id">;
+
+interface OperationToastItem extends OperationToastMessage {
+  status: OperationToastStatus;
+}
+
+interface OperationToastState {
+  queue: OperationToastItem[];
+  toasts: OperationToastItem[];
+}
 
 type TunnelOperationCommand = "start_tunnels" | "stop_tunnels";
 
@@ -421,11 +431,18 @@ const initialFilters: TunnelFilters = {
 
 const searchDebounceMilliseconds = 200;
 const autoRefreshIntervalMilliseconds = 2_000;
+const maxOperationToastCount = 3;
 const operationToastDismissMilliseconds = 4_000;
+const operationToastExitFallbackMilliseconds = 260;
 const millisecondsPerSecond = 1_000;
 const secondsPerMinute = 60;
 const secondsPerHour = secondsPerMinute * 60;
 const secondsPerDay = secondsPerHour * 24;
+
+const initialOperationToastState: OperationToastState = {
+  queue: [],
+  toasts: [],
+};
 
 const runtimeStartTimestampFormatter = new Intl.DateTimeFormat(undefined, {
   year: "numeric",
@@ -499,7 +516,9 @@ function App(): ReactElement {
   const [editFormFeedback, setEditFormFeedback] = useState<AppMessage | null>(null);
   const [duplicateFormFeedback, setDuplicateFormFeedback] = useState<AppMessage | null>(null);
   const [message, setMessage] = useState<AppMessage | null>(null);
-  const [operationToast, setOperationToast] = useState<OperationToastMessage | null>(null);
+  const [operationToastState, setOperationToastState] = useState<OperationToastState>(
+    initialOperationToastState,
+  );
   const [cliIntegration, setCliIntegration] = useState<CliIntegrationState | null>(null);
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
   const [runtimeNowUnixSeconds, setRuntimeNowUnixSeconds] = useState<number>(0);
@@ -549,15 +568,35 @@ function App(): ReactElement {
    */
   const showOperationToast = useCallback((message: OperationToastInput): void => {
     operationToastIdRef.current += 1;
+    const toast: OperationToastItem = {
+      ...message,
+      id: operationToastIdRef.current,
+      status: "visible",
+    };
+
     setMessage(null);
-    setOperationToast({ ...message, id: operationToastIdRef.current });
+    setOperationToastState((current) => appendOperationToast(current, toast));
   }, []);
 
   /**
-   * 表示中の操作結果トーストを閉じる
+   * 指定した操作結果トーストを閉じる
    */
-  const dismissOperationToast = useCallback((): void => {
-    setOperationToast(null);
+  const dismissOperationToast = useCallback((id: number): void => {
+    setOperationToastState((current) => dismissOperationToastById(current, id));
+  }, []);
+
+  /**
+   * 退出アニメーションが完了した操作結果トーストを破棄する
+   */
+  const removeOperationToast = useCallback((id: number): void => {
+    setOperationToastState((current) => removeOperationToastById(current, id));
+  }, []);
+
+  /**
+   * 表示中の操作結果トーストをすべて閉じる
+   */
+  const dismissOperationToasts = useCallback((): void => {
+    setOperationToastState(dismissAllOperationToasts);
   }, []);
 
   /**
@@ -754,19 +793,6 @@ function App(): ReactElement {
 
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [activeView, deleteTarget, editTarget, isBusy, loadCliIntegration, paths, settingsDraft]);
-
-  useEffect(() => {
-    if (operationToast === null) {
-      return;
-    }
-
-    const toastId = operationToast.id;
-    const timeoutId = window.setTimeout(() => {
-      setOperationToast((current) => (current?.id === toastId ? null : current));
-    }, operationToastDismissMilliseconds);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [operationToast]);
 
   useEffect(() => {
     if (!isTauriRuntimeAvailable()) {
@@ -1056,7 +1082,7 @@ function App(): ReactElement {
 
       const message = operationMessage(report);
       if (message === null) {
-        dismissOperationToast();
+        dismissOperationToasts();
         return;
       }
 
@@ -1986,7 +2012,11 @@ function App(): ReactElement {
         onSubmit={handleSubmitDuplicatedTunnel}
         onBrowseIdentityFile={handleBrowseDuplicateIdentityFile}
       />
-      <ToastViewport toast={operationToast} onDismiss={dismissOperationToast} />
+      <ToastViewport
+        toasts={operationToastState.toasts}
+        onDismiss={dismissOperationToast}
+        onExited={removeOperationToast}
+      />
     </main>
   );
 }
@@ -3867,39 +3897,76 @@ function SelectionOperationProgress({
 }
 
 interface ToastViewportProps {
-  toast: OperationToastMessage | null;
-  onDismiss: () => void;
+  toasts: OperationToastItem[];
+  onDismiss: (id: number) => void;
+  onExited: (id: number) => void;
 }
 
 /**
  * 操作結果トーストの固定表示領域を描画する
  */
-function ToastViewport({ toast, onDismiss }: ToastViewportProps): ReactElement | null {
-  if (toast === null) {
+function ToastViewport({ toasts, onDismiss, onExited }: ToastViewportProps): ReactElement | null {
+  if (toasts.length === 0) {
     return null;
   }
 
   return (
-    <section className="pointer-events-none fixed top-4 right-4 left-4 z-[60] sm:left-auto sm:w-[30rem]">
-      <OperationToast toast={toast} onDismiss={onDismiss} />
+    <section className="pointer-events-none fixed top-4 right-4 left-4 z-[60] flex flex-col gap-2 sm:left-auto sm:w-[30rem]">
+      {toasts.map((toast) => (
+        <OperationToast key={toast.id} toast={toast} onDismiss={onDismiss} onExited={onExited} />
+      ))}
     </section>
   );
 }
 
 interface OperationToastProps {
-  toast: OperationToastMessage;
-  onDismiss: () => void;
+  toast: OperationToastItem;
+  onDismiss: (id: number) => void;
+  onExited: (id: number) => void;
 }
 
 /**
  * 操作結果の要約と詳細をトーストとして表示する
  */
-function OperationToast({ toast, onDismiss }: OperationToastProps): ReactElement {
+function OperationToast({ toast, onDismiss, onExited }: OperationToastProps): ReactElement {
+  useEffect(() => {
+    if (toast.status !== "visible") {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(
+      () => onDismiss(toast.id),
+      operationToastDismissMilliseconds,
+    );
+
+    return () => window.clearTimeout(timeoutId);
+  }, [onDismiss, toast.id, toast.status]);
+
+  useEffect(() => {
+    if (toast.status !== "exiting") {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(
+      () => onExited(toast.id),
+      operationToastExitFallbackMilliseconds,
+    );
+
+    return () => window.clearTimeout(timeoutId);
+  }, [onExited, toast.id, toast.status]);
+
   return (
     <Alert
       status={alertStatus(toast.kind)}
-      className="pointer-events-auto max-h-[min(22rem,calc(100vh-2rem))] w-full overflow-hidden shadow-lg"
+      className={`operation-toast operation-toast-${toast.status} pointer-events-auto max-h-[min(22rem,calc(100vh-2rem))] w-full overflow-hidden shadow-lg`}
       role={toast.kind === "error" ? "alert" : "status"}
+      onAnimationEnd={(event) => {
+        if (event.currentTarget !== event.target || toast.status !== "exiting") {
+          return;
+        }
+
+        onExited(toast.id);
+      }}
     >
       <Alert.Indicator>{alertIcon(toast.kind, 20)}</Alert.Indicator>
       <Alert.Content className="min-w-0 flex-1">
@@ -3916,7 +3983,7 @@ function OperationToast({ toast, onDismiss }: OperationToastProps): ReactElement
         size="sm"
         isIconOnly
         className="-mt-1 -mr-2 shrink-0"
-        onPress={onDismiss}
+        onPress={() => onDismiss(toast.id)}
         aria-label="通知を閉じる"
       >
         <X size={14} />
@@ -7181,6 +7248,142 @@ function toggleTag(current: string[], tag: string): string[] {
   }
 
   return [...current, tag];
+}
+
+/**
+ * 新規トーストを表示上限に応じて投入または待機させる
+ */
+function appendOperationToast(
+  current: OperationToastState,
+  toast: OperationToastItem,
+): OperationToastState {
+  if (current.queue.length === 0 && !operationToastsIncludeExiting(current.toasts)) {
+    if (current.toasts.length < maxOperationToastCount) {
+      return {
+        queue: [],
+        toasts: [...current.toasts, toast],
+      };
+    }
+
+    return {
+      queue: [toast],
+      toasts: startOldestOperationToastExit(current.toasts),
+    };
+  }
+
+  return {
+    ...current,
+    queue: [...current.queue, toast],
+  };
+}
+
+/**
+ * 指定トーストを退場状態へ変更する
+ */
+function dismissOperationToastById(current: OperationToastState, id: number): OperationToastState {
+  let changed = false;
+  const toasts = current.toasts.map((toast) => {
+    if (toast.id !== id || toast.status === "exiting") {
+      return toast;
+    }
+
+    changed = true;
+    return { ...toast, status: "exiting" as const };
+  });
+
+  if (!changed) {
+    return current;
+  }
+
+  return {
+    ...current,
+    toasts,
+  };
+}
+
+/**
+ * 退場完了後に待機中トーストを順番に投入する
+ */
+function removeOperationToastById(current: OperationToastState, id: number): OperationToastState {
+  if (!current.toasts.some((toast) => toast.id === id)) {
+    return current;
+  }
+
+  return fillOperationToastVacancy({
+    queue: current.queue,
+    toasts: current.toasts.filter((toast) => toast.id !== id),
+  });
+}
+
+/**
+ * 表示中トーストをすべて退場状態へ変更し、待機キューを破棄する
+ */
+function dismissAllOperationToasts(current: OperationToastState): OperationToastState {
+  return {
+    queue: [],
+    toasts: current.toasts.map((toast) =>
+      toast.status === "exiting" ? toast : { ...toast, status: "exiting" },
+    ),
+  };
+}
+
+/**
+ * 最古の表示中トーストを退場状態へ変更する
+ */
+function startOldestOperationToastExit(toasts: OperationToastItem[]): OperationToastItem[] {
+  const targetIndex = toasts.findIndex((toast) => toast.status === "visible");
+
+  if (targetIndex < 0) {
+    return toasts;
+  }
+
+  return toasts.map((toast, index) =>
+    index === targetIndex ? { ...toast, status: "exiting" } : toast,
+  );
+}
+
+/**
+ * 空いた表示枠へ待機中トーストを投入する
+ */
+function fillOperationToastVacancy(current: OperationToastState): OperationToastState {
+  const vacantCount = maxOperationToastCount - current.toasts.length;
+
+  if (vacantCount <= 0 || current.queue.length === 0) {
+    return startNextQueuedOperationToastExit(current);
+  }
+
+  const inserted = current.queue.slice(0, vacantCount);
+  const remainingQueue = current.queue.slice(vacantCount);
+
+  return startNextQueuedOperationToastExit({
+    queue: remainingQueue,
+    toasts: [...current.toasts, ...inserted],
+  });
+}
+
+/**
+ * 待機中トーストが残る場合に次の退場を開始する
+ */
+function startNextQueuedOperationToastExit(current: OperationToastState): OperationToastState {
+  if (
+    current.queue.length === 0 ||
+    current.toasts.length < maxOperationToastCount ||
+    operationToastsIncludeExiting(current.toasts)
+  ) {
+    return current;
+  }
+
+  return {
+    ...current,
+    toasts: startOldestOperationToastExit(current.toasts),
+  };
+}
+
+/**
+ * 退場中トーストの有無を判定する
+ */
+function operationToastsIncludeExiting(toasts: OperationToastItem[]): boolean {
+  return toasts.some((toast) => toast.status === "exiting");
 }
 
 /**

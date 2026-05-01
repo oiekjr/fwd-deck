@@ -763,38 +763,6 @@ function App(): ReactElement {
   }, [captureResultScrollPosition, filters.query, queryInput]);
 
   useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent): void {
-      if (isSettingsKeyboardShortcut(event)) {
-        event.preventDefault();
-        setSettingsDraft((current) => current ?? paths);
-        void loadCliIntegration(true);
-        return;
-      }
-
-      if (
-        isSearchKeyboardShortcut(event) &&
-        activeView === "dashboard" &&
-        settingsDraft === null &&
-        deleteTarget === null &&
-        editTarget === null
-      ) {
-        event.preventDefault();
-        searchInputRef.current?.focus();
-        searchInputRef.current?.select();
-        return;
-      }
-
-      if (event.key === "Escape" && !isBusy) {
-        setSettingsDraft(null);
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeView, deleteTarget, editTarget, isBusy, loadCliIntegration, paths, settingsDraft]);
-
-  useEffect(() => {
     if (!isTauriRuntimeAvailable()) {
       return;
     }
@@ -906,6 +874,57 @@ function App(): ReactElement {
     },
     [applyLoadedDashboard, paths],
   );
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (isSettingsKeyboardShortcut(event)) {
+        event.preventDefault();
+        setSettingsDraft((current) => current ?? paths);
+        void loadCliIntegration(true);
+        return;
+      }
+
+      if (isRefreshKeyboardShortcut(event)) {
+        event.preventDefault();
+
+        if (!isBusy) {
+          void refreshDashboard();
+        }
+
+        return;
+      }
+
+      if (
+        isSearchKeyboardShortcut(event) &&
+        activeView === "dashboard" &&
+        settingsDraft === null &&
+        deleteTarget === null &&
+        editTarget === null
+      ) {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+        return;
+      }
+
+      if (event.key === "Escape" && !isBusy) {
+        setSettingsDraft(null);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    activeView,
+    deleteTarget,
+    editTarget,
+    isBusy,
+    loadCliIntegration,
+    paths,
+    refreshDashboard,
+    settingsDraft,
+  ]);
 
   useEffect(() => {
     if (!isTauriRuntimeAvailable()) {
@@ -7108,6 +7127,16 @@ function isSettingsKeyboardShortcut(event: KeyboardEvent): boolean {
   const isCommaKey = event.key === "," || event.code === "Comma";
 
   return hasPrimaryModifier && isCommaKey && !event.altKey && !event.shiftKey;
+}
+
+/**
+ * Dashboard を再読み込みするショートカット入力か判定する
+ */
+function isRefreshKeyboardShortcut(event: KeyboardEvent): boolean {
+  const hasPrimaryModifier = event.metaKey || event.ctrlKey;
+  const isRKey = event.key.toLowerCase() === "r" || event.code === "KeyR";
+
+  return hasPrimaryModifier && isRKey && !event.altKey && !event.shiftKey;
 }
 
 /**

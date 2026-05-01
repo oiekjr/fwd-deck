@@ -67,6 +67,8 @@ fwd-deck open ~/projects/my-service
 既存アプリが起動中の場合は、既存ウィンドウで Workspace を切り替えます。
 切り替え時は旧 Workspace の local トンネルを停止し、global トンネルは維持します。
 
+アプリ表示中は `Cmd+R` または `Ctrl+R` で Dashboard を再読み込みできます。
+
 問題がなければトンネルを起動し、状態を確認します。
 
 ```sh

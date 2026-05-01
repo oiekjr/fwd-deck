@@ -42,7 +42,9 @@ const STATUS_REMOTE_MIN_WIDTH: usize = 32;
 const STATUS_PID_MIN_WIDTH: usize = 8;
 const STATUS_STATE_MIN_WIDTH: usize = 10;
 const TRUNCATION_MARKER: &str = "...";
+#[cfg(any(test, target_os = "macos"))]
 const FWD_DECK_APP_BUNDLE_IDENTIFIER: &str = "dev.oiekjr.fwddeck";
+#[cfg(any(test, target_os = "macos"))]
 const FWD_DECK_APP_OPEN_WORKSPACE_ARG: &str = "--fwd-deck-open-workspace";
 const CLI_AFTER_HELP: &str = "\
 例:
@@ -413,10 +415,12 @@ enum CliError {
     #[cfg(not(target_os = "macos"))]
     #[error("fwd-deck-app is supported only on macOS")]
     AppOpenUnsupported,
+    #[cfg(any(test, target_os = "macos"))]
     #[error(
         "Fwd Deck.app が見つかりません。\nmacOSアプリをインストールしてから再実行してください。\n\n  brew install --cask oiekjr/tap/fwd-deck-app"
     )]
     AppNotInstalled,
+    #[cfg(any(test, target_os = "macos"))]
     #[error("Fwd Deck.app を起動できませんでした。\n{message}")]
     AppLaunchFailed { message: String },
     #[error("Failed to launch Fwd Deck.app: {0}")]
@@ -664,6 +668,7 @@ fn launch_app_with_open_command(_workspace_path: &str) -> Result<(), CliError> {
 }
 
 /// Fwd Deck.app 起動用の open 引数を生成する
+#[cfg(any(test, target_os = "macos"))]
 fn app_open_command_args(workspace_path: &str) -> Vec<String> {
     vec![
         "-n".to_owned(),
@@ -676,6 +681,7 @@ fn app_open_command_args(workspace_path: &str) -> Vec<String> {
 }
 
 /// open コマンドの失敗をユーザー向けエラーへ変換する
+#[cfg(any(test, target_os = "macos"))]
 fn app_launch_error_from_output(status_code: Option<i32>, stderr: &str) -> CliError {
     if app_launch_error_indicates_missing_app(stderr) {
         return CliError::AppNotInstalled;
@@ -695,6 +701,7 @@ fn app_launch_error_from_output(status_code: Option<i32>, stderr: &str) -> CliEr
 }
 
 /// LaunchServices の出力がアプリ未検出を示すか判定する
+#[cfg(any(test, target_os = "macos"))]
 fn app_launch_error_indicates_missing_app(stderr: &str) -> bool {
     let stderr = stderr.to_ascii_lowercase();
 

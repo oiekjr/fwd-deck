@@ -18,6 +18,11 @@ When a Markdown document intentionally needs a rendered line break inside a para
 
 In Japanese Markdown documents, normally insert a line break immediately after a Japanese full stop (`。`). If that line break is intended as a rendered line break, the preceding line MUST end with two ASCII spaces.
 
+## Conditional Compilation Guidelines
+
+When adding or changing code behind OS-specific `cfg` attributes, apply the same `cfg` boundary to helper functions, constants, enum variants, and tests that exist only for that platform-specific path.
+Do not leave platform-specific support code compiled on other operating systems unless it is intentionally shared.
+
 ## Japanese Text Spacing
 
 Do not mechanically insert half-width spaces before or after numbers or English words in Japanese comments and documents.

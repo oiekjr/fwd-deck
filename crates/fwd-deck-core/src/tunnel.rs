@@ -13,7 +13,7 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    ResolvedTimeoutConfig, ResolvedTunnelConfig, TunnelState,
+    ResolvedTimeoutConfig, ResolvedTunnelConfig, TunnelState, TunnelStateFile,
     state::{StateFileError, read_state_file, runtime_id_for_resolved_tunnel, write_state_file},
 };
 
@@ -271,7 +271,35 @@ pub fn tunnel_statuses(state_path: &Path) -> Result<Vec<TunnelRuntimeStatus>, Tu
     let state_file = read_state_file(state_path)?;
     let probe = RuntimeStatusProbe::from_states(&state_file.tunnels);
 
-    Ok(state_file
+    Ok(tunnel_statuses_from_state_file(state_file, &probe))
+}
+
+/// 複数状態ファイルのトンネル状態一覧をまとめて取得する
+pub fn tunnel_statuses_for_state_files(
+    state_paths: &[&Path],
+) -> Result<Vec<Vec<TunnelRuntimeStatus>>, TunnelRuntimeError> {
+    let state_files = state_paths
+        .iter()
+        .map(|path| read_state_file(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let probe = RuntimeStatusProbe::from_states(
+        state_files
+            .iter()
+            .flat_map(|state_file| state_file.tunnels.iter()),
+    );
+
+    Ok(state_files
+        .into_iter()
+        .map(|state_file| tunnel_statuses_from_state_file(state_file, &probe))
+        .collect())
+}
+
+/// 読み込み済み状態ファイルを検査済みのプロセス状態と結合する
+fn tunnel_statuses_from_state_file(
+    state_file: TunnelStateFile,
+    probe: &RuntimeStatusProbe,
+) -> Vec<TunnelRuntimeStatus> {
+    state_file
         .tunnels
         .into_iter()
         .map(|state| {
@@ -282,7 +310,7 @@ pub fn tunnel_statuses(state_path: &Path) -> Result<Vec<TunnelRuntimeStatus>, Tu
                 process_state,
             }
         })
-        .collect())
+        .collect()
 }
 
 /// トンネルを停止して状態ファイルから削除する
@@ -325,7 +353,8 @@ struct RuntimeStatusProbe {
 
 impl RuntimeStatusProbe {
     /// 状態一覧からプロセス状態の検査結果を初期化する
-    fn from_states(states: &[TunnelState]) -> Self {
+    fn from_states<'a>(states: impl IntoIterator<Item = &'a TunnelState>) -> Self {
+        let states = states.into_iter().collect::<Vec<_>>();
         let pid_is_running = states
             .iter()
             .map(|state| state.pid)
@@ -869,6 +898,52 @@ mod tests {
         .expect("start tunnels");
 
         assert_eq!(reported_indexes, vec![0]);
+    }
+
+    /// 複数状態ファイルの状態取得が入力順のファイル単位で結果を返すことを検証する
+    #[test]
+    fn tunnel_statuses_for_state_files_preserves_file_groups() {
+        let temp_dir = TempDir::new().expect("create state directory");
+        let running_state_path = temp_dir.path().join("running-state.toml");
+        let stale_state_path = temp_dir.path().join("stale-state.toml");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let local_port = listener.local_addr().expect("read listener address").port();
+        let running_resolved = resolved_tunnel_with_local_port(local_port);
+        let stale_resolved = ResolvedTunnelConfig::new(
+            ConfigSource::new(ConfigSourceKind::Global, PathBuf::from("global.toml")),
+            TunnelConfig {
+                name: "cache".to_owned(),
+                local_port: 25432,
+                ..resolved_tunnel().tunnel
+            },
+        );
+        let mut running_state = TunnelStateFile::new();
+        let mut stale_state = TunnelStateFile::new();
+
+        running_state.upsert(TunnelState::from_resolved_tunnel(
+            &running_resolved,
+            process::id(),
+            1_700_000_000,
+        ));
+        stale_state.upsert(TunnelState::from_resolved_tunnel(
+            &stale_resolved,
+            u32::MAX,
+            1_700_000_000,
+        ));
+        write_state_file(&running_state_path, &running_state).expect("write running state file");
+        write_state_file(&stale_state_path, &stale_state).expect("write stale state file");
+
+        let results = tunnel_statuses_for_state_files(&[
+            running_state_path.as_path(),
+            stale_state_path.as_path(),
+        ])
+        .expect("read statuses");
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0][0].state.name, "db");
+        assert_eq!(results[0][0].process_state, ProcessState::Running);
+        assert_eq!(results[1][0].state.name, "cache");
+        assert_eq!(results[1][0].process_state, ProcessState::Stale);
     }
 
     /// PIDが存在し、同じPIDがLISTENしている場合にRunningと判定する

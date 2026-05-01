@@ -21,8 +21,8 @@ use fwd_deck_core::{
     default_state_file_path, format_path_for_display, load_effective_config,
     normalize_runtime_source_path, remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel,
     start_tunnel, start_tunnels_with_progress, stop_tunnel, tag_is_valid, tunnel_runtime_id,
-    tunnel_runtime_id_from_normalized_source_path, tunnel_statuses, update_tunnel_in_config_file,
-    validate_config,
+    tunnel_runtime_id_from_normalized_source_path, tunnel_statuses,
+    tunnel_statuses_for_state_files, update_tunnel_in_config_file, validate_config,
 };
 #[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
@@ -4425,25 +4425,37 @@ fn load_scoped_runtime_statuses(
     paths: &RuntimePaths,
 ) -> Result<Vec<ScopedRuntimeStatus>, AppError> {
     let local_config_match = paths.local_config_path.as_deref().map(PathMatchTarget::new);
-    let mut statuses = tunnel_statuses(&paths.global_state_path)?
-        .into_iter()
-        .filter(|status| global_state_status_is_visible(local_config_match.as_ref(), status))
-        .map(|status| ScopedRuntimeStatus {
-            runtime_scope: RuntimeScope::Global,
-            status,
-        })
-        .collect::<Vec<_>>();
+    let mut state_files = vec![(RuntimeScope::Global, paths.global_state_path.as_path())];
 
-    if let Some(workspace_state_path) = &paths.workspace_state_path {
-        statuses.extend(
-            tunnel_statuses(workspace_state_path)?
-                .into_iter()
-                .filter(|status| status.state.source_kind == ConfigSourceKind::Local)
-                .map(|status| ScopedRuntimeStatus {
-                    runtime_scope: RuntimeScope::Workspace,
+    if let Some(workspace_state_path) = paths.workspace_state_path.as_deref() {
+        state_files.push((RuntimeScope::Workspace, workspace_state_path));
+    }
+
+    let state_paths = state_files
+        .iter()
+        .map(|(_scope, state_path)| *state_path)
+        .collect::<Vec<_>>();
+    let statuses_by_file = tunnel_statuses_for_state_files(&state_paths)?;
+    let mut statuses = Vec::new();
+
+    for ((runtime_scope, _state_path), file_statuses) in
+        state_files.into_iter().zip(statuses_by_file)
+    {
+        for status in file_statuses {
+            let is_visible = match runtime_scope {
+                RuntimeScope::Global => {
+                    global_state_status_is_visible(local_config_match.as_ref(), &status)
+                }
+                RuntimeScope::Workspace => status.state.source_kind == ConfigSourceKind::Local,
+            };
+
+            if is_visible {
+                statuses.push(ScopedRuntimeStatus {
+                    runtime_scope,
                     status,
-                }),
-        );
+                });
+            }
+        }
     }
 
     Ok(statuses)
@@ -4502,7 +4514,9 @@ impl PathMatchTarget {
 
     /// 指定パスが基準パスと同じファイルを指すか判定する
     fn matches(&self, candidate: &Path) -> bool {
-        self.original == candidate || self.normalized == comparable_path(candidate)
+        self.original == candidate
+            || self.normalized == candidate
+            || self.normalized == comparable_path(candidate)
     }
 }
 

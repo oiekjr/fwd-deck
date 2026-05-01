@@ -643,6 +643,15 @@ function App(): ReactElement {
   }, []);
 
   /**
+   * runtime 経過表示が変化する場合だけ現在時刻を更新する
+   */
+  const updateRuntimeNowForDashboard = useCallback((loaded: DashboardState): void => {
+    setRuntimeNowUnixSeconds((current) =>
+      nextRuntimeNowUnixSeconds(current, currentUnixSeconds(), loaded),
+    );
+  }, []);
+
+  /**
    * 読み込んだダッシュボード状態を画面へ反映する
    */
   const applyLoadedDashboard = useCallback(
@@ -652,11 +661,11 @@ function App(): ReactElement {
       }
 
       setDashboard((current) => reconcileDashboardState(current, loaded));
-      setRuntimeNowUnixSeconds(currentUnixSeconds());
+      updateRuntimeNowForDashboard(loaded);
       setPaths((current) => reconcileWorkspaceSelection(current, loaded.paths));
       setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
     },
-    [captureResultScrollPosition, filters],
+    [captureResultScrollPosition, filters, updateRuntimeNowForDashboard],
   );
 
   useLayoutEffect(() => {
@@ -920,7 +929,7 @@ function App(): ReactElement {
         });
 
         setDashboard((current) => reconcileDashboardState(current, loaded));
-        setRuntimeNowUnixSeconds(currentUnixSeconds());
+        updateRuntimeNowForDashboard(loaded);
         setPaths((current) => reconcileWorkspaceSelection(current, loaded.paths));
         setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
         setMessage(null);
@@ -933,7 +942,7 @@ function App(): ReactElement {
     }
 
     void loadInitialDashboard();
-  }, []);
+  }, [updateRuntimeNowForDashboard]);
 
   useEffect(() => {
     if (!hasCompletedInitialLoad) {
@@ -1097,7 +1106,7 @@ function App(): ReactElement {
       });
 
       setDashboard((current) => reconcileDashboardState(current, loaded));
-      setRuntimeNowUnixSeconds(currentUnixSeconds());
+      updateRuntimeNowForDashboard(loaded);
       setPaths((current) => reconcileWorkspaceSelection(current, loaded.paths));
       setForm({ ...initialForm, scope: form.scope });
       setFormFeedback(null);
@@ -1203,7 +1212,7 @@ function App(): ReactElement {
       }
 
       setDashboard((current) => reconcileDashboardState(current, loaded));
-      setRuntimeNowUnixSeconds(currentUnixSeconds());
+      updateRuntimeNowForDashboard(loaded);
       setPaths((current) => reconcileWorkspaceSelection(current, loaded.paths));
       setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
       setEditTarget(null);
@@ -1235,7 +1244,7 @@ function App(): ReactElement {
       }
 
       setDashboard((current) => reconcileDashboardState(current, loaded));
-      setRuntimeNowUnixSeconds(currentUnixSeconds());
+      updateRuntimeNowForDashboard(loaded);
       setPaths((current) => reconcileWorkspaceSelection(current, loaded.paths));
       setSelectedIds((current) => removeSelection(current, tunnel.runtimeId));
       showOperationToast({ kind: "success", summary: `${tunnel.id} を設定から削除しました` });
@@ -6407,6 +6416,67 @@ function tunnelStatus(tunnel: TunnelView): TunnelStatus {
  */
 function currentUnixSeconds(): number {
   return Math.floor(Date.now() / millisecondsPerSecond);
+}
+
+/**
+ * 表示上の runtime 経過時間が変わる場合だけ次の現在時刻を採用する
+ */
+function nextRuntimeNowUnixSeconds(
+  currentNowUnixSeconds: number,
+  nextNowUnixSeconds: number,
+  dashboard: DashboardState,
+): number {
+  if (!Number.isFinite(nextNowUnixSeconds) || nextNowUnixSeconds <= 0) {
+    return currentNowUnixSeconds;
+  }
+
+  if (!Number.isFinite(currentNowUnixSeconds) || currentNowUnixSeconds <= 0) {
+    return nextNowUnixSeconds;
+  }
+
+  if (currentNowUnixSeconds === nextNowUnixSeconds) {
+    return currentNowUnixSeconds;
+  }
+
+  return dashboardRuntimeAgeLabelsChanged(dashboard, currentNowUnixSeconds, nextNowUnixSeconds)
+    ? nextNowUnixSeconds
+    : currentNowUnixSeconds;
+}
+
+/**
+ * ダッシュボード内の runtime 経過表示に変化があるか判定する
+ */
+function dashboardRuntimeAgeLabelsChanged(
+  dashboard: DashboardState,
+  previousNowUnixSeconds: number,
+  nextNowUnixSeconds: number,
+): boolean {
+  for (const tunnel of dashboard.tunnels) {
+    if (
+      tunnel.status !== null &&
+      runtimeAgeLabelChanged(tunnel.status, previousNowUnixSeconds, nextNowUnixSeconds)
+    ) {
+      return true;
+    }
+  }
+
+  return dashboard.trackedTunnels.some((tracked) =>
+    runtimeAgeLabelChanged(tracked.status, previousNowUnixSeconds, nextNowUnixSeconds),
+  );
+}
+
+/**
+ * runtime 単位の経過表示に変化があるか判定する
+ */
+function runtimeAgeLabelChanged(
+  status: RuntimeStatusView,
+  previousNowUnixSeconds: number,
+  nextNowUnixSeconds: number,
+): boolean {
+  return (
+    formatRuntimeAge(status.startedAtUnixSeconds, previousNowUnixSeconds) !==
+    formatRuntimeAge(status.startedAtUnixSeconds, nextNowUnixSeconds)
+  );
 }
 
 /**

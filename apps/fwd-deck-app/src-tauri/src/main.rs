@@ -19,9 +19,10 @@ use fwd_deck_core::{
     TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport,
     add_tunnel_to_config_file, default_global_config_path, default_local_config_path,
     default_state_file_path, format_path_for_display, load_effective_config,
-    remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel, start_tunnel,
-    start_tunnels_with_progress, stop_tunnel, tag_is_valid, tunnel_runtime_id, tunnel_statuses,
-    update_tunnel_in_config_file, validate_config,
+    normalize_runtime_source_path, remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel,
+    start_tunnel, start_tunnels_with_progress, stop_tunnel, tag_is_valid, tunnel_runtime_id,
+    tunnel_runtime_id_from_normalized_source_path, tunnel_statuses, update_tunnel_in_config_file,
+    validate_config,
 };
 #[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
@@ -2008,12 +2009,13 @@ fn tray_auto_recover_tunnel_menu_items(
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
+    let mut runtime_id_cache = RuntimeIdCache::default();
     let mut items = config
         .tunnels
         .iter()
         .enumerate()
         .map(|(index, resolved)| {
-            let runtime_id = runtime_id_for_resolved_tunnel(resolved);
+            let runtime_id = runtime_id_cache.runtime_id_for_resolved_tunnel(resolved);
             let is_enabled = auto_recover_runtime_ids.contains(runtime_id.as_str());
             let sort_key = tray_tunnel_sort_key(resolved, &runtime_id);
             let item = tray_auto_recover_tunnel_menu_item(index, resolved, runtime_id, is_enabled);
@@ -2042,12 +2044,13 @@ where
         .map(|status| (runtime_status_lookup_key(status), status))
         .collect::<HashMap<_, _>>();
     let can_start = validation.is_valid();
+    let mut runtime_id_cache = RuntimeIdCache::default();
     let mut items = config
         .tunnels
         .iter()
         .enumerate()
         .filter_map(|(index, resolved)| {
-            let runtime_id = runtime_id_for_resolved_tunnel(resolved);
+            let runtime_id = runtime_id_cache.runtime_id_for_resolved_tunnel(resolved);
             if !include_runtime_id(&runtime_id) {
                 return None;
             }
@@ -3591,9 +3594,10 @@ fn start_tunnels_inner(
     let config = load_effective_config(&runtime_paths.config_paths)?;
 
     ensure_valid_config(&config)?;
+    let lookup = ConfiguredTunnelLookup::new(&config);
     let mut progress = OperationProgressEmitter::new(app, operation_id, targets.len());
-    let report = run_start_tunnel_operations(&runtime_paths, &config, &targets, &mut progress)?;
-    let reset_runtime_ids = auto_recover_runtime_ids_for_operation_targets(&config, &targets);
+    let report = run_start_tunnel_operations(&runtime_paths, &lookup, &targets, &mut progress)?;
+    let reset_runtime_ids = auto_recover_runtime_ids_for_operation_targets(&lookup, &targets);
     reset_auto_recover_runtime_states(app, reset_runtime_ids);
 
     Ok(report)
@@ -3608,15 +3612,16 @@ fn stop_tunnels_inner(
 ) -> Result<OperationReport, AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
+    let lookup = ConfiguredTunnelLookup::new(&config);
     let mut progress = OperationProgressEmitter::new(app, operation_id, targets.len());
     let reset_runtime_ids =
-        auto_recover_runtime_ids_for_stop_operation_targets(&runtime_paths, &config, &targets);
+        auto_recover_runtime_ids_for_stop_operation_targets(&runtime_paths, &lookup, &targets);
 
     let report = run_tunnel_operations_with_progress(
         &targets,
         |target| {
             let (runtime_id, state_path) =
-                resolve_stop_operation_target(&runtime_paths, &config, target)?;
+                resolve_stop_operation_target(&runtime_paths, &lookup, target)?;
 
             stop_tunnel_for_app(&runtime_id, &state_path)
         },
@@ -3825,8 +3830,9 @@ where
 
     let mut runtime_paths = runtime_paths_from_preferences(app_config_dir, preferences)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
+    let lookup = ConfiguredTunnelLookup::new(&config);
 
-    ensure_configured_runtime_id(&config, runtime_id)?;
+    ensure_configured_runtime_id(&lookup, runtime_id)?;
     update_preference(&mut runtime_paths.preferences);
     write_preferences_file_if_changed(
         &preferences_path,
@@ -4377,10 +4383,12 @@ fn collect_workspace_switch_stop_targets_from_state(
     runtime_scope: RuntimeScope,
     local_config_path: &Path,
 ) -> Result<Vec<WorkspaceSwitchStopTarget>, AppError> {
+    let local_config_match = PathMatchTarget::new(local_config_path);
+
     Ok(tunnel_statuses(state_path)?
         .into_iter()
         .filter(|status| status.state.source_kind == ConfigSourceKind::Local)
-        .filter(|status| paths_refer_to_same_file(local_config_path, &status.state.source_path))
+        .filter(|status| local_config_match.matches(&status.state.source_path))
         .map(|status| WorkspaceSwitchStopTarget {
             id: status.state.name,
             runtime_id: status.state.runtime_id,
@@ -4416,9 +4424,10 @@ fn runtime_scope_for_source(kind: ConfigSourceKind) -> RuntimeScope {
 fn load_scoped_runtime_statuses(
     paths: &RuntimePaths,
 ) -> Result<Vec<ScopedRuntimeStatus>, AppError> {
+    let local_config_match = paths.local_config_path.as_deref().map(PathMatchTarget::new);
     let mut statuses = tunnel_statuses(&paths.global_state_path)?
         .into_iter()
-        .filter(|status| global_state_status_is_visible(paths, status))
+        .filter(|status| global_state_status_is_visible(local_config_match.as_ref(), status))
         .map(|status| ScopedRuntimeStatus {
             runtime_scope: RuntimeScope::Global,
             status,
@@ -4441,23 +4450,26 @@ fn load_scoped_runtime_statuses(
 }
 
 /// 既定 state に保存された状態を現在の表示対象へ含めるか判定する
-fn global_state_status_is_visible(paths: &RuntimePaths, status: &TunnelRuntimeStatus) -> bool {
+fn global_state_status_is_visible(
+    local_config_match: Option<&PathMatchTarget>,
+    status: &TunnelRuntimeStatus,
+) -> bool {
     match status.state.source_kind {
         ConfigSourceKind::Global => true,
-        ConfigSourceKind::Local => local_state_matches_active_workspace(paths, status),
+        ConfigSourceKind::Local => local_state_matches_active_workspace(local_config_match, status),
     }
 }
 
 /// local state が現在のワークスペース設定に由来するか判定する
 fn local_state_matches_active_workspace(
-    paths: &RuntimePaths,
+    local_config_match: Option<&PathMatchTarget>,
     status: &TunnelRuntimeStatus,
 ) -> bool {
-    let Some(local_config_path) = &paths.local_config_path else {
+    let Some(local_config_match) = local_config_match else {
         return false;
     };
 
-    paths_refer_to_same_file(local_config_path, &status.state.source_path)
+    local_config_match.matches(&status.state.source_path)
 }
 
 /// 2 つのパスが同じファイルを指すか比較する
@@ -4469,6 +4481,115 @@ fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
     match (fs::canonicalize(left), fs::canonicalize(right)) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
+    }
+}
+
+/// 繰り返し比較する基準パスの正規化結果を保持する
+#[derive(Debug, Clone)]
+struct PathMatchTarget {
+    original: PathBuf,
+    normalized: PathBuf,
+}
+
+impl PathMatchTarget {
+    /// 基準パスを比較用に初期化する
+    fn new(path: &Path) -> Self {
+        Self {
+            original: path.to_path_buf(),
+            normalized: comparable_path(path),
+        }
+    }
+
+    /// 指定パスが基準パスと同じファイルを指すか判定する
+    fn matches(&self, candidate: &Path) -> bool {
+        self.original == candidate || self.normalized == comparable_path(candidate)
+    }
+}
+
+/// パス同一性比較に使う正規化済みパスを取得する
+fn comparable_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// runtime ID 生成で使う設定ファイルパスの正規化結果を保持する
+#[derive(Debug, Default)]
+struct RuntimeIdCache {
+    normalized_source_paths: HashMap<PathBuf, PathBuf>,
+}
+
+impl RuntimeIdCache {
+    /// 解決済みトンネル設定から runtime ID を生成する
+    fn runtime_id_for_resolved_tunnel(&mut self, resolved: &ResolvedTunnelConfig) -> String {
+        tunnel_runtime_id_from_normalized_source_path(
+            resolved.source.kind,
+            self.normalized_source_path(&resolved.source.path),
+            &resolved.tunnel.name,
+        )
+    }
+
+    /// 設定ファイルパスの正規化結果を取得する
+    fn normalized_source_path(&mut self, source_path: &Path) -> &Path {
+        self.normalized_source_paths
+            .entry(source_path.to_path_buf())
+            .or_insert_with(|| normalize_runtime_source_path(source_path))
+            .as_path()
+    }
+}
+
+/// 設定済みトンネルを runtime ID と name から高速に参照する
+#[derive(Debug)]
+struct ConfiguredTunnelLookup<'a> {
+    by_runtime_id: HashMap<String, &'a ResolvedTunnelConfig>,
+    local_by_name: HashMap<&'a str, &'a ResolvedTunnelConfig>,
+    global_by_name: HashMap<&'a str, &'a ResolvedTunnelConfig>,
+}
+
+impl<'a> ConfiguredTunnelLookup<'a> {
+    /// 統合済み設定からトンネル検索用 index を初期化する
+    fn new(config: &'a EffectiveConfig) -> Self {
+        let mut runtime_id_cache = RuntimeIdCache::default();
+        let mut by_runtime_id = HashMap::new();
+        let mut local_by_name = HashMap::new();
+        let mut global_by_name = HashMap::new();
+
+        for resolved in &config.tunnels {
+            by_runtime_id.insert(
+                runtime_id_cache.runtime_id_for_resolved_tunnel(resolved),
+                resolved,
+            );
+
+            match resolved.source.kind {
+                ConfigSourceKind::Local => {
+                    local_by_name
+                        .entry(resolved.tunnel.name.as_str())
+                        .or_insert(resolved);
+                }
+                ConfigSourceKind::Global => {
+                    global_by_name
+                        .entry(resolved.tunnel.name.as_str())
+                        .or_insert(resolved);
+                }
+            }
+        }
+
+        Self {
+            by_runtime_id,
+            local_by_name,
+            global_by_name,
+        }
+    }
+
+    /// runtime ID に対応する設定済みトンネルを取得する
+    fn by_runtime_id(&self, runtime_id: &str) -> Option<&'a ResolvedTunnelConfig> {
+        self.by_runtime_id.get(runtime_id).copied()
+    }
+
+    /// bare name 指定時の優先順位に従って設定済みトンネルを取得する
+    fn by_name(&self, name: &str) -> Option<&'a ResolvedTunnelConfig> {
+        self.local_by_name
+            .get(name)
+            .copied()
+            .or_else(|| self.global_by_name.get(name).copied())
     }
 }
 
@@ -4495,11 +4616,12 @@ fn build_dashboard_state(
         .iter()
         .map(|status| (runtime_status_lookup_key(status), status))
         .collect::<HashMap<_, _>>();
+    let mut runtime_id_cache = RuntimeIdCache::default();
     let mut tunnels = config
         .tunnels
         .iter()
         .map(|resolved| {
-            let runtime_id = runtime_id_for_resolved_tunnel(resolved);
+            let runtime_id = runtime_id_cache.runtime_id_for_resolved_tunnel(resolved);
             let runtime_key = (
                 runtime_scope_for_source(resolved.source.kind),
                 runtime_id.as_str(),
@@ -4663,30 +4785,21 @@ fn configured_tunnel_runtime_id(
     kind: ConfigSourceKind,
     name: &str,
 ) -> Option<String> {
+    let mut runtime_id_cache = RuntimeIdCache::default();
+
     config
         .tunnels
         .iter()
         .find(|resolved| resolved.source.kind == kind && resolved.tunnel.name == name)
-        .map(runtime_id_for_resolved_tunnel)
-}
-
-/// runtime ID に対応する設定済みトンネルを取得する
-fn find_tunnel_by_runtime_id<'a>(
-    config: &'a EffectiveConfig,
-    runtime_id: &str,
-) -> Option<&'a ResolvedTunnelConfig> {
-    config
-        .tunnels
-        .iter()
-        .find(|resolved| runtime_id_for_resolved_tunnel(resolved) == runtime_id)
+        .map(|resolved| runtime_id_cache.runtime_id_for_resolved_tunnel(resolved))
 }
 
 /// runtime ID が現在の設定済みトンネルに存在することを検証する
 fn ensure_configured_runtime_id(
-    config: &EffectiveConfig,
+    lookup: &ConfiguredTunnelLookup<'_>,
     runtime_id: &str,
 ) -> Result<(), AppError> {
-    if find_tunnel_by_runtime_id(config, runtime_id).is_some() {
+    if lookup.by_runtime_id(runtime_id).is_some() {
         return Ok(());
     }
 
@@ -5035,7 +5148,7 @@ fn ensure_required(name: &str, value: &str) -> Result<(), AppError> {
 /// アプリの一括開始操作としてトンネルを開始する
 fn run_start_tunnel_operations(
     paths: &RuntimePaths,
-    config: &EffectiveConfig,
+    lookup: &ConfiguredTunnelLookup<'_>,
     targets: &[OperationTargetInput],
     progress: &mut OperationProgressEmitter<'_>,
 ) -> Result<OperationReport, AppError> {
@@ -5045,7 +5158,7 @@ fn run_start_tunnel_operations(
     let mut groups = Vec::new();
 
     for (index, target) in targets.iter().enumerate() {
-        match resolve_start_operation_target(paths, config, index, target) {
+        match resolve_start_operation_target(paths, lookup, index, target) {
             Ok((state_path, operation_target)) => {
                 push_start_operation_group(&mut groups, state_path, operation_target);
             }
@@ -5099,11 +5212,11 @@ fn run_start_tunnel_operations(
 /// 開始操作の入力を状態ファイル単位の実行対象へ変換する
 fn resolve_start_operation_target(
     paths: &RuntimePaths,
-    config: &EffectiveConfig,
+    lookup: &ConfiguredTunnelLookup<'_>,
     index: usize,
     target: &OperationTargetInput,
 ) -> Result<(PathBuf, StartOperationTarget), AppError> {
-    let tunnel = resolve_configured_tunnel_target(config, target)?;
+    let tunnel = resolve_configured_tunnel_target(lookup, target)?;
     let state_path = state_path_for_source(paths, tunnel.source.kind)?.to_path_buf();
 
     Ok((
@@ -5118,34 +5231,37 @@ fn resolve_start_operation_target(
 
 /// 操作対象から設定済みトンネルを解決する
 fn resolve_configured_tunnel_target<'a>(
-    config: &'a EffectiveConfig,
+    lookup: &ConfiguredTunnelLookup<'a>,
     target: &OperationTargetInput,
 ) -> Result<&'a ResolvedTunnelConfig, AppError> {
     if let Some(runtime_id) = target.runtime_id.as_deref() {
-        return config
-            .tunnels
-            .iter()
-            .find(|resolved| runtime_id_for_resolved_tunnel(resolved) == runtime_id)
-            .ok_or_else(|| {
-                AppError::InvalidInput(format!("未定義の runtime ID です: {runtime_id}"))
-            });
+        return lookup.by_runtime_id(runtime_id).ok_or_else(|| {
+            AppError::InvalidInput(format!("未定義の runtime ID です: {runtime_id}"))
+        });
     }
 
-    find_configured_tunnel_by_name(config, &target.id)
+    lookup
+        .by_name(&target.id)
         .ok_or_else(|| AppError::InvalidInput(format!("未定義のトンネル name です: {}", target.id)))
 }
 
 /// 手動開始対象に対応する runtime ID を取得する
 fn auto_recover_runtime_ids_for_operation_targets(
-    config: &EffectiveConfig,
+    lookup: &ConfiguredTunnelLookup<'_>,
     targets: &[OperationTargetInput],
 ) -> Vec<String> {
+    let mut runtime_id_cache = RuntimeIdCache::default();
+
     targets
         .iter()
         .filter_map(|target| {
-            resolve_configured_tunnel_target(config, target)
+            if let Some(runtime_id) = target.runtime_id.clone() {
+                return Some(runtime_id);
+            }
+
+            resolve_configured_tunnel_target(lookup, target)
                 .ok()
-                .map(runtime_id_for_resolved_tunnel)
+                .map(|resolved| runtime_id_cache.runtime_id_for_resolved_tunnel(resolved))
         })
         .collect()
 }
@@ -5153,14 +5269,14 @@ fn auto_recover_runtime_ids_for_operation_targets(
 /// 手動停止対象に対応する runtime ID を取得する
 fn auto_recover_runtime_ids_for_stop_operation_targets(
     paths: &RuntimePaths,
-    config: &EffectiveConfig,
+    lookup: &ConfiguredTunnelLookup<'_>,
     targets: &[OperationTargetInput],
 ) -> Vec<String> {
     targets
         .iter()
         .filter_map(|target| {
             target.runtime_id.clone().or_else(|| {
-                resolve_stop_operation_target(paths, config, target)
+                resolve_stop_operation_target(paths, lookup, target)
                     .ok()
                     .map(|(runtime_id, _state_path)| runtime_id)
             })
@@ -5168,35 +5284,17 @@ fn auto_recover_runtime_ids_for_stop_operation_targets(
         .collect()
 }
 
-/// bare name 指定時の優先順位に従って設定済みトンネルを取得する
-fn find_configured_tunnel_by_name<'a>(
-    config: &'a EffectiveConfig,
-    name: &str,
-) -> Option<&'a ResolvedTunnelConfig> {
-    config
-        .tunnels
-        .iter()
-        .find(|resolved| {
-            resolved.source.kind == ConfigSourceKind::Local && resolved.tunnel.name == name
-        })
-        .or_else(|| {
-            config.tunnels.iter().find(|resolved| {
-                resolved.source.kind == ConfigSourceKind::Global && resolved.tunnel.name == name
-            })
-        })
-}
-
 /// 停止操作対象から runtime ID と state path を解決する
 fn resolve_stop_operation_target(
     paths: &RuntimePaths,
-    config: &EffectiveConfig,
+    lookup: &ConfiguredTunnelLookup<'_>,
     target: &OperationTargetInput,
 ) -> Result<(String, PathBuf), AppError> {
     if let Some(runtime_id) = target.runtime_id.clone() {
         let state_path = match target.runtime_scope {
             Some(scope) => state_path_for_runtime_scope(paths, scope)?.to_path_buf(),
             None => {
-                let tunnel = resolve_configured_tunnel_target(config, target)?;
+                let tunnel = resolve_configured_tunnel_target(lookup, target)?;
                 state_path_for_source(paths, tunnel.source.kind)?.to_path_buf()
             }
         };
@@ -5220,7 +5318,7 @@ fn resolve_stop_operation_target(
         return Ok((runtime_id, state_path));
     }
 
-    let tunnel = resolve_configured_tunnel_target(config, target)?;
+    let tunnel = resolve_configured_tunnel_target(lookup, target)?;
     let state_path = state_path_for_source(paths, tunnel.source.kind)?.to_path_buf();
 
     Ok((runtime_id_for_resolved_tunnel(tunnel), state_path))
@@ -5370,6 +5468,7 @@ fn auto_recover_targets_from_statuses(
         return Ok(Vec::new());
     }
 
+    let lookup = ConfiguredTunnelLookup::new(config);
     let mut targets = Vec::new();
     for status in statuses {
         if status.status.process_state != ProcessState::Stale {
@@ -5381,7 +5480,7 @@ fn auto_recover_targets_from_statuses(
             continue;
         }
 
-        let Some(tunnel) = find_tunnel_by_runtime_id(config, runtime_id) else {
+        let Some(tunnel) = lookup.by_runtime_id(runtime_id) else {
             continue;
         };
 
@@ -8280,9 +8379,13 @@ show_tracked_runtime_bar = true
         let local_config_path = workspace.path().join("fwd-deck.toml");
         fs::write(&local_config_path, "").expect("write local config");
         let paths = runtime_paths_for_local_config(local_config_path.clone());
+        let local_config_match = paths.local_config_path.as_deref().map(PathMatchTarget::new);
         let status = runtime_status(ConfigSourceKind::Local, local_config_path);
 
-        assert!(global_state_status_is_visible(&paths, &status));
+        assert!(global_state_status_is_visible(
+            local_config_match.as_ref(),
+            &status
+        ));
     }
 
     /// 別ワークスペース由来の local 状態が表示対象から除外されることを検証する
@@ -8295,9 +8398,13 @@ show_tracked_runtime_bar = true
         fs::write(&active_config_path, "").expect("write active config");
         fs::write(&other_config_path, "").expect("write other config");
         let paths = runtime_paths_for_local_config(active_config_path);
+        let local_config_match = paths.local_config_path.as_deref().map(PathMatchTarget::new);
         let status = runtime_status(ConfigSourceKind::Local, other_config_path);
 
-        assert!(!global_state_status_is_visible(&paths, &status));
+        assert!(!global_state_status_is_visible(
+            local_config_match.as_ref(),
+            &status
+        ));
     }
 
     /// 状態の関連付けキーが設定ファイル種別に従うことを検証する

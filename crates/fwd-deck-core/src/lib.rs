@@ -18,7 +18,8 @@ pub use config::{
 pub use path_display::{format_path_for_display, format_path_for_display_with_home};
 pub use state::{
     StateFileError, TunnelState, TunnelStateFile, default_state_file_path,
-    runtime_id_for_resolved_tunnel, tunnel_runtime_id,
+    normalize_runtime_source_path, runtime_id_for_resolved_tunnel, tunnel_runtime_id,
+    tunnel_runtime_id_from_normalized_source_path,
 };
 pub use tunnel::{
     ProcessState, StartedTunnel, StoppedTunnel, TunnelRuntimeError, TunnelRuntimeStatus,

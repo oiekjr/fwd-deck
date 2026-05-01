@@ -222,11 +222,20 @@ pub fn runtime_id_for_resolved_tunnel(resolved: &ResolvedTunnelConfig) -> String
 pub fn tunnel_runtime_id(kind: ConfigSourceKind, source_path: &Path, name: &str) -> String {
     let source_path = normalize_runtime_source_path(source_path);
 
-    format!("{kind}:{}:{name}", source_path.display())
+    tunnel_runtime_id_from_normalized_source_path(kind, &source_path, name)
+}
+
+/// 正規化済み設定ファイルパスから runtime ID を生成する
+pub fn tunnel_runtime_id_from_normalized_source_path(
+    kind: ConfigSourceKind,
+    normalized_source_path: &Path,
+    name: &str,
+) -> String {
+    format!("{kind}:{}:{name}", normalized_source_path.display())
 }
 
 /// runtime ID の入力に使う設定ファイルパスを安定化する
-fn normalize_runtime_source_path(source_path: &Path) -> PathBuf {
+pub fn normalize_runtime_source_path(source_path: &Path) -> PathBuf {
     fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf())
 }
 

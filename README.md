@@ -32,11 +32,13 @@ Option 2: 一度起動を試した後に、`System Settings > Privacy & Security
 
 ## Quick Start
 
-まずローカル設定ファイルを作成します。
+CLI で始める場合は、まずローカル設定ファイルを作成します。
 
 ```sh
 cp fwd-deck.example.toml fwd-deck.toml
 ```
+
+macOSアプリを初めて起動した場合は、global設定が未作成なら `~/.config/fwd-deck/config.toml` に同じ example 設定を自動作成します。
 
 `fwd-deck.toml` を自分の SSH接続先に合わせて編集し、設定と実行環境を確認します。
 

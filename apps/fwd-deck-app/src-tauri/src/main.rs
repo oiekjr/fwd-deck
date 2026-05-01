@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::ExitCode,
     sync::{
@@ -61,6 +62,7 @@ const APP_MENU_SETTINGS: &str = "app-settings";
 const TRAY_ID: &str = "main-tray";
 const TRAY_ICON_IDLE_BYTES: &[u8] = include_bytes!("../icons/tray-idle-template.png");
 const TRAY_ICON_ACTIVE_BYTES: &[u8] = include_bytes!("../icons/tray-active-template.png");
+const EXAMPLE_GLOBAL_CONFIG_CONTENT: &str = include_str!("../../../../fwd-deck.example.toml");
 const TRAY_MENU_SHOW: &str = "tray-show";
 const TRAY_MENU_HIDE: &str = "tray-hide";
 const TRAY_MENU_SETTINGS: &str = "tray-settings";
@@ -3161,6 +3163,22 @@ enum AppError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error(
+        "初回起動用のグローバル設定ディレクトリを作成できませんでした: {}: {source}",
+        format_path_for_display(.path)
+    )]
+    InitialGlobalConfigCreateDir {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error(
+        "初回起動用のグローバル設定を書き込めませんでした: {}: {source}",
+        format_path_for_display(.path)
+    )]
+    InitialGlobalConfigWrite {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("入力が不正です: {0}")]
     InvalidInput(String),
     #[error("設定にエラーがあります: {0}")]
@@ -3366,6 +3384,7 @@ fn load_dashboard_inner(
 ) -> Result<DashboardState, AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths)?;
 
+    bootstrap_initial_global_config_for_app(app, &runtime_paths)?;
     load_dashboard_from_runtime_paths(runtime_paths)
 }
 
@@ -3763,6 +3782,80 @@ fn resolve_runtime_paths(
     )?;
 
     Ok(runtime_paths)
+}
+
+/// アプリ初回起動時に example global 設定を必要に応じて作成する
+fn bootstrap_initial_global_config_for_app(
+    app: &tauri::AppHandle,
+    runtime_paths: &RuntimePaths,
+) -> Result<(), AppError> {
+    let app_config_dir = app_config_dir(app)?;
+    let preferences_path = preferences_path_from_app_config_dir(&app_config_dir);
+
+    bootstrap_initial_global_config(
+        &preferences_path,
+        &runtime_paths.preferences,
+        runtime_paths.config_paths.global.as_deref(),
+    )
+}
+
+/// preferences 未作成時だけ example global 設定と既定 preferences を作成する
+fn bootstrap_initial_global_config(
+    preferences_path: &Path,
+    preferences: &AppPreferences,
+    global_config_path: Option<&Path>,
+) -> Result<(), AppError> {
+    if preferences_path.exists() {
+        return Ok(());
+    }
+
+    if let Some(global_config_path) = global_config_path {
+        write_example_global_config_if_missing(global_config_path)?;
+    }
+
+    write_preferences_file(preferences_path, preferences)?;
+
+    Ok(())
+}
+
+/// example global 設定を既存ファイルを上書きせずに作成する
+fn write_example_global_config_if_missing(path: &Path) -> Result<bool, AppError> {
+    if path.exists() {
+        return Ok(false);
+    }
+
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|source| AppError::InitialGlobalConfigCreateDir {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(source) => {
+            return Err(AppError::InitialGlobalConfigWrite {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+
+    file.write_all(EXAMPLE_GLOBAL_CONFIG_CONTENT.as_bytes())
+        .map_err(|source| AppError::InitialGlobalConfigWrite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    Ok(true)
 }
 
 /// アプリ設定から実行時パスを組み立てる
@@ -5681,6 +5774,86 @@ mod tests {
         let persisted = read_preferences_file(&path).expect("read persisted preferences");
 
         assert_eq!(persisted, next);
+    }
+
+    /// 初回起動時に example global 設定と preferences が作成されることを検証する
+    #[test]
+    fn initial_global_config_bootstrap_writes_example_and_preferences_when_missing() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let preferences_path = temp_dir.path().join("app").join("preferences.toml");
+        let global_config_path = temp_dir.path().join("global").join("config.toml");
+        let preferences = AppPreferences::default();
+
+        bootstrap_initial_global_config(&preferences_path, &preferences, Some(&global_config_path))
+            .expect("bootstrap initial global config");
+        let global_content =
+            fs::read_to_string(&global_config_path).expect("read generated global config");
+        let persisted_preferences =
+            read_preferences_file(&preferences_path).expect("read generated preferences");
+
+        assert_eq!(global_content, EXAMPLE_GLOBAL_CONFIG_CONTENT);
+        assert_eq!(persisted_preferences, preferences);
+    }
+
+    /// preferences 作成済みの場合に example global 設定が作成されないことを検証する
+    #[test]
+    fn initial_global_config_bootstrap_skips_when_preferences_exists() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let preferences_path = temp_dir.path().join("app").join("preferences.toml");
+        let global_config_path = temp_dir.path().join("global").join("config.toml");
+        let preferences = AppPreferences::default();
+        write_preferences_file(&preferences_path, &preferences).expect("write preferences");
+
+        bootstrap_initial_global_config(&preferences_path, &preferences, Some(&global_config_path))
+            .expect("skip initial global config bootstrap");
+
+        assert!(!global_config_path.exists());
+    }
+
+    /// 既存 global 設定が上書きされないことを検証する
+    #[test]
+    fn initial_global_config_bootstrap_keeps_existing_global_config() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let preferences_path = temp_dir.path().join("app").join("preferences.toml");
+        let global_config_path = temp_dir.path().join("global").join("config.toml");
+        let existing_content = "[timeouts]\nconnect_timeout_seconds = 99\n";
+        fs::create_dir_all(global_config_path.parent().expect("global config parent"))
+            .expect("create global config directory");
+        fs::write(&global_config_path, existing_content).expect("write existing global config");
+
+        bootstrap_initial_global_config(
+            &preferences_path,
+            &AppPreferences::default(),
+            Some(&global_config_path),
+        )
+        .expect("keep existing global config");
+        let global_content =
+            fs::read_to_string(&global_config_path).expect("read existing global config");
+        let persisted_preferences =
+            read_preferences_file(&preferences_path).expect("read generated preferences");
+
+        assert_eq!(global_content, existing_content);
+        assert_eq!(persisted_preferences, AppPreferences::default());
+    }
+
+    /// global 設定無効時に example global 設定が作成されないことを検証する
+    #[test]
+    fn initial_global_config_bootstrap_skips_when_global_is_disabled() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let preferences_path = temp_dir.path().join("app").join("preferences.toml");
+        let global_config_path = temp_dir.path().join("global").join("config.toml");
+        let preferences = AppPreferences {
+            use_global: false,
+            ..AppPreferences::default()
+        };
+
+        bootstrap_initial_global_config(&preferences_path, &preferences, None)
+            .expect("skip disabled global config bootstrap");
+        let persisted_preferences =
+            read_preferences_file(&preferences_path).expect("read generated preferences");
+
+        assert!(!global_config_path.exists());
+        assert_eq!(persisted_preferences, preferences);
     }
 
     /// CLI 引数がある場合に CLI mode として扱うことを検証する

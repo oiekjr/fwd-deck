@@ -7,6 +7,8 @@
 `fwd-deck` は、SSH のローカルポートフォワーディング設定を名前とタグで管理する CLI / macOSアプリです。  
 設定ファイルに定義した複数の SSHトンネルを、起動、停止、状態確認、自動回復までまとめて扱えます。
 
+![Fwd Deck dashboard](docs/assets/fwd-deck-dashboard.png)
+
 ## Features
 
 - `name` と `tag` による SSHトンネル管理

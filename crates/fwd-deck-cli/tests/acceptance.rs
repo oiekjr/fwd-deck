@@ -301,9 +301,26 @@ fn help_displays_japanese_overview_commands_and_examples() {
 
     assert!(output.status.success());
     output.assert_stdout_contains("設定ファイルに定義したポートフォワーディングを操作する");
+    output
+        .assert_stdout_contains("現在または指定ディレクトリを Workspace として macOSアプリを開く");
     output.assert_stdout_contains("設定済みトンネルを一覧表示する");
     output.assert_stdout_contains("設定ファイルを検証する");
     output.assert_stdout_contains("fwd-deck start dev-db --dry-run");
+}
+
+/// open --help が cwd 既定と Workspace 切り替えの説明を表示することを検証する
+#[test]
+fn open_help_displays_workspace_path_notes() {
+    let workspace = TestWorkspace::new();
+
+    let output = workspace.run(["open", "--help"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("PATH を省略すると、現在のディレクトリを Workspace として");
+    output.assert_stdout_contains(
+        "既存アプリが起動中の場合は、既存ウィンドウで Workspace を切り替えます。",
+    );
+    output.assert_stdout_contains("旧 Workspace の local トンネルを停止します。");
 }
 
 /// start --help が対話選択、排他制約、dry-run の説明を表示することを検証する

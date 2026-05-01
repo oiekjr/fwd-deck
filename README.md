@@ -56,6 +56,17 @@ fwd-deck list
 fwd-deck start dev-db --dry-run
 ```
 
+現在のディレクトリを macOSアプリの Workspace として開く場合は `open` を使います。
+macOSアプリが未インストールの場合は、先に Homebrew cask からインストールしてください。
+
+```sh
+fwd-deck open
+fwd-deck open ~/projects/my-service
+```
+
+既存アプリが起動中の場合は、既存ウィンドウで Workspace を切り替えます。
+切り替え時は旧 Workspace の local トンネルを停止し、global トンネルは維持します。
+
 問題がなければトンネルを起動し、状態を確認します。
 
 ```sh

@@ -10,6 +10,7 @@ fwd-deck --config ./my-fwd-deck.toml list
 fwd-deck --global-config ~/.config/fwd-deck/work.toml list
 fwd-deck --no-global list
 fwd-deck --state /tmp/fwd-deck-state.toml status
+fwd-deck open ~/projects/my-service
 ```
 
 | オプション | 説明 |
@@ -117,6 +118,27 @@ macOSアプリの Auto recover / Watch 設定は、アプリ設定の `preferenc
 `fwd-deck.toml` と CLIオプションには書き込まず、アプリ常駐中に現在の Workspace と global設定の stale 状態だけを復旧対象にします。
 
 ## Command Reference
+
+### `open`
+
+```sh
+fwd-deck open
+fwd-deck open ~/projects/my-service
+```
+
+現在のディレクトリ、または指定した `PATH` を macOSアプリの Workspace として開きます。
+`PATH` は既存ディレクトリである必要があります。
+相対パスは CLI の現在ディレクトリを基準に解決します。
+
+既存アプリが起動中の場合は、新しいウィンドウを作らずに既存ウィンドウで Workspace を切り替えます。
+Workspace 切り替え時は旧 Workspace の local トンネルを停止し、global トンネルは維持します。
+旧 Workspace の local トンネル停止に失敗した場合は、Workspace 切り替えを中止します。
+
+macOSアプリが未インストールの場合は、先に Homebrew cask からインストールしてください。
+
+```sh
+brew install --cask oiekjr/tap/fwd-deck-app
+```
 
 ### `list`
 

@@ -42,17 +42,29 @@ const STATUS_REMOTE_MIN_WIDTH: usize = 32;
 const STATUS_PID_MIN_WIDTH: usize = 8;
 const STATUS_STATE_MIN_WIDTH: usize = 10;
 const TRUNCATION_MARKER: &str = "...";
+const FWD_DECK_APP_BUNDLE_IDENTIFIER: &str = "dev.oiekjr.fwddeck";
+const FWD_DECK_APP_OPEN_WORKSPACE_ARG: &str = "--fwd-deck-open-workspace";
 const CLI_AFTER_HELP: &str = "\
 例:
   fwd-deck validate
   fwd-deck doctor
   fwd-deck list --tag dev
   fwd-deck start dev-db --dry-run
+  fwd-deck open
   fwd-deck status
 
 設定:
   既定では ./fwd-deck.toml と ~/.config/fwd-deck/config.toml を読み込みます。
   起動中トンネルの状態は ~/.local/state/fwd-deck/state.toml に保存します。";
+const OPEN_AFTER_HELP: &str = "\
+例:
+  fwd-deck open
+  fwd-deck open ~/projects/my-service
+
+補足:
+  PATH を省略すると、現在のディレクトリを Workspace として macOSアプリを開きます。
+  既存アプリが起動中の場合は、既存ウィンドウで Workspace を切り替えます。
+  Workspace 切り替え時は、旧 Workspace の local トンネルを停止します。";
 const LIST_AFTER_HELP: &str = "\
 例:
   fwd-deck list
@@ -224,6 +236,14 @@ struct Cli {
 /// fwd-deck が提供するサブコマンドを表現する
 #[derive(Debug, Clone, Subcommand)]
 enum Command {
+    #[command(
+        about = "現在または指定ディレクトリを Workspace として macOSアプリを開く",
+        after_help = OPEN_AFTER_HELP
+    )]
+    Open {
+        #[arg(value_name = "PATH", help = "Workspace として開くディレクトリ")]
+        path: Option<PathBuf>,
+    },
     #[command(about = "設定済みトンネルを一覧表示する", after_help = LIST_AFTER_HELP)]
     List {
         #[arg(long = "tag", value_name = "TAG", help = "指定タグで絞り込む")]
@@ -384,6 +404,23 @@ enum CliError {
         "Tunnel name exists in multiple configuration files: {id}. Specify --scope in non-interactive mode"
     )]
     AmbiguousConfigEdit { id: String },
+    #[error("Workspace directory was not found: {}", format_path_for_display(.path))]
+    WorkspaceNotFound { path: PathBuf },
+    #[error("Workspace path is not a directory: {}", format_path_for_display(.path))]
+    WorkspaceNotDirectory { path: PathBuf },
+    #[error("Workspace path must be valid UTF-8: {}", format_path_for_display(.path))]
+    WorkspacePathNonUtf8 { path: PathBuf },
+    #[cfg(not(target_os = "macos"))]
+    #[error("fwd-deck-app is supported only on macOS")]
+    AppOpenUnsupported,
+    #[error(
+        "Fwd Deck.app が見つかりません。\nmacOSアプリをインストールしてから再実行してください。\n\n  brew install --cask oiekjr/tap/fwd-deck-app"
+    )]
+    AppNotInstalled,
+    #[error("Fwd Deck.app を起動できませんでした。\n{message}")]
+    AppLaunchFailed { message: String },
+    #[error("Failed to launch Fwd Deck.app: {0}")]
+    AppLaunchIo(#[from] io::Error),
     #[error(transparent)]
     Config(#[from] fwd_deck_core::ConfigLoadError),
     #[error(transparent)]
@@ -415,6 +452,10 @@ fn run() -> Result<ExitCode, CliError> {
     let state_path = cli.state.clone();
 
     match &cli.command {
+        Command::Open { path } => {
+            reject_json_if_requested(cli.json)?;
+            open_app_command(path.clone())
+        }
         Command::List { tags, query, wide } => {
             let config = load_config(&cli)?;
             list_command(&config, tags.clone(), query.clone(), *wide, cli.json)
@@ -552,6 +593,116 @@ fn completion_command(shell: Shell) -> Result<ExitCode, CliError> {
     clap_complete::generate(shell, &mut command, binary_name, &mut io::stdout());
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// 現在または指定ディレクトリを Workspace としてアプリを開く
+fn open_app_command(path: Option<PathBuf>) -> Result<ExitCode, CliError> {
+    let workspace_path = resolve_open_workspace_path(path)?;
+
+    launch_app_for_workspace(&workspace_path)?;
+    println!(
+        "Opening Fwd Deck workspace: {}",
+        format_path_for_display(&workspace_path)
+    );
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// アプリへ渡す Workspace パスを絶対パスへ解決する
+fn resolve_open_workspace_path(path: Option<PathBuf>) -> Result<PathBuf, CliError> {
+    let path = match path {
+        Some(path) => path,
+        None => env::current_dir().map_err(CliError::CurrentDir)?,
+    };
+    let canonical =
+        fs::canonicalize(&path).map_err(|_| CliError::WorkspaceNotFound { path: path.clone() })?;
+
+    if !canonical.is_dir() {
+        return Err(CliError::WorkspaceNotDirectory { path: canonical });
+    }
+
+    if canonical.to_str().is_none() {
+        return Err(CliError::WorkspacePathNonUtf8 { path: canonical });
+    }
+
+    Ok(canonical)
+}
+
+/// macOSアプリを起動して Workspace 切り替え要求を渡す
+fn launch_app_for_workspace(workspace_path: &Path) -> Result<(), CliError> {
+    let workspace_path = workspace_path
+        .to_str()
+        .ok_or_else(|| CliError::WorkspacePathNonUtf8 {
+            path: workspace_path.to_path_buf(),
+        })?;
+
+    launch_app_with_open_command(workspace_path)
+}
+
+/// macOS の open コマンドでアプリを起動する
+#[cfg(target_os = "macos")]
+fn launch_app_with_open_command(workspace_path: &str) -> Result<(), CliError> {
+    let output = ProcessCommand::new("/usr/bin/open")
+        .args(app_open_command_args(workspace_path))
+        .output()
+        .map_err(CliError::AppLaunchIo)?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(app_launch_error_from_output(
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).as_ref(),
+    ))
+}
+
+/// macOS 以外ではアプリ起動を非対応として扱う
+#[cfg(not(target_os = "macos"))]
+fn launch_app_with_open_command(_workspace_path: &str) -> Result<(), CliError> {
+    Err(CliError::AppOpenUnsupported)
+}
+
+/// Fwd Deck.app 起動用の open 引数を生成する
+fn app_open_command_args(workspace_path: &str) -> Vec<String> {
+    vec![
+        "-n".to_owned(),
+        "-b".to_owned(),
+        FWD_DECK_APP_BUNDLE_IDENTIFIER.to_owned(),
+        "--args".to_owned(),
+        FWD_DECK_APP_OPEN_WORKSPACE_ARG.to_owned(),
+        workspace_path.to_owned(),
+    ]
+}
+
+/// open コマンドの失敗をユーザー向けエラーへ変換する
+fn app_launch_error_from_output(status_code: Option<i32>, stderr: &str) -> CliError {
+    if app_launch_error_indicates_missing_app(stderr) {
+        return CliError::AppNotInstalled;
+    }
+
+    let detail = stderr.trim();
+    let message = if detail.is_empty() {
+        match status_code {
+            Some(code) => format!("/usr/bin/open exited with status {code}."),
+            None => "/usr/bin/open was terminated by signal.".to_owned(),
+        }
+    } else {
+        format!("/usr/bin/open の出力:\n{detail}")
+    };
+
+    CliError::AppLaunchFailed { message }
+}
+
+/// LaunchServices の出力がアプリ未検出を示すか判定する
+fn app_launch_error_indicates_missing_app(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+
+    stderr.contains("-10814")
+        || stderr.contains("lscopyapplicationurlsforbundleidentifier() failed")
+        || stderr.contains("unable to find application")
+        || stderr.contains("application not found")
+        || stderr.contains("was not found")
 }
 
 /// 設定編集コマンドを実行する
@@ -3833,6 +3984,76 @@ mod tests {
         let quoted = shell_quote("/tmp/key file's name");
 
         assert_eq!(quoted, "'/tmp/key file'\\''s name'");
+    }
+
+    /// アプリ起動用の open 引数が Workspace パスを含むことを検証する
+    #[test]
+    fn app_open_command_args_include_workspace_path() {
+        let args = app_open_command_args("/tmp/my-workspace");
+
+        assert_eq!(
+            args,
+            vec![
+                "-n",
+                "-b",
+                FWD_DECK_APP_BUNDLE_IDENTIFIER,
+                "--args",
+                FWD_DECK_APP_OPEN_WORKSPACE_ARG,
+                "/tmp/my-workspace"
+            ]
+        );
+    }
+
+    /// アプリ未インストール相当の open 失敗が専用エラーへ変換されることを検証する
+    #[test]
+    fn app_launch_error_maps_missing_app_output() {
+        let error = app_launch_error_from_output(
+            Some(1),
+            "LSOpenURLsWithRole() failed with error -10814 for the file /tmp.",
+        );
+
+        assert!(matches!(error, CliError::AppNotInstalled));
+    }
+
+    /// bundle identifier 解決失敗の open 出力が専用エラーへ変換されることを検証する
+    #[test]
+    fn app_launch_error_maps_bundle_identifier_lookup_failure() {
+        let error = app_launch_error_from_output(
+            Some(1),
+            "LSCopyApplicationURLsForBundleIdentifier() failed while trying to determine the application with bundle identifier dev.oiekjr.fwddeck.",
+        );
+
+        assert!(matches!(error, CliError::AppNotInstalled));
+    }
+
+    /// Workspace パスが絶対ディレクトリへ正規化されることを検証する
+    #[test]
+    fn resolve_open_workspace_path_canonicalizes_directory() {
+        let temp_dir = tempfile::TempDir::new().expect("create temporary directory");
+
+        let resolved = resolve_open_workspace_path(Some(temp_dir.path().to_path_buf()))
+            .expect("resolve workspace path");
+
+        assert!(resolved.is_absolute());
+        assert_eq!(
+            resolved,
+            fs::canonicalize(temp_dir.path()).expect("canonicalize temporary directory")
+        );
+    }
+
+    /// ファイルは Workspace パスとして拒否されることを検証する
+    #[test]
+    fn resolve_open_workspace_path_rejects_file() {
+        let temp_dir = tempfile::TempDir::new().expect("create temporary directory");
+        let file_path = temp_dir.path().join("fwd-deck.toml");
+        fs::write(&file_path, "").expect("write file");
+
+        let result = resolve_open_workspace_path(Some(file_path));
+
+        assert!(matches!(
+            result,
+            Err(CliError::WorkspaceNotDirectory { .. })
+        ));
     }
 
     /// 表示幅の広い文字を含む値が指定幅まで補完されることを検証する

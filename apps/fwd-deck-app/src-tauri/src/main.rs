@@ -3270,11 +3270,19 @@ fn add_tunnel_entry(
 fn duplicate_tunnel_entry(
     app: tauri::AppHandle,
     paths: Option<WorkspaceSelection>,
-    scope: ConfigScopeInput,
+    source_scope: ConfigScopeInput,
+    target_scope: ConfigScopeInput,
     source_id: String,
     duplicate: DuplicateTunnelInput,
 ) -> Result<DashboardState, String> {
-    let result = duplicate_tunnel_entry_inner(&app, paths, scope, &source_id, duplicate);
+    let result = duplicate_tunnel_entry_inner(
+        &app,
+        paths,
+        source_scope,
+        target_scope,
+        &source_id,
+        duplicate,
+    );
     let _ = rebuild_tray_menu(&app);
 
     command_result(result)
@@ -3487,18 +3495,20 @@ fn add_tunnel_entry_inner(
 fn duplicate_tunnel_entry_inner(
     app: &tauri::AppHandle,
     paths: Option<WorkspaceSelection>,
-    scope: ConfigScopeInput,
+    source_scope: ConfigScopeInput,
+    target_scope: ConfigScopeInput,
     source_id: &str,
     duplicate: DuplicateTunnelInput,
 ) -> Result<DashboardState, AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths.clone())?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
-    let kind = ConfigSourceKind::from(scope);
-    let tunnel = duplicate_tunnel_config(&config, kind, source_id, duplicate)?;
+    let source_kind = ConfigSourceKind::from(source_scope);
+    let target_kind = ConfigSourceKind::from(target_scope);
+    let tunnel = duplicate_tunnel_config(&config, source_kind, source_id, duplicate)?;
 
-    validate_new_tunnel(&config, kind, &tunnel)?;
-    let path = config_path_for_scope(&runtime_paths, kind)?;
-    add_tunnel_to_config_file(&path, kind, tunnel)?;
+    validate_new_tunnel(&config, target_kind, &tunnel)?;
+    let path = config_path_for_scope(&runtime_paths, target_kind)?;
+    add_tunnel_to_config_file(&path, target_kind, tunnel)?;
     load_dashboard_inner(app, paths)
 }
 
@@ -7804,6 +7814,157 @@ show_tracked_runtime_bar = true
         assert_eq!(duplicated.timeouts, base.timeouts);
     }
 
+    /// global 由来の複製を local 設定向けに検証できることを確認する
+    #[test]
+    fn duplicate_tunnel_config_allows_global_source_for_local_target() {
+        let global_source =
+            ConfigSource::new(ConfigSourceKind::Global, PathBuf::from("global.toml"));
+        let local_source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("local.toml"));
+        let mut source_tunnel = tunnel_config("db", 15432);
+        source_tunnel.timeouts.connect_timeout_seconds = Some(7);
+        let config = EffectiveConfig::new(
+            Vec::new(),
+            vec![
+                ResolvedTunnelConfig::new(global_source, source_tunnel.clone()),
+                ResolvedTunnelConfig::new(local_source, tunnel_config("cache", 16379)),
+            ],
+        );
+
+        let duplicated = duplicate_tunnel_config(
+            &config,
+            ConfigSourceKind::Global,
+            "db",
+            duplicate_input("db", 15432),
+        )
+        .expect("duplicate global tunnel config");
+
+        assert_eq!(duplicated.timeouts, source_tunnel.timeouts);
+        validate_new_tunnel(&config, ConfigSourceKind::Local, &duplicated)
+            .expect("same name and local_port across scopes should be valid");
+    }
+
+    /// local 由来の複製を global 設定向けに検証できることを確認する
+    #[test]
+    fn duplicate_tunnel_config_allows_local_source_for_global_target() {
+        let global_source =
+            ConfigSource::new(ConfigSourceKind::Global, PathBuf::from("global.toml"));
+        let local_source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("local.toml"));
+        let mut source_tunnel = tunnel_config("db", 15432);
+        source_tunnel.timeouts.connect_timeout_seconds = Some(11);
+        let config = EffectiveConfig::new(
+            Vec::new(),
+            vec![
+                ResolvedTunnelConfig::new(global_source, tunnel_config("cache", 16379)),
+                ResolvedTunnelConfig::new(local_source, source_tunnel.clone()),
+            ],
+        );
+
+        let duplicated = duplicate_tunnel_config(
+            &config,
+            ConfigSourceKind::Local,
+            "db",
+            duplicate_input("db", 15432),
+        )
+        .expect("duplicate local tunnel config");
+
+        assert_eq!(duplicated.timeouts, source_tunnel.timeouts);
+        validate_new_tunnel(&config, ConfigSourceKind::Global, &duplicated)
+            .expect("same name and local_port across scopes should be valid");
+    }
+
+    /// 同名設定がある場合に複製元 scope だけから取得することを確認する
+    #[test]
+    fn duplicate_tunnel_config_selects_source_scope_when_names_overlap() {
+        let global_source =
+            ConfigSource::new(ConfigSourceKind::Global, PathBuf::from("global.toml"));
+        let local_source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("local.toml"));
+        let mut global_tunnel = tunnel_config("db", 15432);
+        global_tunnel.timeouts.connect_timeout_seconds = Some(7);
+        let mut local_tunnel = tunnel_config("db", 25432);
+        local_tunnel.timeouts.connect_timeout_seconds = Some(11);
+        let config = EffectiveConfig::new(
+            Vec::new(),
+            vec![
+                ResolvedTunnelConfig::new(global_source, global_tunnel.clone()),
+                ResolvedTunnelConfig::new(local_source, local_tunnel.clone()),
+            ],
+        );
+
+        let duplicated_global = duplicate_tunnel_config(
+            &config,
+            ConfigSourceKind::Global,
+            "db",
+            duplicate_input("db-global-copy", 35432),
+        )
+        .expect("duplicate global tunnel config");
+        let duplicated_local = duplicate_tunnel_config(
+            &config,
+            ConfigSourceKind::Local,
+            "db",
+            duplicate_input("db-local-copy", 45432),
+        )
+        .expect("duplicate local tunnel config");
+
+        assert_eq!(duplicated_global.timeouts, global_tunnel.timeouts);
+        assert_eq!(duplicated_local.timeouts, local_tunnel.timeouts);
+    }
+
+    /// 複製先 scope 内の name 重複が拒否されることを確認する
+    #[test]
+    fn duplicate_tunnel_config_rejects_duplicate_name_in_target_scope() {
+        let global_source =
+            ConfigSource::new(ConfigSourceKind::Global, PathBuf::from("global.toml"));
+        let local_source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("local.toml"));
+        let config = EffectiveConfig::new(
+            Vec::new(),
+            vec![
+                ResolvedTunnelConfig::new(global_source, tunnel_config("db", 15432)),
+                ResolvedTunnelConfig::new(local_source, tunnel_config("cache", 16379)),
+            ],
+        );
+        let duplicated = duplicate_tunnel_config(
+            &config,
+            ConfigSourceKind::Global,
+            "db",
+            duplicate_input("cache", 25432),
+        )
+        .expect("duplicate tunnel config");
+
+        let result = validate_new_tunnel(&config, ConfigSourceKind::Local, &duplicated);
+
+        assert!(
+            matches!(result, Err(AppError::InvalidInput(message)) if message.contains("同じ name"))
+        );
+    }
+
+    /// 複製先 scope 内の local_port 重複が拒否されることを確認する
+    #[test]
+    fn duplicate_tunnel_config_rejects_duplicate_local_port_in_target_scope() {
+        let global_source =
+            ConfigSource::new(ConfigSourceKind::Global, PathBuf::from("global.toml"));
+        let local_source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("local.toml"));
+        let config = EffectiveConfig::new(
+            Vec::new(),
+            vec![
+                ResolvedTunnelConfig::new(global_source, tunnel_config("db", 15432)),
+                ResolvedTunnelConfig::new(local_source, tunnel_config("cache", 16379)),
+            ],
+        );
+        let duplicated = duplicate_tunnel_config(
+            &config,
+            ConfigSourceKind::Global,
+            "db",
+            duplicate_input("db-copy", 16379),
+        )
+        .expect("duplicate tunnel config");
+
+        let result = validate_new_tunnel(&config, ConfigSourceKind::Local, &duplicated);
+
+        assert!(
+            matches!(result, Err(AppError::InvalidInput(message)) if message.contains("local_port"))
+        );
+    }
+
     /// 複製後 name の重複が既存検証で拒否されることを検証する
     #[test]
     fn duplicate_tunnel_config_rejects_duplicate_name_with_existing_validation() {
@@ -8149,6 +8310,23 @@ show_tracked_runtime_bar = true
             ssh_port: None,
             identity_file: None,
             timeouts: TimeoutConfig::default(),
+        }
+    }
+
+    /// テスト用の複製入力を生成する
+    fn duplicate_input(id: &str, local_port: u16) -> DuplicateTunnelInput {
+        DuplicateTunnelInput {
+            id: id.to_owned(),
+            description: None,
+            tags: Vec::new(),
+            local_host: "127.0.0.1".to_owned(),
+            local_port,
+            remote_host: "db.internal".to_owned(),
+            remote_port: 5432,
+            ssh_user: "user".to_owned(),
+            ssh_host: "bastion.example.com".to_owned(),
+            ssh_port: None,
+            identity_file: None,
         }
     }
 

@@ -279,7 +279,7 @@ interface TunnelInput {
 
 type DuplicateTunnelFormState = TunnelFormState;
 type DuplicateTunnelInput = TunnelInput;
-type DuplicateTunnelEditableField = Exclude<keyof DuplicateTunnelFormState, "scope">;
+type DuplicateTunnelEditableField = keyof DuplicateTunnelFormState;
 
 type AppMessageKind = "success" | "error" | "info";
 type OperationToastKind = AppMessageKind | "warning";
@@ -1120,6 +1120,14 @@ function App(): ReactElement {
       return;
     }
 
+    if (duplicateForm.scope === "local" && paths.workspacePath.trim().length === 0) {
+      setDuplicateFormFeedback({
+        kind: "error",
+        text: "local 設定に複製するにはワークスペースを選択してください",
+      });
+      return;
+    }
+
     let duplicate: DuplicateTunnelInput;
     try {
       duplicate = duplicateFormToInput(duplicateForm);
@@ -1134,7 +1142,8 @@ function App(): ReactElement {
     try {
       const loaded = await invokeCommand<DashboardState>("duplicate_tunnel_entry", {
         paths: normalizeWorkspaceSelection(paths),
-        scope: duplicateTarget.source,
+        sourceScope: duplicateTarget.source,
+        targetScope: duplicateForm.scope,
         sourceId: duplicateTarget.id,
         duplicate,
       });
@@ -1149,7 +1158,10 @@ function App(): ReactElement {
       setDuplicateTarget(null);
       setDuplicateForm(initialDuplicateForm);
       setDuplicateFormFeedback(null);
-      showOperationToast({ kind: "success", summary: `${duplicate.id} を設定に複製しました` });
+      showOperationToast({
+        kind: "success",
+        summary: `${duplicate.id} を ${duplicateForm.scope} 設定に複製しました`,
+      });
     } catch (error) {
       setDuplicateFormFeedback({ kind: "error", text: stringifyError(error) });
     } finally {
@@ -1611,7 +1623,22 @@ function App(): ReactElement {
    */
   function updateDuplicateForm(field: DuplicateTunnelEditableField, value: string): void {
     setDuplicateFormFeedback(null);
-    setDuplicateForm((current) => ({ ...current, [field]: value }));
+    setDuplicateForm((current) => {
+      if (field === "scope") {
+        if (!isConfigScope(value) || duplicateTarget === null) {
+          return current;
+        }
+
+        return duplicateFormWithTargetScope(
+          current,
+          duplicateTarget,
+          dashboard?.tunnels ?? [],
+          value,
+        );
+      }
+
+      return { ...current, [field]: value };
+    });
   }
 
   /**
@@ -1935,10 +1962,13 @@ function App(): ReactElement {
       <DuplicateTunnelModal
         tunnel={duplicateTarget}
         form={duplicateForm}
+        paths={paths}
         homePath={homePath}
         feedback={duplicateFormFeedback}
+        canUseLocal={paths.workspacePath.trim().length > 0}
         isBusy={isBusy}
         onChange={updateDuplicateForm}
+        onOpenSettings={openSettings}
         onCancel={() => {
           setDuplicateTarget(null);
           setDuplicateForm(initialDuplicateForm);
@@ -5179,45 +5209,190 @@ interface DuplicateTunnelDraftSummaryProps {
   form: DuplicateTunnelFormState;
 }
 
+interface DuplicateScopeTransferProps {
+  tunnel: TunnelView;
+  form: DuplicateTunnelFormState;
+  paths: WorkspaceSelection;
+  homePath: string | null;
+  canUseLocal: boolean;
+  onChange: (field: DuplicateTunnelEditableField, value: string) => void;
+}
+
+interface DuplicateScopeNodeProps {
+  label: "From";
+  scope: ConfigScope;
+  name: string;
+  path: string;
+  homePath: string | null;
+}
+
+interface DuplicateTargetScopeNodeProps {
+  form: DuplicateTunnelFormState;
+  path: string;
+  homePath: string | null;
+  canUseLocal: boolean;
+  onChange: (field: DuplicateTunnelEditableField, value: string) => void;
+}
+
 /**
  * 複製フォームの入力内容と引き継ぎ先を接続経路として要約する
  */
 function DuplicateTunnelDraftSummary({ form }: DuplicateTunnelDraftSummaryProps): ReactElement {
   return (
     <section className="rounded-lg border border-border bg-card p-3 xl:col-span-3">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-medium text-muted-foreground">Duplicate route</span>
-            <Chip size="sm" variant="soft">
-              {form.scope}
-            </Chip>
-          </div>
-          <h3 className="mt-1 truncate text-sm font-semibold">
-            {form.id.trim() || "Untitled tunnel"}
-          </h3>
-        </div>
-        <div className="grid min-w-0 flex-1 gap-2 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-center">
-          <EndpointNode
-            icon={<Server size={15} />}
-            label="Local"
-            value={formatDraftEndpoint(form.localHost, form.localPort, "local host:port")}
-          />
-          <RouteConnector horizontalAt="lg" />
-          <EndpointNode
-            icon={<ArrowRight size={15} />}
-            label="Remote"
-            value={formatDraftEndpoint(form.remoteHost, form.remotePort, "remote host:port")}
-          />
-          <RouteConnector horizontalAt="lg" />
-          <EndpointNode
-            icon={<KeyRound size={15} />}
-            label="SSH"
-            value={formatDraftEndpoint(form.sshHost, form.sshPort, "ssh host:port")}
-          />
-        </div>
+      <div className="grid min-w-0 gap-2 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-center">
+        <EndpointNode
+          icon={<Server size={15} />}
+          label="Local"
+          value={formatDraftEndpoint(form.localHost, form.localPort, "local host:port")}
+        />
+        <RouteConnector horizontalAt="lg" />
+        <EndpointNode
+          icon={<ArrowRight size={15} />}
+          label="Remote"
+          value={formatDraftEndpoint(form.remoteHost, form.remotePort, "remote host:port")}
+        />
+        <RouteConnector horizontalAt="lg" />
+        <EndpointNode
+          icon={<KeyRound size={15} />}
+          label="SSH"
+          value={formatDraftEndpoint(form.sshHost, form.sshPort, "ssh host:port")}
+        />
       </div>
     </section>
+  );
+}
+
+/**
+ * 複製元から複製先への保存先を表示する
+ */
+function DuplicateScopeTransfer({
+  tunnel,
+  form,
+  paths,
+  homePath,
+  canUseLocal,
+  onChange,
+}: DuplicateScopeTransferProps): ReactElement {
+  const targetPath = configPathForScopeDisplay(paths, form.scope);
+
+  return (
+    <section className="rounded-lg border border-border bg-card p-3 xl:col-span-3">
+      <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_2.5rem_minmax(0,1fr)] lg:items-stretch">
+        <DuplicateScopeNode
+          label="From"
+          scope={tunnel.source}
+          name={tunnel.id}
+          path={tunnel.sourcePath}
+          homePath={homePath}
+        />
+
+        <div className="flex items-center justify-center text-foreground/35" aria-hidden="true">
+          <ArrowRight className="rotate-90 lg:rotate-0" size={18} />
+        </div>
+
+        <DuplicateTargetScopeNode
+          form={form}
+          path={targetPath}
+          homePath={homePath}
+          canUseLocal={canUseLocal}
+          onChange={onChange}
+        />
+      </div>
+    </section>
+  );
+}
+
+/**
+ * 複製元または複製先の設定ファイル情報を表示する
+ */
+function DuplicateScopeNode({
+  label,
+  scope,
+  name,
+  path,
+  homePath,
+}: DuplicateScopeNodeProps): ReactElement {
+  const displayPath =
+    path.trim().length > 0 ? formatPathForDisplay(path, homePath) : "Not selected";
+
+  return (
+    <div className="flex min-w-0 flex-col rounded-lg border border-border bg-muted/25 p-3">
+      <div className="min-w-0">
+        <div className="flex min-h-10 flex-wrap items-center gap-2">
+          <span className="text-xs font-medium text-muted-foreground">{label}</span>
+          <Chip size="sm" variant="soft">
+            {scope}
+          </Chip>
+        </div>
+        <h4 className="mt-3 truncate text-sm font-semibold" title={name}>
+          {name}
+        </h4>
+        <p
+          className="mt-1 break-all font-mono text-xs text-foreground/55"
+          title={path.trim().length > 0 ? path : displayPath}
+        >
+          {displayPath}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 複製先の scope 切替と保存先情報を表示する
+ */
+function DuplicateTargetScopeNode({
+  form,
+  path,
+  homePath,
+  canUseLocal,
+  onChange,
+}: DuplicateTargetScopeNodeProps): ReactElement {
+  const displayPath =
+    path.trim().length > 0 ? formatPathForDisplay(path, homePath) : "Not selected";
+  const targetName = form.id.trim() || "Untitled tunnel";
+
+  return (
+    <div className="flex min-w-0 flex-col rounded-lg border border-accent/35 bg-accent/5 p-3">
+      <div className="flex min-h-10 flex-col gap-4 sm:flex-row sm:items-center">
+        <span className="text-xs font-medium text-muted-foreground">To</span>
+        <div className="grid w-full grid-cols-2 gap-0.5 rounded-lg border border-border bg-muted p-0.5 sm:w-44">
+          <HeroButton
+            type="button"
+            variant={form.scope === "local" ? "primary" : "ghost"}
+            size="sm"
+            fullWidth
+            onPress={() => onChange("scope", "local")}
+            isDisabled={!canUseLocal}
+            className="justify-center"
+          >
+            Local
+          </HeroButton>
+          <HeroButton
+            type="button"
+            variant={form.scope === "global" ? "primary" : "ghost"}
+            size="sm"
+            fullWidth
+            onPress={() => onChange("scope", "global")}
+            className="justify-center"
+          >
+            Global
+          </HeroButton>
+        </div>
+      </div>
+      <div className="mt-3 min-w-0">
+        <h4 className="truncate text-sm font-semibold" title={targetName}>
+          {targetName}
+        </h4>
+        <p
+          className="mt-1 break-all font-mono text-xs text-foreground/55"
+          title={path.trim().length > 0 ? path : displayPath}
+        >
+          {displayPath}
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -5466,10 +5641,13 @@ function EditTunnelModal({
 interface DuplicateTunnelModalProps {
   tunnel: TunnelView | null;
   form: DuplicateTunnelFormState;
+  paths: WorkspaceSelection;
   homePath: string | null;
   feedback: AppMessage | null;
+  canUseLocal: boolean;
   isBusy: boolean;
   onChange: (field: DuplicateTunnelEditableField, value: string) => void;
+  onOpenSettings: () => void;
   onCancel: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onBrowseIdentityFile: () => void;
@@ -5481,10 +5659,13 @@ interface DuplicateTunnelModalProps {
 function DuplicateTunnelModal({
   tunnel,
   form,
+  paths,
   homePath,
   feedback,
+  canUseLocal,
   isBusy,
   onChange,
+  onOpenSettings,
   onCancel,
   onSubmit,
   onBrowseIdentityFile,
@@ -5493,7 +5674,7 @@ function DuplicateTunnelModal({
     return null;
   }
 
-  const sourceDisplayPath = formatPathForDisplay(tunnel.sourcePath, homePath);
+  const localUnavailable = !canUseLocal;
 
   return (
     <Modal
@@ -5513,21 +5694,41 @@ function DuplicateTunnelModal({
                   <div className="flex items-center gap-2">
                     <Copy className="text-foreground/70" size={18} />
                     <h3 className="text-base font-semibold">Duplicate tunnel</h3>
-                    <Chip color="accent" size="sm" variant="soft">
-                      {tunnel.source}
-                    </Chip>
                   </div>
-                  <p
-                    className="mt-1 truncate font-mono text-xs text-foreground/55"
-                    title={tunnel.sourcePath}
-                  >
-                    {sourceDisplayPath}
-                  </p>
                 </div>
               </div>
 
               <div className="max-h-[calc(100vh-13rem)] overflow-y-auto bg-muted/25 p-4">
                 <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+                  <DuplicateScopeTransfer
+                    tunnel={tunnel}
+                    form={form}
+                    paths={paths}
+                    homePath={homePath}
+                    canUseLocal={canUseLocal}
+                    onChange={onChange}
+                  />
+                  {localUnavailable && form.scope === "local" ? (
+                    <div className="xl:col-span-3">
+                      <AlertMessage kind="warning">
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                          <span>
+                            local 設定に複製するには Settings でワークスペースを選択してください。
+                          </span>
+                          <HeroButton
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onPress={onOpenSettings}
+                            isDisabled={isBusy}
+                          >
+                            <Settings2 size={13} />
+                            Settings
+                          </HeroButton>
+                        </div>
+                      </AlertMessage>
+                    </div>
+                  ) : null}
                   <FormFeedback feedback={feedback} />
                   <DuplicateTunnelDraftSummary form={form} />
                   <section className="flex flex-col gap-3">
@@ -5640,7 +5841,12 @@ function DuplicateTunnelModal({
                 >
                   Cancel
                 </HeroButton>
-                <HeroButton type="submit" variant="primary" size="sm" isDisabled={isBusy}>
+                <HeroButton
+                  type="submit"
+                  variant="primary"
+                  size="sm"
+                  isDisabled={isBusy || (localUnavailable && form.scope === "local")}
+                >
                   <Copy size={16} />
                   Duplicate
                 </HeroButton>
@@ -6410,6 +6616,13 @@ function formatPathForDisplay(path: string, homePath: string | null): string {
   return path;
 }
 
+/**
+ * 設定 scope に対応する表示用設定ファイルパスを取得する
+ */
+function configPathForScopeDisplay(paths: WorkspaceSelection, scope: ConfigScope): string {
+  return scope === "local" ? paths.localConfigPath : paths.globalConfigPath;
+}
+
 const pathSeparatorCharacters = new Set(["/", "\\"]);
 
 /**
@@ -6528,14 +6741,35 @@ function formFromTunnel(tunnel: TunnelView): TunnelFormState {
 function duplicateFormFromTunnel(
   tunnel: TunnelView,
   tunnels: readonly TunnelView[],
+  targetScope: ConfigScope = tunnel.source,
 ): DuplicateTunnelFormState {
-  const sameScopeTunnels = tunnels.filter((candidate) => candidate.source === tunnel.source);
+  const targetScopeTunnels = tunnels.filter((candidate) => candidate.source === targetScope);
   const inheritedForm = formFromTunnel(tunnel);
 
   return {
     ...inheritedForm,
-    id: nextDuplicateTunnelId(tunnel.id, sameScopeTunnels),
-    localPort: nextAvailableLocalPort(tunnel.localPort, sameScopeTunnels).toString(),
+    scope: targetScope,
+    id: nextDuplicateTunnelId(tunnel.id, targetScopeTunnels),
+    localPort: nextAvailableLocalPort(tunnel.localPort, targetScopeTunnels).toString(),
+  };
+}
+
+/**
+ * 複製先 scope に合わせて重複しない候補値を再生成する
+ */
+function duplicateFormWithTargetScope(
+  form: DuplicateTunnelFormState,
+  sourceTunnel: TunnelView,
+  tunnels: readonly TunnelView[],
+  targetScope: ConfigScope,
+): DuplicateTunnelFormState {
+  const targetScopeTunnels = tunnels.filter((candidate) => candidate.source === targetScope);
+
+  return {
+    ...form,
+    scope: targetScope,
+    id: nextDuplicateTunnelId(sourceTunnel.id, targetScopeTunnels),
+    localPort: nextAvailableLocalPort(sourceTunnel.localPort, targetScopeTunnels).toString(),
   };
 }
 
@@ -6573,6 +6807,13 @@ function nextAvailableLocalPort(sourcePort: number, tunnels: readonly TunnelView
   }
 
   return sourcePort;
+}
+
+/**
+ * 文字列が設定 scope として有効かを判定する
+ */
+function isConfigScope(value: string): value is ConfigScope {
+  return value === "local" || value === "global";
 }
 
 /**

@@ -384,6 +384,11 @@ interface ViewportScrollSnapshot {
   top: number;
 }
 
+interface VisibleTunnelSelectionSummary {
+  ids: string[];
+  selectedCount: number;
+}
+
 const initialPaths: WorkspaceSelection = {
   workspacePath: "",
   workspaceHistory: [],
@@ -556,14 +561,12 @@ function App(): ReactElement {
     () => filterTunnels(dashboardTunnels, filters, tunnelSearchIndex, homePath),
     [dashboardTunnels, filters, tunnelSearchIndex, homePath],
   );
-  const filteredTunnelIds = useMemo<string[]>(
-    () => filteredTunnels.map((tunnel) => tunnel.runtimeId),
-    [filteredTunnels],
+  const visibleSelectionSummary = useMemo<VisibleTunnelSelectionSummary>(
+    () => summarizeVisibleTunnelSelection(filteredTunnels, selectedIds),
+    [filteredTunnels, selectedIds],
   );
-  const selectedVisibleCount = useMemo<number>(
-    () => filteredTunnelIds.filter((id) => selectedIds.has(id)).length,
-    [filteredTunnelIds, selectedIds],
-  );
+  const filteredTunnelIds = visibleSelectionSummary.ids;
+  const selectedVisibleCount = visibleSelectionSummary.selectedCount;
   const hasActiveFilters = useMemo<boolean>(
     () => hasActiveTunnelFilters(filters) || queryInput.trim().length > 0,
     [filters, queryInput],
@@ -6436,20 +6439,20 @@ function filterTunnels(
   homePath: string | null,
 ): TunnelView[] {
   const query = filters.query.trim().toLowerCase();
-  const selectedStatuses = new Set(filters.statuses);
-  const selectedScopes = new Set(filters.scopes);
-  const selectedTags = new Set(filters.tags);
   const hasStatusFilter = hasPartialFilterSelection(filters.statuses, allStatusFilters);
   const hasScopeFilter = hasPartialFilterSelection(filters.scopes, allScopeFilters);
+  const selectedStatuses = hasStatusFilter ? new Set(filters.statuses) : null;
+  const selectedScopes = hasScopeFilter ? new Set(filters.scopes) : null;
+  const selectedTags = filters.tags.length > 0 ? new Set(filters.tags) : null;
 
   return tunnels.filter((tunnel) => {
     const status = tunnelStatus(tunnel);
 
-    if (hasStatusFilter && !selectedStatuses.has(status)) {
+    if (selectedStatuses !== null && !selectedStatuses.has(status)) {
       return false;
     }
 
-    if (hasScopeFilter && !selectedScopes.has(tunnel.source)) {
+    if (selectedScopes !== null && !selectedScopes.has(tunnel.source)) {
       return false;
     }
 
@@ -6457,12 +6460,36 @@ function filterTunnels(
       return false;
     }
 
-    if (!tunnelMatchesSelectedTags(tunnel, selectedTags, filters.tagMode)) {
+    if (
+      selectedTags !== null &&
+      !tunnelMatchesSelectedTags(tunnel, selectedTags, filters.tagMode)
+    ) {
       return false;
     }
 
     return query.length === 0 || tunnelContainsQuery(tunnel, query, searchIndex, homePath);
   });
+}
+
+/**
+ * 表示中トンネルの ID と選択件数を 1 回の走査で集計する
+ */
+function summarizeVisibleTunnelSelection(
+  tunnels: readonly TunnelView[],
+  selectedIds: ReadonlySet<string>,
+): VisibleTunnelSelectionSummary {
+  const ids = new Array<string>(tunnels.length);
+  let selectedCount = 0;
+
+  tunnels.forEach((tunnel, index) => {
+    ids[index] = tunnel.runtimeId;
+
+    if (selectedIds.has(tunnel.runtimeId)) {
+      selectedCount += 1;
+    }
+  });
+
+  return { ids, selectedCount };
 }
 
 /**
@@ -7298,6 +7325,10 @@ function isSearchKeyboardShortcut(event: KeyboardEvent): boolean {
  * 現在存在するトンネルだけを選択状態として残す
  */
 function keepExistingSelections(current: Set<string>, tunnels: TunnelView[]): Set<string> {
+  if (current.size === 0) {
+    return current;
+  }
+
   const ids = new Set(tunnels.map((tunnel) => tunnel.runtimeId));
   const next = new Set<string>();
   let hasRemovedSelection = false;
@@ -7332,15 +7363,28 @@ function toggleId(current: Set<string>, id: string): Set<string> {
  * 指定 runtime ID 群を選択状態へ追加する
  */
 function addSelections(current: Set<string>, ids: string[]): Set<string> {
-  const next = new Set(current);
-  ids.forEach((id) => next.add(id));
-  return next;
+  let next: Set<string> | null = null;
+
+  ids.forEach((id) => {
+    if (current.has(id)) {
+      return;
+    }
+
+    next ??= new Set(current);
+    next.add(id);
+  });
+
+  return next ?? current;
 }
 
 /**
  * 指定 runtime ID を選択状態から除外する
  */
 function removeSelection(current: Set<string>, id: string): Set<string> {
+  if (!current.has(id)) {
+    return current;
+  }
+
   const next = new Set(current);
   next.delete(id);
   return next;
@@ -7350,9 +7394,18 @@ function removeSelection(current: Set<string>, id: string): Set<string> {
  * 指定 runtime ID 群を選択状態から除外する
  */
 function removeSelections(current: Set<string>, ids: string[]): Set<string> {
-  const next = new Set(current);
-  ids.forEach((id) => next.delete(id));
-  return next;
+  let next: Set<string> | null = null;
+
+  ids.forEach((id) => {
+    if (!current.has(id)) {
+      return;
+    }
+
+    next ??= new Set(current);
+    next.delete(id);
+  });
+
+  return next ?? current;
 }
 
 /**
@@ -7363,25 +7416,9 @@ function updateTunnelFavoriteInDashboard(
   runtimeId: string,
   isFavorite: boolean,
 ): DashboardState | null {
-  if (dashboard === null) {
-    return dashboard;
-  }
-
-  let changed = false;
-  const tunnels = dashboard.tunnels.map((tunnel) => {
-    if (tunnel.runtimeId !== runtimeId || tunnel.isFavorite === isFavorite) {
-      return tunnel;
-    }
-
-    changed = true;
-    return { ...tunnel, isFavorite };
-  });
-
-  if (!changed) {
-    return dashboard;
-  }
-
-  return { ...dashboard, tunnels };
+  return updateTunnelInDashboard(dashboard, runtimeId, (tunnel) =>
+    tunnel.isFavorite === isFavorite ? tunnel : { ...tunnel, isFavorite },
+  );
 }
 
 /**
@@ -7392,23 +7429,35 @@ function updateTunnelAutoRecoverInDashboard(
   runtimeId: string,
   enabled: boolean,
 ): DashboardState | null {
+  return updateTunnelInDashboard(dashboard, runtimeId, (tunnel) =>
+    tunnel.autoRecoverEnabled === enabled ? tunnel : { ...tunnel, autoRecoverEnabled: enabled },
+  );
+}
+
+/**
+ * ダッシュボード内の対象トンネルだけを必要時に差し替える
+ */
+function updateTunnelInDashboard(
+  dashboard: DashboardState | null,
+  runtimeId: string,
+  updateTunnel: (tunnel: TunnelView) => TunnelView,
+): DashboardState | null {
   if (dashboard === null) {
     return dashboard;
   }
 
-  let changed = false;
-  const tunnels = dashboard.tunnels.map((tunnel) => {
-    if (tunnel.runtimeId !== runtimeId || tunnel.autoRecoverEnabled === enabled) {
-      return tunnel;
-    }
-
-    changed = true;
-    return { ...tunnel, autoRecoverEnabled: enabled };
-  });
-
-  if (!changed) {
+  const index = dashboard.tunnels.findIndex((tunnel) => tunnel.runtimeId === runtimeId);
+  if (index === -1) {
     return dashboard;
   }
+
+  const nextTunnel = updateTunnel(dashboard.tunnels[index]);
+  if (nextTunnel === dashboard.tunnels[index]) {
+    return dashboard;
+  }
+
+  const tunnels = dashboard.tunnels.slice();
+  tunnels[index] = nextTunnel;
 
   return { ...dashboard, tunnels };
 }

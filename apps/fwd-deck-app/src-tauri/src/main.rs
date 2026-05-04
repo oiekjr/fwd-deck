@@ -1721,10 +1721,11 @@ fn load_tray_menu_model(app: &tauri::AppHandle) -> Result<TrayMenuModel, AppErro
     let config = load_effective_config(&runtime_paths.config_paths)?;
     let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
     let validation = validate_config(&config);
-    let tunnel_items = tray_tunnel_menu_items(&config, &statuses, &validation);
+    let status_lookup = RuntimeStatusLookup::new(&statuses);
+    let tunnel_items = tray_tunnel_menu_items(&config, &status_lookup, &validation);
     let favorite_tunnel_items = tray_favorite_tunnel_menu_items(
         &config,
-        &statuses,
+        &status_lookup,
         &validation,
         &runtime_paths.preferences,
     );
@@ -1815,10 +1816,11 @@ fn load_tray_favorite_tunnel_items(
     let config = load_effective_config(&runtime_paths.config_paths)?;
     let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
     let validation = validate_config(&config);
+    let status_lookup = RuntimeStatusLookup::new(&statuses);
 
     Ok(tray_favorite_tunnel_menu_items(
         &config,
-        &statuses,
+        &status_lookup,
         &validation,
         &runtime_paths.preferences,
     ))
@@ -1967,12 +1969,12 @@ fn tray_icon_image(kind: TrayIconKind) -> Result<Image<'static>, AppError> {
 /// 設定済みトンネルをトレイメニュー項目へ変換する
 fn tray_tunnel_menu_items(
     config: &EffectiveConfig,
-    statuses: &[ScopedRuntimeStatus],
+    status_lookup: &RuntimeStatusLookup<'_>,
     validation: &ValidationReport,
 ) -> Vec<TrayTunnelMenuItem> {
     tray_tunnel_menu_items_matching(
         config,
-        statuses,
+        status_lookup,
         validation,
         TRAY_TUNNEL_ITEM_PREFIX,
         |_| true,
@@ -1982,7 +1984,7 @@ fn tray_tunnel_menu_items(
 /// お気に入りトンネルをトレイメニュー項目へ変換する
 fn tray_favorite_tunnel_menu_items(
     config: &EffectiveConfig,
-    statuses: &[ScopedRuntimeStatus],
+    status_lookup: &RuntimeStatusLookup<'_>,
     validation: &ValidationReport,
     preferences: &AppPreferences,
 ) -> Vec<TrayTunnelMenuItem> {
@@ -1994,7 +1996,7 @@ fn tray_favorite_tunnel_menu_items(
 
     tray_tunnel_menu_items_matching(
         config,
-        statuses,
+        status_lookup,
         validation,
         TRAY_FAVORITE_TUNNEL_ITEM_PREFIX,
         |runtime_id| favorite_runtime_ids.contains(runtime_id),
@@ -2033,7 +2035,7 @@ fn tray_auto_recover_tunnel_menu_items(
 /// 条件に一致する設定済みトンネルをトレイメニュー項目へ変換する
 fn tray_tunnel_menu_items_matching<F>(
     config: &EffectiveConfig,
-    statuses: &[ScopedRuntimeStatus],
+    status_lookup: &RuntimeStatusLookup<'_>,
     validation: &ValidationReport,
     menu_id_prefix: &str,
     include_runtime_id: F,
@@ -2041,10 +2043,6 @@ fn tray_tunnel_menu_items_matching<F>(
 where
     F: Fn(&str) -> bool,
 {
-    let status_by_key = statuses
-        .iter()
-        .map(|status| (runtime_status_lookup_key(status), status))
-        .collect::<HashMap<_, _>>();
     let can_start = validation.is_valid();
     let mut runtime_id_cache = RuntimeIdCache::default();
     let mut items = config
@@ -2057,11 +2055,7 @@ where
                 return None;
             }
 
-            let runtime_key = (
-                runtime_scope_for_source(resolved.source.kind),
-                runtime_id.as_str(),
-            );
-            let status = status_by_key.get(&runtime_key).copied();
+            let status = status_lookup.for_resolved_tunnel(resolved, &runtime_id);
             let sort_key = tray_tunnel_sort_key(resolved, &runtime_id);
             let item = tray_tunnel_menu_item(
                 menu_id_prefix,
@@ -3616,19 +3610,9 @@ fn stop_tunnels_inner(
     let config = load_effective_config(&runtime_paths.config_paths)?;
     let lookup = ConfiguredTunnelLookup::new(&config);
     let mut progress = OperationProgressEmitter::new(app, operation_id, targets.len());
-    let reset_runtime_ids =
-        auto_recover_runtime_ids_for_stop_operation_targets(&runtime_paths, &lookup, &targets);
 
-    let report = run_tunnel_operations_with_progress(
-        &targets,
-        |target| {
-            let (runtime_id, state_path) =
-                resolve_stop_operation_target(&runtime_paths, &lookup, target)?;
-
-            stop_tunnel_for_app(&runtime_id, &state_path)
-        },
-        |_target| progress.advance(),
-    )?;
+    let (report, reset_runtime_ids) =
+        run_stop_tunnel_operations(&runtime_paths, &lookup, &targets, &mut progress)?;
     reset_auto_recover_runtime_states(app, reset_runtime_ids);
 
     Ok(report)
@@ -4581,7 +4565,7 @@ impl<'a> ConfiguredTunnelLookup<'a> {
     /// 統合済み設定からトンネル検索用 index を初期化する
     fn new(config: &'a EffectiveConfig) -> Self {
         let mut runtime_id_cache = RuntimeIdCache::default();
-        let mut by_runtime_id = HashMap::new();
+        let mut by_runtime_id = HashMap::with_capacity(config.tunnels.len());
         let mut local_by_name = HashMap::new();
         let mut global_by_name = HashMap::new();
 
@@ -4626,6 +4610,36 @@ impl<'a> ConfiguredTunnelLookup<'a> {
     }
 }
 
+/// runtime 状態を表示用キーで高速に参照する
+#[derive(Debug)]
+struct RuntimeStatusLookup<'a> {
+    by_key: HashMap<(RuntimeScope, &'a str), &'a ScopedRuntimeStatus>,
+}
+
+impl<'a> RuntimeStatusLookup<'a> {
+    /// runtime 状態一覧から検索用 index を初期化する
+    fn new(statuses: &'a [ScopedRuntimeStatus]) -> Self {
+        let mut by_key = HashMap::with_capacity(statuses.len());
+
+        for status in statuses {
+            by_key.insert(runtime_status_lookup_key(status), status);
+        }
+
+        Self { by_key }
+    }
+
+    /// 解決済みトンネルに対応する runtime 状態を取得する
+    fn for_resolved_tunnel(
+        &self,
+        resolved: &ResolvedTunnelConfig,
+        runtime_id: &str,
+    ) -> Option<&'a ScopedRuntimeStatus> {
+        self.by_key
+            .get(&(runtime_scope_for_source(resolved.source.kind), runtime_id))
+            .copied()
+    }
+}
+
 /// ダッシュボード状態へ変換する
 fn build_dashboard_state(
     runtime_paths: RuntimePaths,
@@ -4645,26 +4659,19 @@ fn build_dashboard_state(
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
-    let status_by_key = statuses
-        .iter()
-        .map(|status| (runtime_status_lookup_key(status), status))
-        .collect::<HashMap<_, _>>();
+    let status_lookup = RuntimeStatusLookup::new(&statuses);
     let mut runtime_id_cache = RuntimeIdCache::default();
     let mut tunnels = config
         .tunnels
         .iter()
         .map(|resolved| {
             let runtime_id = runtime_id_cache.runtime_id_for_resolved_tunnel(resolved);
-            let runtime_key = (
-                runtime_scope_for_source(resolved.source.kind),
-                runtime_id.as_str(),
-            );
             tunnel_view(
                 resolved,
                 &runtime_id,
                 favorite_runtime_ids.contains(runtime_id.as_str()),
                 auto_recover_runtime_ids.contains(runtime_id.as_str()),
-                status_by_key.get(&runtime_key).copied(),
+                status_lookup.for_resolved_tunnel(resolved, &runtime_id),
             )
         })
         .collect::<Vec<_>>();
@@ -5299,24 +5306,6 @@ fn auto_recover_runtime_ids_for_operation_targets(
         .collect()
 }
 
-/// 手動停止対象に対応する runtime ID を取得する
-fn auto_recover_runtime_ids_for_stop_operation_targets(
-    paths: &RuntimePaths,
-    lookup: &ConfiguredTunnelLookup<'_>,
-    targets: &[OperationTargetInput],
-) -> Vec<String> {
-    targets
-        .iter()
-        .filter_map(|target| {
-            target.runtime_id.clone().or_else(|| {
-                resolve_stop_operation_target(paths, lookup, target)
-                    .ok()
-                    .map(|(runtime_id, _state_path)| runtime_id)
-            })
-        })
-        .collect()
-}
-
 /// 停止操作対象から runtime ID と state path を解決する
 fn resolve_stop_operation_target(
     paths: &RuntimePaths,
@@ -5402,6 +5391,49 @@ fn start_tunnel_result_for_app(
             Ok(Some(start_already_running_message(&name, pid)))
         }
         Err(error) => Err(AppError::Runtime(error)),
+    }
+}
+
+/// アプリの一括停止操作としてトンネルを停止する
+fn run_stop_tunnel_operations(
+    paths: &RuntimePaths,
+    lookup: &ConfiguredTunnelLookup<'_>,
+    targets: &[OperationTargetInput],
+    progress: &mut OperationProgressEmitter<'_>,
+) -> Result<(OperationReport, Vec<String>), AppError> {
+    ensure_operation_targets_selected(targets)?;
+
+    let mut outcomes = (0..targets.len()).map(|_| None).collect::<Vec<_>>();
+    let mut reset_runtime_ids = Vec::new();
+
+    for (index, target) in targets.iter().enumerate() {
+        let outcome = match resolve_stop_operation_target(paths, lookup, target) {
+            Ok((runtime_id, state_path)) => {
+                reset_runtime_ids.push(runtime_id.clone());
+                stop_operation_result_outcome(target, stop_tunnel_for_app(&runtime_id, &state_path))
+            }
+            Err(error) => operation_failure_outcome(target, error.to_string()),
+        };
+
+        outcomes[index] = Some(outcome);
+        progress.advance();
+    }
+
+    Ok((operation_report_from_outcomes(outcomes), reset_runtime_ids))
+}
+
+/// 停止結果をアプリ表示用の一括操作結果へ変換する
+fn stop_operation_result_outcome(
+    target: &OperationTargetInput,
+    result: Result<Option<String>, AppError>,
+) -> OperationOutcome {
+    match result {
+        Ok(Some(message)) => OperationOutcome::Succeeded(OperationSuccessView {
+            id: operation_target_label(target),
+            message,
+        }),
+        Ok(None) => OperationOutcome::Skipped,
+        Err(error) => operation_failure_outcome(target, error.to_string()),
     }
 }
 
@@ -5845,6 +5877,7 @@ fn stop_tunnel_for_app(id: &str, state_path: &Path) -> Result<Option<String>, Ap
 }
 
 /// 複数トンネルに対する操作を順次実行して結果確定時に通知する
+#[cfg(test)]
 fn run_tunnel_operations_with_progress<F, G>(
     targets: &[OperationTargetInput],
     mut operation: F,
@@ -7316,8 +7349,9 @@ show_tracked_runtime_bar = true
             scoped_runtime_status(&stale, RuntimeScope::Workspace, ProcessState::Stale),
         ];
         let validation = validate_config(&config);
+        let status_lookup = RuntimeStatusLookup::new(&statuses);
 
-        let items = tray_tunnel_menu_items(&config, &statuses, &validation);
+        let items = tray_tunnel_menu_items(&config, &status_lookup, &validation);
 
         let running_item = tray_item_by_id(&items, "running-db");
         assert_eq!(running_item.label, "running-db (local)");
@@ -7374,6 +7408,7 @@ show_tracked_runtime_bar = true
             ProcessState::Running,
         )];
         let validation = validate_config(&config);
+        let status_lookup = RuntimeStatusLookup::new(&statuses);
         let preferences = AppPreferences {
             favorite_tunnel_runtime_ids: vec![
                 runtime_id_for_resolved_tunnel(&favorite_late),
@@ -7383,7 +7418,8 @@ show_tracked_runtime_bar = true
             ..AppPreferences::default()
         };
 
-        let items = tray_favorite_tunnel_menu_items(&config, &statuses, &validation, &preferences);
+        let items =
+            tray_favorite_tunnel_menu_items(&config, &status_lookup, &validation, &preferences);
 
         let labels = items
             .iter()
@@ -7500,17 +7536,23 @@ show_tracked_runtime_bar = true
         let expanded_config = EffectiveConfig::new(Vec::new(), vec![running.clone(), extra]);
         let validation = validate_config(&config);
         let expanded_validation = validate_config(&expanded_config);
-        let idle_items = tray_tunnel_menu_items(&config, &[], &validation);
-        let running_items = tray_tunnel_menu_items(
-            &config,
-            &[scoped_runtime_status(
-                &running,
-                RuntimeScope::Workspace,
-                ProcessState::Running,
-            )],
-            &validation,
+        let idle_statuses = Vec::new();
+        let idle_status_lookup = RuntimeStatusLookup::new(&idle_statuses);
+        let running_statuses = vec![scoped_runtime_status(
+            &running,
+            RuntimeScope::Workspace,
+            ProcessState::Running,
+        )];
+        let running_status_lookup = RuntimeStatusLookup::new(&running_statuses);
+        let expanded_statuses = Vec::new();
+        let expanded_status_lookup = RuntimeStatusLookup::new(&expanded_statuses);
+        let idle_items = tray_tunnel_menu_items(&config, &idle_status_lookup, &validation);
+        let running_items = tray_tunnel_menu_items(&config, &running_status_lookup, &validation);
+        let expanded_items = tray_tunnel_menu_items(
+            &expanded_config,
+            &expanded_status_lookup,
+            &expanded_validation,
         );
-        let expanded_items = tray_tunnel_menu_items(&expanded_config, &[], &expanded_validation);
 
         assert_eq!(
             tray_in_place_menu_update(tray_item_ids(&idle_items), &running_items),
@@ -7537,8 +7579,9 @@ show_tracked_runtime_bar = true
             ProcessState::Running,
         )];
         let validation = validate_config(&config);
+        let status_lookup = RuntimeStatusLookup::new(&statuses);
 
-        let items = tray_tunnel_menu_items(&config, &statuses, &validation);
+        let items = tray_tunnel_menu_items(&config, &status_lookup, &validation);
 
         assert!(tray_item_by_id(&items, "running-db").enabled);
         assert!(!tray_item_by_id(&items, "idle-db").enabled);

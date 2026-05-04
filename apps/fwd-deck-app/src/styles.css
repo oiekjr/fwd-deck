@@ -96,6 +96,54 @@
 }
 
 @layer components {
+  .tunnel-slim-table {
+    --tunnel-slim-select-column-width: 3rem;
+    --tunnel-slim-name-column-width: 10rem;
+    --tunnel-slim-header-background: color-mix(in oklab, var(--muted) 45%, var(--card));
+    --tunnel-slim-row-background: var(--card);
+    --tunnel-slim-hover-background: color-mix(in oklab, var(--muted) 40%, var(--card));
+    --tunnel-slim-selected-background: color-mix(in oklab, var(--primary) 5%, var(--card));
+  }
+
+  .tunnel-slim-table thead th {
+    background: var(--tunnel-slim-header-background);
+  }
+
+  .tunnel-slim-table tbody td {
+    background: var(--tunnel-slim-row-background);
+  }
+
+  .tunnel-slim-table-row:hover > td {
+    background: var(--tunnel-slim-hover-background);
+  }
+
+  .tunnel-slim-table-row[data-selected="true"] > td,
+  .tunnel-slim-table-row[data-selected="true"]:hover > td {
+    background: var(--tunnel-slim-selected-background);
+  }
+
+  .tunnel-slim-sticky-cell {
+    position: sticky;
+    z-index: 1;
+  }
+
+  .tunnel-slim-table thead .tunnel-slim-sticky-cell {
+    z-index: 2;
+  }
+
+  .tunnel-slim-sticky-select {
+    left: 0;
+  }
+
+  .tunnel-slim-sticky-name {
+    left: var(--tunnel-slim-select-column-width);
+  }
+
+  .tunnel-slim-sticky-status {
+    left: calc(var(--tunnel-slim-select-column-width) + var(--tunnel-slim-name-column-width));
+    box-shadow: inset -1px 0 0 var(--border);
+  }
+
   .operation-toast {
     will-change: opacity, transform;
   }

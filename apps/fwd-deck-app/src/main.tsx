@@ -4239,7 +4239,10 @@ function TunnelSlimList({
     <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       <Table variant="secondary">
         <Table.ScrollContainer>
-          <Table.Content aria-label="Configured tunnels" className="min-w-[85rem] table-fixed">
+          <Table.Content
+            aria-label="Configured tunnels"
+            className="tunnel-slim-table min-w-[85rem] table-fixed"
+          >
             <colgroup>
               <col className="w-12" />
               <col className="w-40" />
@@ -4252,7 +4255,7 @@ function TunnelSlimList({
               <col className="w-[20.5rem]" />
             </colgroup>
             <Table.Header>
-              <Table.Column className="w-12">
+              <Table.Column className="tunnel-slim-sticky-cell tunnel-slim-sticky-select w-12">
                 <SelectionCheckbox
                   label={headerSelectionLabel}
                   isSelected={isAllVisibleSelected}
@@ -4261,10 +4264,15 @@ function TunnelSlimList({
                   onChange={toggleVisibleSelection}
                 />
               </Table.Column>
-              <Table.Column className="w-40" isRowHeader>
+              <Table.Column
+                className="tunnel-slim-sticky-cell tunnel-slim-sticky-name w-40"
+                isRowHeader
+              >
                 Name
               </Table.Column>
-              <Table.Column className="w-[5.5rem]">Status</Table.Column>
+              <Table.Column className="tunnel-slim-sticky-cell tunnel-slim-sticky-status w-[5.5rem]">
+                Status
+              </Table.Column>
               <Table.Column className="w-[10.5rem]">Local</Table.Column>
               <Table.Column className="w-48">Remote</Table.Column>
               <Table.Column className="w-52">SSH</Table.Column>
@@ -4347,20 +4355,24 @@ const TunnelSlimRow = memo(function TunnelSlimRow({
   const highlightQuery = query.trim();
 
   return (
-    <Table.Row className={checked ? "bg-primary/5" : undefined} id={tunnel.runtimeId}>
-      <Table.Cell>
+    <Table.Row
+      className="tunnel-slim-table-row"
+      data-selected={checked ? "true" : undefined}
+      id={tunnel.runtimeId}
+    >
+      <Table.Cell className="tunnel-slim-sticky-cell tunnel-slim-sticky-select">
         <SelectionCheckbox
           label={`${tunnel.id} を選択`}
           isSelected={checked}
           onChange={() => onToggle(tunnel.runtimeId)}
         />
       </Table.Cell>
-      <Table.Cell className="max-w-56">
+      <Table.Cell className="tunnel-slim-sticky-cell tunnel-slim-sticky-name max-w-56">
         <div className="truncate text-sm font-bold" title={tunnel.id}>
           <HighlightedText text={tunnel.id} query={highlightQuery} />
         </div>
       </Table.Cell>
-      <Table.Cell className="w-[5.5rem]">
+      <Table.Cell className="tunnel-slim-sticky-cell tunnel-slim-sticky-status w-[5.5rem]">
         <StatusBadge
           status={status}
           title={runtimeInfo ? `${runtimeInfo.value} (${runtimeInfo.title})` : undefined}

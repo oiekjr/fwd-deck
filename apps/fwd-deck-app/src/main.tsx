@@ -422,8 +422,8 @@ const allScopeFilters = ["local", "global"] as const satisfies ReadonlyArray<Con
 
 const initialFilters: TunnelFilters = {
   query: "",
-  statuses: [...allStatusFilters],
-  scopes: [...allScopeFilters],
+  statuses: [],
+  scopes: [],
   tags: [],
   tagMode: "any",
   favoritesOnly: false,
@@ -1749,7 +1749,7 @@ function App(): ReactElement {
     captureResultScrollPosition();
     setFilters((current) => ({
       ...current,
-      statuses: toggleRequiredFilterValue(current.statuses, status),
+      statuses: toggleFilterValue(current.statuses, status),
     }));
   }
 
@@ -1760,7 +1760,7 @@ function App(): ReactElement {
     captureResultScrollPosition();
     setFilters((current) => ({
       ...current,
-      scopes: toggleRequiredFilterValue(current.scopes, scope),
+      scopes: toggleFilterValue(current.scopes, scope),
     }));
   }
 
@@ -1788,8 +1788,8 @@ function App(): ReactElement {
     setQueryInput(initialFilters.query);
     setFilters((current) => ({
       ...initialFilters,
-      statuses: [...allStatusFilters],
-      scopes: [...allScopeFilters],
+      statuses: [],
+      scopes: [],
       tagMode: current.tagMode,
     }));
   }
@@ -3428,7 +3428,6 @@ function TunnelOperationsPanel({
                   fullWidth
                   onPress={() => onToggleStatusFilter(option.value)}
                   aria-pressed={selected}
-                  isDisabled={selected && filters.statuses.length === 1}
                   className="min-w-0 justify-center"
                 >
                   {option.label}
@@ -3454,7 +3453,6 @@ function TunnelOperationsPanel({
                   fullWidth
                   onPress={() => onToggleScopeFilter(option.value)}
                   aria-pressed={selected}
-                  isDisabled={selected && filters.scopes.length === 1}
                   className="min-w-0 justify-center"
                 >
                   {option.label}
@@ -3624,8 +3622,8 @@ function ActiveFilterChips({
   onToggleTag,
 }: ActiveFilterChipsProps): ReactElement | null {
   const query = queryInput.trim();
-  const hasStatusFilter = !hasCompleteFilterSelection(filters.statuses, allStatusFilters);
-  const hasScopeFilter = !hasCompleteFilterSelection(filters.scopes, allScopeFilters);
+  const hasStatusFilter = filters.statuses.length > 0;
+  const hasScopeFilter = filters.scopes.length > 0;
   const hasTagFilters = filters.tags.length > 0;
   const hasFavoriteFilter = filters.favoritesOnly !== initialFilters.favoritesOnly;
 
@@ -3648,13 +3646,13 @@ function ActiveFilterChips({
       {hasStatusFilter ? (
         <FilterChip
           label={`status: ${filterSelectionLabels(filters.statuses, statusFilterOptions)}`}
-          onRemove={() => onFilterChange("statuses", [...allStatusFilters])}
+          onRemove={() => onFilterChange("statuses", [])}
         />
       ) : null}
       {hasScopeFilter ? (
         <FilterChip
           label={`scope: ${filterSelectionLabels(filters.scopes, scopeFilterOptions)}`}
-          onRemove={() => onFilterChange("scopes", [...allScopeFilters])}
+          onRemove={() => onFilterChange("scopes", [])}
         />
       ) : null}
       {hasFavoriteFilter ? (
@@ -6348,15 +6346,17 @@ function filterTunnels(
   const selectedStatuses = new Set(filters.statuses);
   const selectedScopes = new Set(filters.scopes);
   const selectedTags = new Set(filters.tags);
+  const hasStatusFilter = hasPartialFilterSelection(filters.statuses, allStatusFilters);
+  const hasScopeFilter = hasPartialFilterSelection(filters.scopes, allScopeFilters);
 
   return tunnels.filter((tunnel) => {
     const status = tunnelStatus(tunnel);
 
-    if (!selectedStatuses.has(status)) {
+    if (hasStatusFilter && !selectedStatuses.has(status)) {
       return false;
     }
 
-    if (!selectedScopes.has(tunnel.source)) {
+    if (hasScopeFilter && !selectedScopes.has(tunnel.source)) {
       return false;
     }
 
@@ -6373,18 +6373,11 @@ function filterTunnels(
 }
 
 /**
- * 必須の複数選択条件を1件以上残して切り替える
+ * 複数選択条件の選択状態を切り替える
  */
-function toggleRequiredFilterValue<Value extends string>(
-  selectedValues: Value[],
-  value: Value,
-): Value[] {
+function toggleFilterValue<Value extends string>(selectedValues: Value[], value: Value): Value[] {
   if (!selectedValues.includes(value)) {
     return [...selectedValues, value];
-  }
-
-  if (selectedValues.length <= 1) {
-    return selectedValues;
   }
 
   return selectedValues.filter((selectedValue) => selectedValue !== value);
@@ -6400,6 +6393,16 @@ function hasCompleteFilterSelection<Value extends string>(
   const selected = new Set(selectedValues);
 
   return selected.size === allValues.length && allValues.every((value) => selected.has(value));
+}
+
+/**
+ * 複数選択条件が一部候補だけを含むか判定する
+ */
+function hasPartialFilterSelection<Value extends string>(
+  selectedValues: readonly Value[],
+  allValues: ReadonlyArray<Value>,
+): boolean {
+  return selectedValues.length > 0 && !hasCompleteFilterSelection(selectedValues, allValues);
 }
 
 /**
@@ -6483,8 +6486,8 @@ function orderTagsBySelection(tags: string[], selectedTags: string[]): string[] 
 function hasActiveTunnelFilters(filters: TunnelFilters): boolean {
   return (
     filters.query.trim().length > 0 ||
-    !hasCompleteFilterSelection(filters.statuses, allStatusFilters) ||
-    !hasCompleteFilterSelection(filters.scopes, allScopeFilters) ||
+    filters.statuses.length > 0 ||
+    filters.scopes.length > 0 ||
     filters.favoritesOnly !== initialFilters.favoritesOnly ||
     filters.tags.length > 0
   );

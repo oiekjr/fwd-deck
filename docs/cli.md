@@ -100,7 +100,7 @@ global と local の間で同じ `name` や `local_port` を使う設定は許�
 | `connect_timeout_seconds` | `15` | SSH接続のタイムアウト秒数です。 |
 | `server_alive_interval_seconds` | `30` | SSH keepalive の送信間隔です。 |
 | `server_alive_count_max` | `3` | SSH keepalive の失敗許容回数です。 |
-| `start_grace_milliseconds` | `300` | 起動後の疎通確認まで待つ時間です。 |
+| `start_grace_milliseconds` | `300` | 起動後の早期終了確認に使う基準時間で、Start 成功時は local port の LISTEN 確認も短く待ちます。 |
 
 ## Runtime State
 

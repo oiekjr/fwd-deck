@@ -5,9 +5,9 @@ use std::{
     io,
     net::TcpListener,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use thiserror::Error;
@@ -16,6 +16,9 @@ use crate::{
     ResolvedTimeoutConfig, ResolvedTunnelConfig, TunnelState, TunnelStateFile,
     state::{StateFileError, read_state_file, runtime_id_for_resolved_tunnel, write_state_file},
 };
+
+const STARTUP_LISTEN_CONFIRMATION_MILLISECONDS: u64 = 1_000;
+const STARTUP_PROBE_INTERVAL_MILLISECONDS: u64 = 25;
 
 /// 起動中プロセスの状態を表現する
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -465,6 +468,18 @@ fn start_grace_period(timeouts: ResolvedTimeoutConfig) -> Duration {
     Duration::from_millis(timeouts.start_grace_milliseconds)
 }
 
+/// 起動確認でLISTEN状態を待つ上限時間を取得する
+fn startup_readiness_wait_period(timeouts: ResolvedTimeoutConfig) -> Duration {
+    start_grace_period(timeouts).max(Duration::from_millis(
+        STARTUP_LISTEN_CONFIRMATION_MILLISECONDS,
+    ))
+}
+
+/// 起動状態確認の間隔を取得する
+fn startup_probe_interval() -> Duration {
+    Duration::from_millis(STARTUP_PROBE_INTERVAL_MILLISECONDS)
+}
+
 /// 状態ファイル更新を呼び出し元へ委ねて SSH プロセスを開始する
 fn start_tunnel_without_state_write(
     resolved: &ResolvedTunnelConfig,
@@ -472,20 +487,7 @@ fn start_tunnel_without_state_write(
     ensure_local_endpoint_available(resolved)?;
 
     let mut child = spawn_ssh_tunnel(resolved)?;
-    thread::sleep(start_grace_period(resolved.timeouts));
-
-    if let Some(status) = child
-        .try_wait()
-        .map_err(|source| TunnelRuntimeError::StartupCheck {
-            name: resolved.tunnel.name.clone(),
-            source,
-        })?
-    {
-        return Err(TunnelRuntimeError::EarlyExit {
-            name: resolved.tunnel.name.clone(),
-            status,
-        });
-    }
+    wait_for_tunnel_readiness(&mut child, resolved)?;
 
     let started_at_unix_seconds = current_unix_seconds();
     let tunnel_state =
@@ -494,6 +496,41 @@ fn start_tunnel_without_state_write(
     Ok(StartedTunnel {
         state: tunnel_state,
     })
+}
+
+/// SSH プロセスの早期終了と local port のLISTEN状態を確認する
+fn wait_for_tunnel_readiness(
+    child: &mut Child,
+    resolved: &ResolvedTunnelConfig,
+) -> Result<(), TunnelRuntimeError> {
+    let deadline = Instant::now() + startup_readiness_wait_period(resolved.timeouts);
+
+    loop {
+        if let Some(status) =
+            child
+                .try_wait()
+                .map_err(|source| TunnelRuntimeError::StartupCheck {
+                    name: resolved.tunnel.name.clone(),
+                    source,
+                })?
+        {
+            return Err(TunnelRuntimeError::EarlyExit {
+                name: resolved.tunnel.name.clone(),
+                status,
+            });
+        }
+
+        if local_port_is_listening_for_pid(child.id(), resolved.tunnel.local_port) {
+            return Ok(());
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(());
+        }
+
+        thread::sleep(startup_probe_interval().min(deadline - now));
+    }
 }
 
 /// 並列開始対象の元位置と設定を保持する
@@ -543,6 +580,11 @@ fn find_local_port_processes(local_port: u16) -> LocalPortProcesses {
     find_local_port_processes_by_ports(&HashSet::from([local_port]))
         .remove(&local_port)
         .unwrap_or_default()
+}
+
+/// 指定PIDが local port をLISTENしているかを判定する
+fn local_port_is_listening_for_pid(pid: u32, local_port: u16) -> bool {
+    find_local_port_processes(local_port).contains_pid(pid)
 }
 
 /// 複数ローカルポートの LISTEN プロセスを 1 回の lsof で取得する
@@ -850,6 +892,28 @@ mod tests {
         assert_eq!(duration, Duration::from_millis(50));
     }
 
+    /// 起動確認待機時間がLISTEN確認用の最小時間を持つことを検証する
+    #[test]
+    fn startup_readiness_wait_period_has_listen_confirmation_floor() {
+        let short_grace = ResolvedTimeoutConfig {
+            start_grace_milliseconds: 50,
+            ..ResolvedTimeoutConfig::default()
+        };
+        let long_grace = ResolvedTimeoutConfig {
+            start_grace_milliseconds: 1_500,
+            ..ResolvedTimeoutConfig::default()
+        };
+
+        assert_eq!(
+            startup_readiness_wait_period(short_grace),
+            Duration::from_millis(STARTUP_LISTEN_CONFIRMATION_MILLISECONDS)
+        );
+        assert_eq!(
+            startup_readiness_wait_period(long_grace),
+            Duration::from_millis(1_500)
+        );
+    }
+
     /// 一括開始が起動済みトンネルを起動処理なしで報告することを検証する
     #[test]
     fn start_tunnels_reports_already_running_tunnels() {
@@ -898,6 +962,15 @@ mod tests {
         .expect("start tunnels");
 
         assert_eq!(reported_indexes, vec![0]);
+    }
+
+    /// LISTEN確認が対象PIDのローカルポートを検出することを検証する
+    #[test]
+    fn local_port_is_listening_for_pid_detects_current_process_listener() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let local_port = listener.local_addr().expect("read listener address").port();
+
+        assert!(local_port_is_listening_for_pid(process::id(), local_port));
     }
 
     /// 複数状態ファイルの状態取得が入力順のファイル単位で結果を返すことを検証する

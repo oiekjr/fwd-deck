@@ -40,6 +40,7 @@ import {
   Pencil,
   Play,
   RefreshCw,
+  RotateCcw,
   Rows3,
   Search,
   Server,
@@ -136,6 +137,11 @@ interface WorkspaceSelectionInput {
   autoStopTunnelsOnQuit: boolean;
   hideTrackedRuntimeBar: boolean;
 }
+
+type ApplicationSettingsDefaults = Pick<
+  WorkspaceSelection,
+  "hideDockIconWhenWindowHidden" | "autoStopTunnelsOnQuit" | "hideTrackedRuntimeBar"
+>;
 
 interface OperationTarget {
   id: string;
@@ -389,6 +395,12 @@ interface VisibleTunnelSelectionSummary {
   selectedCount: number;
 }
 
+const defaultApplicationSettings: ApplicationSettingsDefaults = {
+  hideDockIconWhenWindowHidden: false,
+  autoStopTunnelsOnQuit: false,
+  hideTrackedRuntimeBar: false,
+};
+
 const initialPaths: WorkspaceSelection = {
   workspacePath: "",
   workspaceHistory: [],
@@ -397,9 +409,7 @@ const initialPaths: WorkspaceSelection = {
   useGlobal: true,
   globalStatePath: "",
   workspaceStatePath: "",
-  hideDockIconWhenWindowHidden: false,
-  autoStopTunnelsOnQuit: false,
-  hideTrackedRuntimeBar: false,
+  ...defaultApplicationSettings,
 };
 
 const initialForm: TunnelFormState = {
@@ -1537,6 +1547,19 @@ function App(): ReactElement {
   }
 
   /**
+   * Application設定の未適用入力を既定値へ戻す
+   */
+  function resetApplicationSettingsDraft(): void {
+    setSettingsDraft((current) => {
+      if (current === null) {
+        return current;
+      }
+
+      return { ...current, ...defaultApplicationSettings };
+    });
+  }
+
+  /**
    * フォルダ選択ダイアログの結果を未適用ワークスペースへ反映する
    */
   async function browseWorkspace(): Promise<void> {
@@ -1884,6 +1907,9 @@ function App(): ReactElement {
   const handleBrowseGlobalConfig = useStableEvent((): void => {
     void browseGlobalConfig();
   });
+  const handleResetApplicationSettings = useStableEvent((): void => {
+    resetApplicationSettingsDraft();
+  });
   const handleRemoveWorkspaceHistoryEntry = useStableEvent((workspacePath: string): void => {
     void removeWorkspaceHistoryEntry(workspacePath);
   });
@@ -2004,6 +2030,7 @@ function App(): ReactElement {
         onChange={updateSettingsDraft}
         onBrowseWorkspace={handleBrowseWorkspace}
         onBrowseGlobalConfig={handleBrowseGlobalConfig}
+        onResetApplicationSettings={handleResetApplicationSettings}
         onSelectWorkspace={selectWorkspaceFromHistory}
         onRemoveWorkspace={handleRemoveWorkspaceHistoryEntry}
         onRefreshCliIntegration={handleRefreshCliIntegration}
@@ -2710,6 +2737,7 @@ interface SettingsModalProps {
   onCancel: () => void;
   onBrowseWorkspace: () => void;
   onBrowseGlobalConfig: () => void;
+  onResetApplicationSettings: () => void;
   onSelectWorkspace: (workspacePath: string) => void;
   onRemoveWorkspace: (workspacePath: string) => void;
   onRefreshCliIntegration: () => void;
@@ -2733,6 +2761,7 @@ function SettingsModal({
   onCancel,
   onBrowseWorkspace,
   onBrowseGlobalConfig,
+  onResetApplicationSettings,
   onSelectWorkspace,
   onRemoveWorkspace,
   onRefreshCliIntegration,
@@ -2786,6 +2815,7 @@ function SettingsModal({
                 onChange={onChange}
                 onBrowseWorkspace={onBrowseWorkspace}
                 onBrowseGlobalConfig={onBrowseGlobalConfig}
+                onResetApplicationSettings={onResetApplicationSettings}
                 onSelectWorkspace={onSelectWorkspace}
                 onRemoveWorkspace={onRemoveWorkspace}
                 onRefreshCliIntegration={onRefreshCliIntegration}
@@ -2826,6 +2856,7 @@ interface PathPanelProps {
   onChange: (field: keyof WorkspaceSelection, value: string | boolean) => void;
   onBrowseWorkspace: () => void;
   onBrowseGlobalConfig: () => void;
+  onResetApplicationSettings: () => void;
   onSelectWorkspace: (workspacePath: string) => void;
   onRemoveWorkspace: (workspacePath: string) => void;
   onRefreshCliIntegration: () => void;
@@ -2846,6 +2877,7 @@ function PathPanel({
   onChange,
   onBrowseWorkspace,
   onBrowseGlobalConfig,
+  onResetApplicationSettings,
   onSelectWorkspace,
   onRemoveWorkspace,
   onRefreshCliIntegration,
@@ -2960,9 +2992,23 @@ function PathPanel({
       </Card>
 
       <Card variant="secondary" className="flex flex-col gap-3 p-4 lg:col-span-2">
-        <div className="flex items-center gap-2">
-          <Settings2 className="text-foreground/70" size={17} />
-          <h3 className="text-sm font-bold">Application</h3>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <Settings2 className="text-foreground/70" size={17} />
+            <h3 className="text-sm font-bold">Application</h3>
+          </div>
+          <HeroButton
+            type="button"
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            onPress={onResetApplicationSettings}
+            isDisabled={isBusy}
+            aria-label="Application設定をデフォルトに戻す"
+          >
+            <RotateCcw size={14} />
+            Restore defaults
+          </HeroButton>
         </div>
         <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
           <Switch

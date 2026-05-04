@@ -16,6 +16,8 @@ These checks are not required after investigation-only tasks or documentation-on
 
 When adding or changing user-facing behavior, configuration, commands, release behavior, or operational workflow, update the related documentation in the same task. If no documentation update is needed, explicitly confirm that the existing documentation remains accurate.
 
+Use documentation whose audience and scope match the change. Do not add macOS app-only UI behavior to `docs/cli.md`; that file is the CLI reference. If an app-only UI change has no suitable app documentation, explicitly confirm that the existing documentation remains accurate instead of forcing a misplaced update.
+
 When a Markdown document intentionally needs a rendered line break inside a paragraph, end the preceding line with two ASCII spaces. Do not rely on source line breaks alone for rendered line breaks.
 
 In Japanese Markdown documents, normally insert a line break immediately after a Japanese full stop (`。`). If that line break is intended as a rendered line break, the preceding line MUST end with two ASCII spaces.

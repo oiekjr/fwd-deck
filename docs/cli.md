@@ -264,13 +264,13 @@ fwd-deck config remove --scope global
 `config add`, `config edit`, `config remove` は、global設定または local設定を対話形式で編集します。  
 `--scope` を省略すると、編集する local または global 設定を対話選択します。  
 `--scope local` は `./fwd-deck.toml`、`--scope global` は `~/.config/fwd-deck/config.toml` を対象にします。  
-`config add` は対象ファイルが存在しない場合に新規作成します。  
+`config add` は対象ファイルが存在しない場合に新規作成し、既定値の `[timeouts]` も書き込みます。  
 同一設定ファイル内で重複する `name` と `local_port` は入力時に拒否します。  
 `config edit` は既存値を初期値として表示し、空入力は既存値維持として扱います。  
 同じ `name` が global設定と local設定の両方に存在する場合、対話実行時は編集対象を選択します。  
 非対話実行時は `--scope` を指定します。
 
-`config add` はタイムアウト設定を入力しないため、必要な場合は TOML を直接編集します。  
+`config add` はタイムアウト設定を入力しないため、新規作成時の既定値から変更する場合は TOML を直接編集します。  
 `config edit` もタイムアウト設定を変更しないため、必要な場合は TOML を直接編集します。
 
 ### `completion`

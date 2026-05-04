@@ -743,8 +743,9 @@ fn read_config_file_for_edit(
 ) -> Result<LoadedConfigFile, ConfigEditError> {
     if !path.exists() {
         if create_if_missing {
-            return Ok(LoadedConfigFile::new(
+            return Ok(LoadedConfigFile::with_timeouts(
                 ConfigSource::new(kind, path.to_path_buf()),
+                default_timeout_config_for_new_file(),
                 Vec::new(),
             ));
         }
@@ -796,6 +797,16 @@ fn write_config_file(path: &Path, file: &LoadedConfigFile) -> Result<(), ConfigE
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// 新規作成する設定ファイルに出力する既定タイムアウト設定を生成する
+fn default_timeout_config_for_new_file() -> TimeoutConfig {
+    TimeoutConfig {
+        connect_timeout_seconds: Some(DEFAULT_CONNECT_TIMEOUT_SECONDS),
+        server_alive_interval_seconds: Some(DEFAULT_SERVER_ALIVE_INTERVAL_SECONDS),
+        server_alive_count_max: Some(DEFAULT_SERVER_ALIVE_COUNT_MAX),
+        start_grace_milliseconds: Some(DEFAULT_START_GRACE_MILLISECONDS),
+    }
 }
 
 /// TOML から読み込んだタグ一覧を正規化する
@@ -1410,9 +1421,31 @@ ssh_host = "bastion.example.com"
         let loaded = read_config_file(&path, ConfigSourceKind::Local)
             .expect("read configuration")
             .expect("configuration file exists");
+        let content = fs::read_to_string(&path).expect("read configuration content");
 
         assert_eq!(loaded.tunnels.len(), 1);
         assert_eq!(loaded.tunnels[0].name, "db");
+        assert_eq!(
+            loaded.timeouts.connect_timeout_seconds,
+            Some(DEFAULT_CONNECT_TIMEOUT_SECONDS)
+        );
+        assert_eq!(
+            loaded.timeouts.server_alive_interval_seconds,
+            Some(DEFAULT_SERVER_ALIVE_INTERVAL_SECONDS)
+        );
+        assert_eq!(
+            loaded.timeouts.server_alive_count_max,
+            Some(DEFAULT_SERVER_ALIVE_COUNT_MAX)
+        );
+        assert_eq!(
+            loaded.timeouts.start_grace_milliseconds,
+            Some(DEFAULT_START_GRACE_MILLISECONDS)
+        );
+        assert!(content.contains("[timeouts]"));
+        assert!(content.contains("connect_timeout_seconds = 15"));
+        assert!(content.contains("server_alive_interval_seconds = 30"));
+        assert!(content.contains("server_alive_count_max = 3"));
+        assert!(content.contains("start_grace_milliseconds = 300"));
     }
 
     /// 同一設定ファイル内の name 重複が追加時に拒否されることを検証する

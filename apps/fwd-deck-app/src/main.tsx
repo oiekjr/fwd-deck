@@ -678,7 +678,7 @@ function App(): ReactElement {
     async (command: string): Promise<void> => {
       try {
         await navigator.clipboard.writeText(command);
-        showOperationToast({ kind: "success", summary: "CLI command をコピーしました" });
+        showOperationToast({ kind: "success", summary: "CLIコマンドをコピーしました" });
       } catch (error) {
         showOperationToast({ kind: "error", summary: stringifyError(error) });
       }
@@ -3253,7 +3253,7 @@ function ValidationPanel({ dashboard }: ValidationPanelProps): ReactElement | nu
   if (!dashboard.hasConfig) {
     return (
       <AlertMessage kind="warning">
-        設定ファイルが見つかりません。Add tunnel から local または global 設定を作成できます。
+        設定ファイルが見つかりません。Add tunnel から local設定または global設定を作成できます。
       </AlertMessage>
     );
   }

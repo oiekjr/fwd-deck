@@ -4239,7 +4239,7 @@ function TunnelSlimList({
     <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       <Table variant="secondary">
         <Table.ScrollContainer>
-          <Table.Content aria-label="Configured tunnels" className="min-w-[84rem] table-fixed">
+          <Table.Content aria-label="Configured tunnels" className="min-w-[85rem] table-fixed">
             <colgroup>
               <col className="w-12" />
               <col className="w-40" />
@@ -4249,7 +4249,7 @@ function TunnelSlimList({
               <col className="w-52" />
               <col className="w-[5.5rem]" />
               <col className="w-[4.5rem]" />
-              <col className="w-[19.5rem]" />
+              <col className="w-[20.5rem]" />
             </colgroup>
             <Table.Header>
               <Table.Column className="w-12">
@@ -4270,7 +4270,7 @@ function TunnelSlimList({
               <Table.Column className="w-52">SSH</Table.Column>
               <Table.Column className="w-[5.5rem]">Source</Table.Column>
               <Table.Column className="w-[4.5rem]">Watch</Table.Column>
-              <Table.Column className="w-[19.5rem] text-right">Actions</Table.Column>
+              <Table.Column className="w-[20.5rem] pr-3 text-right">Actions</Table.Column>
             </Table.Header>
             <Table.Body>
               {tunnels.map((tunnel) => (
@@ -4394,7 +4394,7 @@ const TunnelSlimRow = memo(function TunnelSlimRow({
           compact
         />
       </Table.Cell>
-      <Table.Cell className="w-[19.5rem]">
+      <Table.Cell className="w-[20.5rem] pr-3">
         <div className="flex min-w-max items-center justify-end gap-1">
           <FavoriteButton
             isFavorite={tunnel.isFavorite}

@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     env,
     ffi::{OsStr, OsString},
@@ -4502,6 +4503,7 @@ fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
 struct PathMatchTarget {
     original: PathBuf,
     normalized: PathBuf,
+    normalized_candidates: RefCell<HashMap<PathBuf, PathBuf>>,
 }
 
 impl PathMatchTarget {
@@ -4510,6 +4512,7 @@ impl PathMatchTarget {
         Self {
             original: path.to_path_buf(),
             normalized: comparable_path(path),
+            normalized_candidates: RefCell::new(HashMap::new()),
         }
     }
 
@@ -4517,7 +4520,22 @@ impl PathMatchTarget {
     fn matches(&self, candidate: &Path) -> bool {
         self.original == candidate
             || self.normalized == candidate
-            || self.normalized == comparable_path(candidate)
+            || self.normalized == self.comparable_candidate_path(candidate)
+    }
+
+    /// 比較対象パスの正規化結果を取得する
+    fn comparable_candidate_path(&self, candidate: &Path) -> PathBuf {
+        let candidate = candidate.to_path_buf();
+        if let Some(normalized) = self.normalized_candidates.borrow().get(&candidate) {
+            return normalized.clone();
+        }
+
+        let normalized = comparable_path(&candidate);
+        self.normalized_candidates
+            .borrow_mut()
+            .insert(candidate, normalized.clone());
+
+        normalized
     }
 }
 

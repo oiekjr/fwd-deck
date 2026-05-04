@@ -377,6 +377,8 @@ interface RuntimeDisplayInfo {
 
 type TunnelSearchIndex = ReadonlyMap<string, readonly string[]>;
 
+type TunnelLookup = ReadonlyMap<string, TunnelView>;
+
 interface ViewportScrollSnapshot {
   left: number;
   top: number;
@@ -545,6 +547,10 @@ function App(): ReactElement {
   const tunnelSearchIndex = useMemo<TunnelSearchIndex>(
     () => buildTunnelSearchIndex(dashboardTunnels, homePath),
     [dashboardTunnels, homePath],
+  );
+  const tunnelByRuntimeId = useMemo<TunnelLookup>(
+    () => buildTunnelLookup(dashboardTunnels),
+    [dashboardTunnels],
   );
   const filteredTunnels = useMemo<TunnelView[]>(
     () => filterTunnels(dashboardTunnels, filters, tunnelSearchIndex, homePath),
@@ -1034,7 +1040,7 @@ function App(): ReactElement {
 
     await runOperation(
       "start_tunnels",
-      ids.map((id) => operationTargetForTunnel(id, dashboard)),
+      ids.map((id) => operationTargetForTunnel(id, tunnelByRuntimeId)),
       options,
     );
   }
@@ -1050,7 +1056,7 @@ function App(): ReactElement {
 
     await runOperation(
       "stop_tunnels",
-      ids.map((id) => operationTargetForStop(id, dashboard)),
+      ids.map((id) => operationTargetForStop(id, tunnelByRuntimeId)),
       options,
     );
   }
@@ -6226,11 +6232,77 @@ function reconcileDashboardState(
   current: DashboardState | null,
   next: DashboardState,
 ): DashboardState {
-  if (current !== null && dashboardStateEquals(current, next)) {
+  if (current === null) {
+    return next;
+  }
+
+  if (dashboardStateEquals(current, next)) {
+    return current;
+  }
+
+  return {
+    ...next,
+    paths: reconcileWorkspaceSelection(current.paths, next.paths),
+    validation: reconcileValidationView(current.validation, next.validation),
+    tunnels: reconcileTunnelViews(current.tunnels, next.tunnels),
+    trackedTunnels: reconcileTrackedTunnelViews(current.trackedTunnels, next.trackedTunnels),
+  };
+}
+
+/**
+ * 同じ検証結果では既存参照を再利用する
+ */
+function reconcileValidationView(current: ValidationView, next: ValidationView): ValidationView {
+  if (validationViewEquals(current, next)) {
     return current;
   }
 
   return next;
+}
+
+/**
+ * 未変更のトンネル表示モデルでは既存参照を再利用する
+ */
+function reconcileTunnelViews(current: TunnelView[], next: TunnelView[]): TunnelView[] {
+  return reconcileArrayItemsByKey(current, next, (tunnel) => tunnel.runtimeId, tunnelViewEquals);
+}
+
+/**
+ * 未変更の追跡 runtime 表示モデルでは既存参照を再利用する
+ */
+function reconcileTrackedTunnelViews(
+  current: TrackedTunnelView[],
+  next: TrackedTunnelView[],
+): TrackedTunnelView[] {
+  return reconcileArrayItemsByKey(
+    current,
+    next,
+    (tracked) => tracked.runtimeKey,
+    trackedTunnelViewEquals,
+  );
+}
+
+/**
+ * 同じキーで値も一致する配列要素を既存参照へ戻す
+ */
+function reconcileArrayItemsByKey<Item>(
+  current: Item[],
+  next: Item[],
+  keyForItem: (item: Item) => string,
+  itemEquals: (left: Item, right: Item) => boolean,
+): Item[] {
+  if (arrayItemsEqual(current, next, itemEquals)) {
+    return current;
+  }
+
+  const currentByKey = new Map<string, Item>();
+  current.forEach((item) => currentByKey.set(keyForItem(item), item));
+
+  return next.map((nextItem) => {
+    const currentItem = currentByKey.get(keyForItem(nextItem));
+
+    return currentItem !== undefined && itemEquals(currentItem, nextItem) ? currentItem : nextItem;
+  });
 }
 
 /**
@@ -6481,6 +6553,19 @@ function collectAvailableTags(tunnels: readonly TunnelView[]): string[] {
   });
 
   return Array.from(tags).sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * runtime ID からトンネル表示モデルを引ける索引を生成する
+ */
+function buildTunnelLookup(tunnels: readonly TunnelView[]): TunnelLookup {
+  const lookup = new Map<string, TunnelView>();
+
+  tunnels.forEach((tunnel) => {
+    lookup.set(tunnel.runtimeId, tunnel);
+  });
+
+  return lookup;
 }
 
 /**
@@ -7144,9 +7229,9 @@ function workspaceSwitchSuccessSummary(defaultSummary: string, stoppedCount: num
  */
 function operationTargetForTunnel(
   runtimeId: string,
-  dashboard: DashboardState | null,
+  tunnelByRuntimeId: TunnelLookup,
 ): OperationTarget {
-  const tunnel = dashboard?.tunnels.find((tunnel) => tunnel.runtimeId === runtimeId);
+  const tunnel = tunnelByRuntimeId.get(runtimeId);
 
   if (tunnel === undefined) {
     return { id: runtimeId, runtimeId };
@@ -7160,9 +7245,9 @@ function operationTargetForTunnel(
  */
 function operationTargetForStop(
   runtimeId: string,
-  dashboard: DashboardState | null,
+  tunnelByRuntimeId: TunnelLookup,
 ): OperationTarget {
-  const tunnel = dashboard?.tunnels.find((tunnel) => tunnel.runtimeId === runtimeId);
+  const tunnel = tunnelByRuntimeId.get(runtimeId);
 
   if (tunnel === undefined) {
     return { id: runtimeId, runtimeId };

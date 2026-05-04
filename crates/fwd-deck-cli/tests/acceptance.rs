@@ -301,11 +301,22 @@ fn help_displays_japanese_overview_commands_and_examples() {
 
     assert!(output.status.success());
     output.assert_stdout_contains("設定ファイルに定義したポートフォワーディングを操作する");
+    output.assert_stdout_contains("使い方: fwd-deck [OPTIONS] <COMMAND>");
+    output.assert_stdout_contains("コマンド:");
+    output.assert_stdout_contains("オプション:");
     output
         .assert_stdout_contains("現在または指定ディレクトリを Workspace として macOSアプリを開く");
     output.assert_stdout_contains("設定済みトンネルを一覧表示する");
     output.assert_stdout_contains("設定ファイルを検証する");
+    output.assert_stdout_contains("対応コマンドの出力を JSON として表示する");
+    output.assert_stdout_contains("ヘルプを表示する");
+    output.assert_stdout_contains("バージョンを表示する");
     output.assert_stdout_contains("fwd-deck start dev-db --dry-run");
+    output.assert_stdout_not_contains("Usage:");
+    output.assert_stdout_not_contains("Commands:");
+    output.assert_stdout_not_contains("Options:");
+    output.assert_stdout_not_contains("Print help");
+    output.assert_stdout_not_contains("Print version");
 }
 
 /// open --help が cwd 既定と Workspace 切り替えの説明を表示することを検証する
@@ -316,11 +327,47 @@ fn open_help_displays_workspace_path_notes() {
     let output = workspace.run(["open", "--help"]);
 
     assert!(output.status.success());
+    output.assert_stdout_contains("使い方: fwd-deck open [OPTIONS] [PATH]");
+    output.assert_stdout_contains("引数:");
+    output.assert_stdout_contains("オプション:");
     output.assert_stdout_contains("PATH を省略すると、現在のディレクトリを Workspace として");
     output.assert_stdout_contains(
         "既存アプリが起動中の場合は、既存ウィンドウで Workspace を切り替えます。",
     );
     output.assert_stdout_contains("旧 Workspace の local トンネルを停止します。");
+    output.assert_stdout_contains("対応コマンドの出力を JSON として表示する");
+    output.assert_stdout_contains("ヘルプを表示する");
+    output.assert_stdout_not_contains("Usage:");
+    output.assert_stdout_not_contains("Arguments:");
+    output.assert_stdout_not_contains("Options:");
+    output.assert_stdout_not_contains("Print supported command output as JSON");
+    output.assert_stdout_not_contains("Print help");
+}
+
+/// open が存在しない Workspace パスを日本語エラーで拒否することを検証する
+#[test]
+fn open_fails_for_missing_workspace_with_japanese_error() {
+    let workspace = TestWorkspace::new();
+    let missing_path = workspace.path().join("missing");
+    let missing_path = missing_path
+        .to_str()
+        .expect("workspace path must be valid UTF-8");
+
+    let output = workspace.run(["open", missing_path]);
+
+    assert!(!output.status.success());
+    output.assert_stderr_contains("エラー: Workspace ディレクトリが見つかりません:");
+}
+
+/// open が --json 指定を日本語エラーで拒否することを検証する
+#[test]
+fn open_rejects_json_with_japanese_error() {
+    let workspace = TestWorkspace::new();
+
+    let output = workspace.run(["--json", "open"]);
+
+    assert!(!output.status.success());
+    output.assert_stderr_contains("エラー: --json はこのコマンドでは利用できません");
 }
 
 /// start --help が対話選択、排他制約、dry-run の説明を表示することを検証する

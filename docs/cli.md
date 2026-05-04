@@ -124,11 +124,13 @@ fwd-deck open ~/projects/my-service
 現在のディレクトリ、または指定した `PATH` を macOSアプリの Workspace として開きます。
 `PATH` は既存ディレクトリである必要があります。
 相対パスは CLI の現在ディレクトリを基準に解決します。
+起動要求に成功した場合は、`Fwd Deck.app で Workspace を開きました: ...` の形式で開いた Workspace の絶対パスを標準出力へ表示します。
 
 既存アプリが起動中の場合は、新しいウィンドウを作らずに既存ウィンドウで Workspace を切り替えます。
 Workspace 切り替え時は旧 Workspace の local トンネルを停止し、global トンネルは維持します。
 旧 Workspace の local トンネル停止に失敗した場合は、Workspace 切り替えを中止します。
 
+macOS 以外では、`open` は macOSアプリの起動が未対応であることをエラーとして表示します。
 macOSアプリが未インストールの場合は、先に Homebrew cask からインストールしてください。
 
 ```sh

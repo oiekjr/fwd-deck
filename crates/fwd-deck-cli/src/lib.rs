@@ -11,7 +11,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use fwd_deck_core::{
     ConfigEditError, ConfigPaths, ConfigSourceKind, DEFAULT_LOCAL_HOST, EffectiveConfig,
@@ -42,6 +42,47 @@ const STATUS_REMOTE_MIN_WIDTH: usize = 32;
 const STATUS_PID_MIN_WIDTH: usize = 8;
 const STATUS_STATE_MIN_WIDTH: usize = 10;
 const TRUNCATION_MARKER: &str = "...";
+const HELP_TEMPLATE_ABOUT_USAGE_COMMANDS_OPTIONS: &str = "\
+{about-with-newline}
+使い方: {usage}
+
+コマンド:
+{subcommands}
+
+オプション:
+{options}{after-help}";
+const HELP_TEMPLATE_ABOUT_USAGE_COMMANDS: &str = "\
+{about-with-newline}
+使い方: {usage}
+
+コマンド:
+{subcommands}{after-help}";
+const HELP_TEMPLATE_ABOUT_USAGE_ARGUMENTS_OPTIONS: &str = "\
+{about-with-newline}
+使い方: {usage}
+
+引数:
+{positionals}
+
+オプション:
+{options}{after-help}";
+const HELP_TEMPLATE_ABOUT_USAGE_ARGUMENTS: &str = "\
+{about-with-newline}
+使い方: {usage}
+
+引数:
+{positionals}{after-help}";
+const HELP_TEMPLATE_ABOUT_USAGE_OPTIONS: &str = "\
+{about-with-newline}
+使い方: {usage}
+
+オプション:
+{options}{after-help}";
+const HELP_TEMPLATE_ABOUT_USAGE: &str = "\
+{about-with-newline}
+使い方: {usage}
+
+{after-help}";
 #[cfg(any(test, target_os = "macos"))]
 const FWD_DECK_APP_BUNDLE_IDENTIFIER: &str = "dev.oiekjr.fwddeck";
 #[cfg(any(test, target_os = "macos"))]
@@ -228,7 +269,7 @@ struct Cli {
     )]
     state: Option<PathBuf>,
 
-    #[arg(long, global = true, help = "Print supported command output as JSON")]
+    #[arg(long, global = true, help = "対応コマンドの出力を JSON として表示する")]
     json: bool,
 
     #[command(subcommand)]
@@ -392,28 +433,26 @@ fn scope_kind(scope: Option<ConfigScopeArg>) -> Option<ConfigSourceKind> {
 /// CLI 実行時の失敗理由を表現する
 #[derive(Debug, Error)]
 enum CliError {
-    #[error("Failed to get the current directory: {0}")]
+    #[error("現在のディレクトリを取得できませんでした: {0}")]
     CurrentDir(std::io::Error),
-    #[error("Failed to resolve the default global configuration path because HOME is not set")]
+    #[error("HOME が設定されていないため、既定の global設定ファイルパスを解決できませんでした")]
     MissingGlobalConfigPath,
-    #[error("Failed to resolve the default state file path because HOME is not set")]
+    #[error("HOME が設定されていないため、既定の状態ファイルパスを解決できませんでした")]
     MissingStateHome,
-    #[error(
-        "Invalid tag: {tag}. Tags may contain only lowercase ASCII letters, numbers, '-', '_', '.', or '/'"
-    )]
+    #[error("不正なタグです: {tag}。タグに使える文字は小文字 ASCII、数字、'-'、'_'、'.'、'/' です")]
     InvalidTag { tag: String },
     #[error(
-        "Tunnel name exists in multiple configuration files: {id}. Specify --scope in non-interactive mode"
+        "複数の設定ファイルに同じトンネル名が存在します: {id}。非対話実行では --scope を指定してください"
     )]
     AmbiguousConfigEdit { id: String },
-    #[error("Workspace directory was not found: {}", format_path_for_display(.path))]
+    #[error("Workspace ディレクトリが見つかりません: {}", format_path_for_display(.path))]
     WorkspaceNotFound { path: PathBuf },
-    #[error("Workspace path is not a directory: {}", format_path_for_display(.path))]
+    #[error("Workspace パスがディレクトリではありません: {}", format_path_for_display(.path))]
     WorkspaceNotDirectory { path: PathBuf },
-    #[error("Workspace path must be valid UTF-8: {}", format_path_for_display(.path))]
+    #[error("Workspace パスは有効な UTF-8 である必要があります: {}", format_path_for_display(.path))]
     WorkspacePathNonUtf8 { path: PathBuf },
     #[cfg(not(target_os = "macos"))]
-    #[error("fwd-deck-app is supported only on macOS")]
+    #[error("macOSアプリの起動は macOS でのみ対応しています")]
     AppOpenUnsupported,
     #[cfg(any(test, target_os = "macos"))]
     #[error(
@@ -423,7 +462,7 @@ enum CliError {
     #[cfg(any(test, target_os = "macos"))]
     #[error("Fwd Deck.app を起動できませんでした。\n{message}")]
     AppLaunchFailed { message: String },
-    #[error("Failed to launch Fwd Deck.app: {0}")]
+    #[error("Fwd Deck.app の起動に失敗しました: {0}")]
     AppLaunchIo(#[from] io::Error),
     #[error(transparent)]
     Config(#[from] fwd_deck_core::ConfigLoadError),
@@ -433,9 +472,9 @@ enum CliError {
     Runtime(#[from] TunnelRuntimeError),
     #[error(transparent)]
     Prompt(#[from] InquireError),
-    #[error("--json is not supported for this command")]
+    #[error("--json はこのコマンドでは利用できません")]
     JsonUnsupported,
-    #[error("Failed to serialize JSON output: {0}")]
+    #[error("JSON出力のシリアライズに失敗しました: {0}")]
     Json(#[from] serde_json::Error),
 }
 
@@ -444,7 +483,7 @@ pub fn run_from_env() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("{}", red(&format!("Error: {error}"), OutputStream::Stderr));
+            eprintln!("{}", red(&format!("エラー: {error}"), OutputStream::Stderr));
             ExitCode::FAILURE
         }
     }
@@ -452,7 +491,7 @@ pub fn run_from_env() -> ExitCode {
 
 /// CLI の処理を実行する
 fn run() -> Result<ExitCode, CliError> {
-    let cli = Cli::parse();
+    let cli = parse_cli_from_env();
     let state_path = cli.state.clone();
 
     match &cli.command {
@@ -549,6 +588,68 @@ fn run() -> Result<ExitCode, CliError> {
     }
 }
 
+/// 日本語化した CLI 定義で引数を解析する
+fn parse_cli_from_env() -> Cli {
+    let matches = build_cli_command().get_matches();
+
+    Cli::from_arg_matches(&matches).expect("clap の検証済み引数から CLI を構築できること")
+}
+
+/// ヘルプ表示用の自動生成文言を日本語化した CLI 定義を生成する
+fn build_cli_command() -> clap::Command {
+    let mut command = Cli::command();
+    command.build();
+
+    localize_help_command(command)
+}
+
+/// clap が自動生成するヘルプ見出しと組み込み説明を日本語化する
+fn localize_help_command(mut command: clap::Command) -> clap::Command {
+    if command.get_name() == "help" {
+        command = command.about("指定したコマンドのヘルプを表示する");
+    }
+
+    let help_template = localized_help_template(&command);
+    command = command
+        .help_template(help_template)
+        .mut_args(localize_help_argument)
+        .mut_subcommands(localize_help_command);
+
+    command
+}
+
+/// コマンド構造に応じた日本語ヘルプテンプレートを選択する
+fn localized_help_template(command: &clap::Command) -> &'static str {
+    let has_commands = command
+        .get_subcommands()
+        .any(|subcommand| !subcommand.is_hide_set());
+    let has_arguments = command
+        .get_positionals()
+        .any(|argument| !argument.is_hide_set());
+    let has_options = command
+        .get_arguments()
+        .any(|argument| !argument.is_positional() && !argument.is_hide_set());
+
+    match (has_commands, has_arguments, has_options) {
+        (true, _, true) => HELP_TEMPLATE_ABOUT_USAGE_COMMANDS_OPTIONS,
+        (true, _, false) => HELP_TEMPLATE_ABOUT_USAGE_COMMANDS,
+        (false, true, true) => HELP_TEMPLATE_ABOUT_USAGE_ARGUMENTS_OPTIONS,
+        (false, true, false) => HELP_TEMPLATE_ABOUT_USAGE_ARGUMENTS,
+        (false, false, true) => HELP_TEMPLATE_ABOUT_USAGE_OPTIONS,
+        (false, false, false) => HELP_TEMPLATE_ABOUT_USAGE,
+    }
+}
+
+/// clap が自動生成する引数説明を日本語化する
+fn localize_help_argument(argument: clap::Arg) -> clap::Arg {
+    match argument.get_id().as_str() {
+        "help" => argument.help("ヘルプを表示する"),
+        "version" => argument.help("バージョンを表示する"),
+        "subcommand" => argument.help("ヘルプを表示するコマンド"),
+        _ => argument,
+    }
+}
+
 /// JSON 非対応コマンドで JSON 出力指定を拒否する
 fn reject_json_if_requested(json: bool) -> Result<(), CliError> {
     if json {
@@ -591,7 +692,7 @@ fn resolve_state_path(state_path: Option<PathBuf>) -> Result<PathBuf, CliError> 
 
 /// シェル補完スクリプトを生成する
 fn completion_command(shell: Shell) -> Result<ExitCode, CliError> {
-    let mut command = Cli::command();
+    let mut command = build_cli_command();
     let binary_name = command.get_name().to_owned();
 
     clap_complete::generate(shell, &mut command, binary_name, &mut io::stdout());
@@ -604,12 +705,17 @@ fn open_app_command(path: Option<PathBuf>) -> Result<ExitCode, CliError> {
     let workspace_path = resolve_open_workspace_path(path)?;
 
     launch_app_for_workspace(&workspace_path)?;
-    println!(
-        "Opening Fwd Deck workspace: {}",
-        format_path_for_display(&workspace_path)
-    );
+    println!("{}", open_workspace_success_message(&workspace_path));
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// Workspace を開いたことを通知する標準出力メッセージを生成する
+fn open_workspace_success_message(workspace_path: &Path) -> String {
+    format!(
+        "Fwd Deck.app で Workspace を開きました: {}",
+        format_path_for_display(workspace_path)
+    )
 }
 
 /// アプリへ渡す Workspace パスを絶対パスへ解決する
@@ -690,11 +796,11 @@ fn app_launch_error_from_output(status_code: Option<i32>, stderr: &str) -> CliEr
     let detail = stderr.trim();
     let message = if detail.is_empty() {
         match status_code {
-            Some(code) => format!("/usr/bin/open exited with status {code}."),
-            None => "/usr/bin/open was terminated by signal.".to_owned(),
+            Some(code) => format!("/usr/bin/open が終了ステータス {code} で失敗しました。"),
+            None => "/usr/bin/open がシグナルにより終了しました。".to_owned(),
         }
     } else {
-        format!("/usr/bin/open の出力:\n{detail}")
+        format!("/usr/bin/open から次のエラーが返されました:\n{detail}")
     };
 
     CliError::AppLaunchFailed { message }
@@ -4031,6 +4137,28 @@ mod tests {
         );
 
         assert!(matches!(error, CliError::AppNotInstalled));
+    }
+
+    /// open の成功通知が日本語で Workspace パスを含むことを検証する
+    #[test]
+    fn open_workspace_success_message_displays_japanese_message() {
+        let message = open_workspace_success_message(Path::new("/tmp/my-workspace"));
+
+        assert_eq!(
+            message,
+            "Fwd Deck.app で Workspace を開きました: /tmp/my-workspace"
+        );
+    }
+
+    /// stderr が空の open 失敗を日本語エラーへ変換することを検証する
+    #[test]
+    fn app_launch_error_maps_empty_output_to_japanese_message() {
+        let error = app_launch_error_from_output(Some(2), "");
+
+        assert_eq!(
+            error.to_string(),
+            "Fwd Deck.app を起動できませんでした。\n/usr/bin/open が終了ステータス 2 で失敗しました。"
+        );
     }
 
     /// Workspace パスが絶対ディレクトリへ正規化されることを検証する

@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    env,
     ffi::{OsStr, OsString},
     fs,
     io::Write,
@@ -3222,7 +3223,7 @@ impl TunnelInput {
             ssh_user: trimmed_required(self.ssh_user),
             ssh_host: trimmed_required(self.ssh_host),
             ssh_port: self.ssh_port,
-            identity_file: trimmed_optional(self.identity_file),
+            identity_file: trimmed_identity_file(self.identity_file),
             timeouts: TimeoutConfig::default(),
         }
     }
@@ -3258,7 +3259,7 @@ impl DuplicateTunnelInput {
         source.ssh_user = trimmed_required(self.ssh_user);
         source.ssh_host = trimmed_required(self.ssh_host);
         source.ssh_port = self.ssh_port;
-        source.identity_file = trimmed_optional(self.identity_file);
+        source.identity_file = trimmed_identity_file(self.identity_file);
 
         source
     }
@@ -5999,9 +6000,41 @@ fn trimmed_optional(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// identity_file の前後空白を除去し、HOME配下のパスをチルダ形式へ短縮する
+fn trimmed_identity_file(value: Option<String>) -> Option<String> {
+    trimmed_optional(value).map(|value| shorten_home_path_for_config(&value))
+}
+
+/// 設定保存用にHOME配下のパスをチルダ形式へ短縮する
+fn shorten_home_path_for_config(path: &str) -> String {
+    let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
+        return path.to_owned();
+    };
+
+    shorten_home_path_for_config_with_home(path, Some(home.as_path()))
+}
+
+/// 指定されたホームディレクトリを基準に設定保存用パスを短縮する
+fn shorten_home_path_for_config_with_home(path: &str, home: Option<&Path>) -> String {
+    let Some(home) = home.filter(|home| !home.as_os_str().is_empty()) else {
+        return path.to_owned();
+    };
+
+    let path_ref = Path::new(path);
+    let Ok(relative_path) = path_ref.strip_prefix(home) else {
+        return path.to_owned();
+    };
+
+    if relative_path.as_os_str().is_empty() {
+        return "~".to_owned();
+    }
+
+    format!("~/{}", relative_path.display())
+}
+
 #[cfg(test)]
 mod tests {
-    use std::net::TcpListener;
+    use std::{net::TcpListener, path::Path};
 
     use fwd_deck_core::{
         ConfigSource, TunnelState, TunnelStateFile,
@@ -6010,6 +6043,58 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// HOME配下の identity_file をチルダ形式へ短縮することを検証する
+    #[test]
+    fn shorten_home_path_for_config_with_home_shortens_home_child() {
+        let home = Path::new("/Users/example");
+
+        let result =
+            shorten_home_path_for_config_with_home("/Users/example/.ssh/id_ed25519", Some(home));
+
+        assert_eq!(result, "~/.ssh/id_ed25519");
+    }
+
+    /// HOME自身の identity_file をチルダへ短縮することを検証する
+    #[test]
+    fn shorten_home_path_for_config_with_home_shortens_home_itself() {
+        let home = Path::new("/Users/example");
+
+        let result = shorten_home_path_for_config_with_home("/Users/example", Some(home));
+
+        assert_eq!(result, "~");
+    }
+
+    /// HOMEと同じ接頭辞を持つ別パスを短縮しないことを検証する
+    #[test]
+    fn shorten_home_path_for_config_with_home_keeps_sibling_path() {
+        let home = Path::new("/Users/example");
+
+        let result = shorten_home_path_for_config_with_home(
+            "/Users/example-work/.ssh/id_ed25519",
+            Some(home),
+        );
+
+        assert_eq!(result, "/Users/example-work/.ssh/id_ed25519");
+    }
+
+    /// 既にチルダ形式の identity_file を変更しないことを検証する
+    #[test]
+    fn shorten_home_path_for_config_with_home_keeps_existing_tilde_path() {
+        let home = Path::new("/Users/example");
+
+        let result = shorten_home_path_for_config_with_home("~/.ssh/id_ed25519", Some(home));
+
+        assert_eq!(result, "~/.ssh/id_ed25519");
+    }
+
+    /// HOMEを解決できない場合に入力パスを維持することを検証する
+    #[test]
+    fn shorten_home_path_for_config_with_home_keeps_path_without_home() {
+        let result = shorten_home_path_for_config_with_home("/Users/example/.ssh/id_ed25519", None);
+
+        assert_eq!(result, "/Users/example/.ssh/id_ed25519");
+    }
 
     /// preferences 未作成時の既定値を検証する
     #[test]

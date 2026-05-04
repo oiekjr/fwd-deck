@@ -1134,7 +1134,7 @@ function App(): ReactElement {
 
     let tunnel: TunnelInput;
     try {
-      tunnel = formToTunnelInput(form);
+      tunnel = formToTunnelInput(form, homePath);
     } catch (error) {
       setFormFeedback({ kind: "error", text: stringifyError(error) });
       return;
@@ -1184,7 +1184,7 @@ function App(): ReactElement {
 
     let duplicate: DuplicateTunnelInput;
     try {
-      duplicate = duplicateFormToInput(duplicateForm);
+      duplicate = duplicateFormToInput(duplicateForm, homePath);
     } catch (error) {
       setDuplicateFormFeedback({ kind: "error", text: stringifyError(error) });
       return;
@@ -1235,7 +1235,7 @@ function App(): ReactElement {
 
     let tunnel: TunnelInput;
     try {
-      tunnel = formToTunnelInput(editForm);
+      tunnel = formToTunnelInput(editForm, homePath);
     } catch (error) {
       setEditFormFeedback({ kind: "error", text: stringifyError(error) });
       return;
@@ -1579,7 +1579,10 @@ function App(): ReactElement {
         return;
       }
 
-      updateForm("identityFile", selected);
+      updateForm(
+        "identityFile",
+        formatPathForConfig(selected, await homePathForConfigPathShortening(homePath)),
+      );
     } catch (error) {
       setMessage({ kind: "error", text: stringifyError(error) });
     }
@@ -1600,7 +1603,10 @@ function App(): ReactElement {
         return;
       }
 
-      updateEditForm("identityFile", selected);
+      updateEditForm(
+        "identityFile",
+        formatPathForConfig(selected, await homePathForConfigPathShortening(homePath)),
+      );
     } catch (error) {
       showOperationToast({ kind: "error", summary: stringifyError(error) });
     }
@@ -1621,7 +1627,10 @@ function App(): ReactElement {
         return;
       }
 
-      updateDuplicateForm("identityFile", selected);
+      updateDuplicateForm(
+        "identityFile",
+        formatPathForConfig(selected, await homePathForConfigPathShortening(homePath)),
+      );
     } catch (error) {
       showOperationToast({ kind: "error", summary: stringifyError(error) });
     }
@@ -6751,6 +6760,30 @@ async function identityFileDialogDefaultPath(): Promise<string | undefined> {
 }
 
 /**
+ * 設定保存用のHOMEパス短縮基準を取得する
+ */
+async function homePathForConfigPathShortening(
+  cachedHomePath: string | null,
+): Promise<string | null> {
+  if (cachedHomePath !== null) {
+    return cachedHomePath;
+  }
+
+  try {
+    return await homeDir();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 設定保存用にHOME配下の Path をチルダ形式へ変換する
+ */
+function formatPathForConfig(path: string, homePath: string | null): string {
+  return formatPathForDisplay(path, homePath);
+}
+
+/**
  * Path をユーザー表示用文字列へ変換する
  */
 function formatPathForDisplay(path: string, homePath: string | null): string {
@@ -6837,9 +6870,18 @@ function isMissingTauriRuntimeError(error: unknown): boolean {
 }
 
 /**
+ * identity_file 入力を command 用の任意値へ変換する
+ */
+function optionalIdentityFileForConfig(value: string, homePath: string | null): string | null {
+  const identityFile = optionalText(value);
+
+  return identityFile === null ? null : formatPathForConfig(identityFile, homePath);
+}
+
+/**
  * フォーム入力を command 入力へ変換する
  */
-function formToTunnelInput(form: TunnelFormState): TunnelInput {
+function formToTunnelInput(form: TunnelFormState, homePath: string | null): TunnelInput {
   return {
     id: requireText(form.id, "Name"),
     description: optionalText(form.description),
@@ -6851,14 +6893,17 @@ function formToTunnelInput(form: TunnelFormState): TunnelInput {
     sshUser: requireText(form.sshUser, "SSH user"),
     sshHost: requireText(form.sshHost, "SSH host"),
     sshPort: parsePort(form.sshPort, "SSH port", false),
-    identityFile: optionalText(form.identityFile),
+    identityFile: optionalIdentityFileForConfig(form.identityFile, homePath),
   };
 }
 
 /**
  * 複製フォーム入力を command 入力へ変換する
  */
-function duplicateFormToInput(form: DuplicateTunnelFormState): DuplicateTunnelInput {
+function duplicateFormToInput(
+  form: DuplicateTunnelFormState,
+  homePath: string | null,
+): DuplicateTunnelInput {
   return {
     id: requireText(form.id, "Name"),
     description: optionalText(form.description),
@@ -6870,7 +6915,7 @@ function duplicateFormToInput(form: DuplicateTunnelFormState): DuplicateTunnelIn
     sshUser: requireText(form.sshUser, "SSH user"),
     sshHost: requireText(form.sshHost, "SSH host"),
     sshPort: parsePort(form.sshPort, "SSH port", false),
-    identityFile: optionalText(form.identityFile),
+    identityFile: optionalIdentityFileForConfig(form.identityFile, homePath),
   };
 }
 

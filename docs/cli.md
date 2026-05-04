@@ -34,12 +34,8 @@ fwd-deck open ~/projects/my-service
 bare name を指定する操作では local が優先され、global を対象にする場合は `--scope global` を指定します。  
 `fwd-deck.toml` はローカル環境用の設定として git 管理から除外する想定です。
 
-macOSアプリでは、Settings で選択した Workspace を local設定の基準にします。  
-アプリの local設定は `<workspace>/fwd-deck.toml` として扱い、最近使った Workspace はアプリ設定として保存します。  
-Workspace に `fwd-deck.toml` が存在しない場合でも読み込みは継続し、local への追加時に設定ファイルを作成します。
-macOSアプリの設定複製では、複製元とは別に複製先の local設定または global設定を選択できます。
-macOSアプリの初回起動時は、アプリ設定 `preferences.toml` が未作成かつ global設定が存在しない場合に、`fwd-deck.example.toml` と同じ内容を global設定へ自動作成します。
-この初回起動判定後はアプリ設定を保存し、以後 global設定を削除しても自動再作成しません。
+CLI の local設定は、実行時の作業ディレクトリにある `./fwd-deck.toml` を基準にします。  
+`fwd-deck open` で開いた macOSアプリは、指定した Workspace 配下の `fwd-deck.toml` を local設定として扱います。
 
 ## Configuration Format
 
@@ -114,8 +110,7 @@ global と local の間で同じ `name` や `local_port` を使う設定は許�
 fwd-deck --state /tmp/fwd-deck-state.toml status
 ```
 
-macOSアプリの Auto recover / Watch 設定は、アプリ設定の `preferences.toml` に保存します。  
-`fwd-deck.toml` と CLIオプションには書き込まず、アプリ常駐中に現在の Workspace と global設定の stale 状態だけを復旧対象にします。
+macOSアプリの Auto recover 設定は、`fwd-deck.toml` や CLIオプションとは別に保存します。
 
 ## Command Reference
 

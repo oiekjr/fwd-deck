@@ -22,7 +22,8 @@ use fwd_deck_core::{
     add_tunnel_to_config_file, default_global_config_path, default_local_config_path,
     default_state_file_path, format_path_for_display, load_effective_config,
     normalize_runtime_source_path, remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel,
-    start_tunnel, start_tunnels_with_progress, stop_tunnel, tag_is_valid, tunnel_runtime_id,
+    start_tunnel, start_tunnels_with_progress, stop_tunnel,
+    stop_tunnels_with_progress as stop_tunnels_with_progress_core, tag_is_valid, tunnel_runtime_id,
     tunnel_runtime_id_from_normalized_source_path, tunnel_statuses,
     tunnel_statuses_for_state_files, update_tunnel_in_config_file, validate_config,
 };
@@ -3063,6 +3064,21 @@ struct StartOperationGroup {
     targets: Vec<StartOperationTarget>,
 }
 
+/// 停止対象の入力順と runtime ID を保持する
+#[derive(Debug, Clone)]
+struct StopOperationTarget {
+    index: usize,
+    target: OperationTargetInput,
+    runtime_id: String,
+}
+
+/// 同一 state file に対する停止対象を保持する
+#[derive(Debug, Clone)]
+struct StopOperationGroup {
+    state_path: PathBuf,
+    targets: Vec<StopOperationTarget>,
+}
+
 /// 一括操作 1 件の結果を保持する
 #[derive(Debug, Clone)]
 enum OperationOutcome {
@@ -5404,19 +5420,62 @@ fn run_stop_tunnel_operations(
     ensure_operation_targets_selected(targets)?;
 
     let mut outcomes = (0..targets.len()).map(|_| None).collect::<Vec<_>>();
+    let mut groups = Vec::new();
     let mut reset_runtime_ids = Vec::new();
 
     for (index, target) in targets.iter().enumerate() {
-        let outcome = match resolve_stop_operation_target(paths, lookup, target) {
+        match resolve_stop_operation_target(paths, lookup, target) {
             Ok((runtime_id, state_path)) => {
                 reset_runtime_ids.push(runtime_id.clone());
-                stop_operation_result_outcome(target, stop_tunnel_for_app(&runtime_id, &state_path))
+                push_stop_operation_group(
+                    &mut groups,
+                    state_path,
+                    StopOperationTarget {
+                        index,
+                        target: target.clone(),
+                        runtime_id,
+                    },
+                );
             }
-            Err(error) => operation_failure_outcome(target, error.to_string()),
-        };
+            Err(error) => {
+                outcomes[index] = Some(operation_failure_outcome(target, error.to_string()));
+                progress.advance();
+            }
+        }
+    }
 
-        outcomes[index] = Some(outcome);
-        progress.advance();
+    for group in groups {
+        let runtime_ids = group
+            .targets
+            .iter()
+            .map(|target| target.runtime_id.clone())
+            .collect::<Vec<_>>();
+        let mut reported_count = 0;
+
+        match stop_tunnels_with_progress_core(&runtime_ids, &group.state_path, |_index, _result| {
+            reported_count += 1;
+            progress.advance();
+        }) {
+            Ok(results) => {
+                for (target, result) in group.targets.into_iter().zip(results) {
+                    outcomes[target.index] = Some(stop_operation_result_outcome(
+                        &target.target,
+                        stop_tunnel_result_for_app(result),
+                    ));
+                }
+            }
+            Err(error) => {
+                let message = AppError::Runtime(error).to_string();
+                let remaining_count = group.targets.len().saturating_sub(reported_count);
+                for target in group.targets {
+                    outcomes[target.index] =
+                        Some(operation_failure_outcome(&target.target, message.clone()));
+                }
+                for _ in 0..remaining_count {
+                    progress.advance();
+                }
+            }
+        }
     }
 
     Ok((operation_report_from_outcomes(outcomes), reset_runtime_ids))
@@ -5435,6 +5494,26 @@ fn stop_operation_result_outcome(
         Ok(None) => OperationOutcome::Skipped,
         Err(error) => operation_failure_outcome(target, error.to_string()),
     }
+}
+
+/// 同一 state file の停止対象を同じ実行グループへ追加する
+fn push_stop_operation_group(
+    groups: &mut Vec<StopOperationGroup>,
+    state_path: PathBuf,
+    target: StopOperationTarget,
+) {
+    if let Some(group) = groups
+        .iter_mut()
+        .find(|group| group.state_path == state_path)
+    {
+        group.targets.push(target);
+        return;
+    }
+
+    groups.push(StopOperationGroup {
+        state_path,
+        targets: vec![target],
+    });
 }
 
 /// 自動復旧 worker をバックグラウンドで開始する
@@ -5867,7 +5946,14 @@ fn current_unix_seconds_for_app() -> u64 {
 
 /// アプリの停止操作としてトンネルを停止する
 fn stop_tunnel_for_app(id: &str, state_path: &Path) -> Result<Option<String>, AppError> {
-    match stop_tunnel(id, state_path) {
+    stop_tunnel_result_for_app(stop_tunnel(id, state_path))
+}
+
+/// 単体停止結果をアプリ表示用メッセージへ変換する
+fn stop_tunnel_result_for_app(
+    result: Result<StoppedTunnel, TunnelRuntimeError>,
+) -> Result<Option<String>, AppError> {
+    match result {
         Ok(stopped) => Ok(Some(stop_success_message(stopped))),
         Err(TunnelRuntimeError::NotTracked { runtime_id }) => {
             Ok(Some(stop_already_stopped_message(&runtime_id)))

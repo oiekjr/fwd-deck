@@ -322,19 +322,74 @@ pub fn stop_tunnel(
     state_path: &Path,
 ) -> Result<StoppedTunnel, TunnelRuntimeError> {
     let mut state_file = read_state_file(state_path)?;
-    let Some(state) = state_file.remove(runtime_id) else {
+    let probe = RuntimeStatusProbe::from_states(&state_file.tunnels);
+    let stopped = stop_tunnel_from_state_file(&mut state_file, &probe, runtime_id)?;
+
+    write_state_file(state_path, &state_file)?;
+
+    Ok(stopped)
+}
+
+/// 複数トンネルを状態ファイル単位で停止する
+pub fn stop_tunnels(
+    runtime_ids: &[String],
+    state_path: &Path,
+) -> Result<Vec<Result<StoppedTunnel, TunnelRuntimeError>>, TunnelRuntimeError> {
+    stop_tunnels_with_progress(runtime_ids, state_path, |_index, _result| {})
+}
+
+/// 複数トンネルを状態ファイル単位で停止し、各結果確定時に通知する
+pub fn stop_tunnels_with_progress<F>(
+    runtime_ids: &[String],
+    state_path: &Path,
+    mut on_result: F,
+) -> Result<Vec<Result<StoppedTunnel, TunnelRuntimeError>>, TunnelRuntimeError>
+where
+    F: FnMut(usize, &Result<StoppedTunnel, TunnelRuntimeError>),
+{
+    let mut state_file = read_state_file(state_path)?;
+    let probe = RuntimeStatusProbe::from_states(&state_file.tunnels);
+    let mut results = Vec::with_capacity(runtime_ids.len());
+    let mut has_state_changes = false;
+
+    for (index, runtime_id) in runtime_ids.iter().enumerate() {
+        let result = stop_tunnel_from_state_file(&mut state_file, &probe, runtime_id);
+
+        if result.is_ok() {
+            has_state_changes = true;
+        }
+
+        on_result(index, &result);
+        results.push(result);
+    }
+
+    if has_state_changes {
+        write_state_file(state_path, &state_file)?;
+    }
+
+    Ok(results)
+}
+
+/// 読み込み済み状態ファイルから指定トンネルを停止して削除する
+fn stop_tunnel_from_state_file(
+    state_file: &mut TunnelStateFile,
+    probe: &RuntimeStatusProbe,
+    runtime_id: &str,
+) -> Result<StoppedTunnel, TunnelRuntimeError> {
+    let Some(state) = state_file.get(runtime_id).cloned() else {
         return Err(TunnelRuntimeError::NotTracked {
             runtime_id: runtime_id.to_owned(),
         });
     };
-    let previous_state = if tunnel_is_running(&state) {
-        stop_process(&state)?;
-        ProcessState::Running
-    } else {
-        ProcessState::Stale
-    };
+    let previous_state = probe.process_state_for(&state);
 
-    write_state_file(state_path, &state_file)?;
+    if previous_state == ProcessState::Running {
+        stop_process(&state)?;
+    }
+
+    let state = state_file
+        .remove(runtime_id)
+        .expect("checked tunnel state should remain removable");
 
     Ok(StoppedTunnel {
         state,
@@ -962,6 +1017,67 @@ mod tests {
         .expect("start tunnels");
 
         assert_eq!(reported_indexes, vec![0]);
+    }
+
+    /// 一括停止が状態ファイル更新と進捗通知を状態ファイル単位で行うことを検証する
+    #[test]
+    fn stop_tunnels_removes_stale_tunnels_and_reports_progress() {
+        let temp_dir = TempDir::new().expect("create state directory");
+        let state_path = temp_dir.path().join("state.toml");
+        let db = resolved_tunnel();
+        let cache = ResolvedTunnelConfig::new(
+            ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml")),
+            TunnelConfig {
+                name: "cache".to_owned(),
+                local_port: 25432,
+                ..resolved_tunnel().tunnel
+            },
+        );
+        let mut state = TunnelStateFile::new();
+        state.upsert(TunnelState::from_resolved_tunnel(
+            &db,
+            u32::MAX,
+            1_700_000_000,
+        ));
+        state.upsert(TunnelState::from_resolved_tunnel(
+            &cache,
+            u32::MAX,
+            1_700_000_000,
+        ));
+        write_state_file(&state_path, &state).expect("write state file");
+        let runtime_ids = vec![
+            runtime_id_for_resolved_tunnel(&db),
+            "missing".to_owned(),
+            runtime_id_for_resolved_tunnel(&cache),
+        ];
+        let mut reported_indexes = Vec::new();
+
+        let results = stop_tunnels_with_progress(&runtime_ids, &state_path, |index, _result| {
+            reported_indexes.push(index);
+        })
+        .expect("stop tunnels");
+
+        assert!(matches!(
+            &results[0],
+            Ok(stopped)
+                if stopped.state.name == "db" && stopped.previous_state == ProcessState::Stale
+        ));
+        assert!(matches!(
+            &results[1],
+            Err(TunnelRuntimeError::NotTracked { runtime_id }) if runtime_id == "missing"
+        ));
+        assert!(matches!(
+            &results[2],
+            Ok(stopped)
+                if stopped.state.name == "cache" && stopped.previous_state == ProcessState::Stale
+        ));
+        assert_eq!(reported_indexes, vec![0, 1, 2]);
+        assert!(
+            read_state_file(&state_path)
+                .expect("read state file")
+                .tunnels
+                .is_empty()
+        );
     }
 
     /// LISTEN確認が対象PIDのローカルポートを検出することを検証する

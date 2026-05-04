@@ -429,6 +429,7 @@ const initialForm: TunnelFormState = {
 
 const initialDuplicateForm: DuplicateTunnelFormState = initialForm;
 const emptyTunnelViews: readonly TunnelView[] = [];
+const emptyTunnelSearchIndex: TunnelSearchIndex = new Map();
 
 const allStatusFilters = [
   "running",
@@ -555,13 +556,17 @@ function App(): ReactElement {
   const dashboardTunnels = dashboard?.tunnels ?? emptyTunnelViews;
   const stats = useMemo<DashboardStats>(() => calculateStats(dashboard), [dashboard]);
   const selectedIdList = useMemo<string[]>(() => Array.from(selectedIds), [selectedIds]);
+  const hasAppliedSearchQuery = filters.query.trim().length > 0;
   const availableTags = useMemo<string[]>(
     () => collectAvailableTags(dashboardTunnels),
     [dashboardTunnels],
   );
   const tunnelSearchIndex = useMemo<TunnelSearchIndex>(
-    () => buildTunnelSearchIndex(dashboardTunnels, homePath),
-    [dashboardTunnels, homePath],
+    () =>
+      hasAppliedSearchQuery
+        ? buildTunnelSearchIndex(dashboardTunnels, homePath)
+        : emptyTunnelSearchIndex,
+    [dashboardTunnels, hasAppliedSearchQuery, homePath],
   );
   const tunnelByRuntimeId = useMemo<TunnelLookup>(
     () => buildTunnelLookup(dashboardTunnels),

@@ -21,8 +21,8 @@ use fwd_deck_core::{
     default_global_config_path, default_local_config_path, default_state_file_path,
     filter_tunnels_by_tags, format_path_for_display, load_effective_config, normalize_tag,
     read_config_file, remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel, start_tunnel,
-    start_tunnels, stop_tunnel, tag_is_valid, tunnel_statuses, update_tunnel_in_config_file,
-    validate_config,
+    start_tunnels, stop_tunnels as stop_tunnels_core, tag_is_valid, tunnel_statuses,
+    update_tunnel_in_config_file, validate_config,
 };
 use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
 use serde::Serialize;
@@ -1782,8 +1782,8 @@ fn stop_command(
 
     let mut failed = false;
 
-    for runtime_id in runtime_ids {
-        match stop_tunnel(&runtime_id, state_path) {
+    for result in stop_tunnels_core(&runtime_ids, state_path)? {
+        match result {
             Ok(stopped) => print_stopped_tunnel(&stopped),
             Err(error) => {
                 failed = true;

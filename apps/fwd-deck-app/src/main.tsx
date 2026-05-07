@@ -1781,14 +1781,6 @@ function App(): ReactElement {
   }
 
   /**
-   * 一覧の絞り込み条件を反映する
-   */
-  function updateFilter<K extends keyof TunnelFilters>(field: K, value: TunnelFilters[K]): void {
-    captureResultScrollPosition();
-    setFilters((current) => ({ ...current, [field]: value }));
-  }
-
-  /**
    * ステータス絞り込みの選択状態を切り替える
    */
   function toggleStatusFilter(status: TunnelStatus): void {
@@ -1840,6 +1832,9 @@ function App(): ReactElement {
     }));
   }
 
+  const handleOpenSettings = useStableEvent((): void => {
+    openSettings();
+  });
   const handleBrowseWorkspaceFromToolbar = useStableEvent((): void => {
     void browseWorkspaceFromToolbar();
   });
@@ -1945,6 +1940,27 @@ function App(): ReactElement {
   const handleBrowseDuplicateIdentityFile = useStableEvent((): void => {
     void browseDuplicateIdentityFile();
   });
+  const handleQueryInputChange = useStableEvent((value: string): void => {
+    updateQueryInput(value);
+  });
+  const handleFilterChange: TunnelOperationsPanelProps["onFilterChange"] = useStableEvent(
+    (field: keyof TunnelFilters, value: TunnelFilters[keyof TunnelFilters]): void => {
+      captureResultScrollPosition();
+      setFilters((current) => ({ ...current, [field]: value }));
+    },
+  );
+  const handleToggleStatusFilter = useStableEvent((status: TunnelStatus): void => {
+    toggleStatusFilter(status);
+  });
+  const handleToggleScopeFilter = useStableEvent((scope: ConfigScope): void => {
+    toggleScopeFilter(scope);
+  });
+  const handleToggleTagFilter = useStableEvent((tag: string): void => {
+    toggleTagFilter(tag);
+  });
+  const handleResetFilters = useStableEvent((): void => {
+    resetFilters();
+  });
 
   return (
     <main className="min-h-screen bg-muted/45 text-foreground">
@@ -1956,7 +1972,7 @@ function App(): ReactElement {
           activeView={activeView}
           isBusy={isBusy}
           onViewChange={setActiveView}
-          onOpenSettings={openSettings}
+          onOpenSettings={handleOpenSettings}
           onBrowseWorkspace={handleBrowseWorkspaceFromToolbar}
           onSelectWorkspace={handleSelectWorkspaceFromToolbar}
           onRefresh={handleRefreshDashboard}
@@ -1985,12 +2001,12 @@ function App(): ReactElement {
               filters={filters}
               displayMode={tunnelDisplayMode}
               autoRecoverUpdatingIds={autoRecoverUpdatingIds}
-              onQueryInputChange={updateQueryInput}
-              onFilterChange={updateFilter}
-              onToggleStatusFilter={toggleStatusFilter}
-              onToggleScopeFilter={toggleScopeFilter}
-              onToggleTag={toggleTagFilter}
-              onResetFilters={resetFilters}
+              onQueryInputChange={handleQueryInputChange}
+              onFilterChange={handleFilterChange}
+              onToggleStatusFilter={handleToggleStatusFilter}
+              onToggleScopeFilter={handleToggleScopeFilter}
+              onToggleTag={handleToggleTagFilter}
+              onResetFilters={handleResetFilters}
               onDisplayModeChange={setTunnelDisplayMode}
               onClearSelection={handleClearSelection}
               onSelectVisible={handleSelectVisibleTunnels}
@@ -2017,7 +2033,7 @@ function App(): ReactElement {
               isBusy={isBusy}
               onChange={updateForm}
               onSubmit={handleSubmitTunnel}
-              onOpenSettings={openSettings}
+              onOpenSettings={handleOpenSettings}
               onBrowseIdentityFile={handleBrowseIdentityFile}
             />
           ) : null}
@@ -2072,7 +2088,7 @@ function App(): ReactElement {
         canUseLocal={paths.workspacePath.trim().length > 0}
         isBusy={isBusy}
         onChange={updateDuplicateForm}
-        onOpenSettings={openSettings}
+        onOpenSettings={handleOpenSettings}
         onCancel={() => {
           setDuplicateTarget(null);
           setDuplicateForm(initialDuplicateForm);
@@ -2112,7 +2128,7 @@ interface AppHeaderProps {
 /**
  * アプリ全体の操作状況と再読み込み導線を表示する
  */
-function AppHeader({
+const AppHeader = memo(function AppHeader({
   stats,
   paths,
   homePath,
@@ -2215,7 +2231,7 @@ function AppHeader({
       </div>
     </header>
   );
-}
+});
 
 interface WorkspacePillProps {
   paths: WorkspaceSelection;
@@ -2555,7 +2571,7 @@ interface DashboardViewProps {
 /**
  * 運用対象の一覧と実行操作を表示する
  */
-function DashboardView({
+const DashboardView = memo(function DashboardView({
   dashboard,
   hasCompletedInitialLoad,
   filteredTunnels,
@@ -2688,7 +2704,7 @@ function DashboardView({
       </FloatingPanelStack>
     </section>
   );
-}
+});
 
 interface AddTunnelViewProps {
   form: TunnelFormState;
@@ -3296,7 +3312,9 @@ interface ValidationPanelProps {
 /**
  * 設定検証の結果を表示する
  */
-function ValidationPanel({ dashboard }: ValidationPanelProps): ReactElement | null {
+const ValidationPanel = memo(function ValidationPanel({
+  dashboard,
+}: ValidationPanelProps): ReactElement | null {
   if (dashboard === null) {
     return null;
   }
@@ -3331,7 +3349,7 @@ function ValidationPanel({ dashboard }: ValidationPanelProps): ReactElement | nu
       ))}
     </section>
   );
-}
+});
 
 interface AlertMessageProps {
   kind: "success" | "warning" | "error" | "info";
@@ -3392,7 +3410,7 @@ interface TunnelOperationsPanelProps {
 /**
  * 一覧の絞り込み条件を表示する
  */
-function TunnelOperationsPanel({
+const TunnelOperationsPanel = memo(function TunnelOperationsPanel({
   totalCount,
   visibleCount,
   availableTags,
@@ -3590,7 +3608,7 @@ function TunnelOperationsPanel({
       </div>
     </section>
   );
-}
+});
 
 interface TagFilterModeControlProps {
   tagMode: TagFilterMode;
@@ -4109,7 +4127,7 @@ interface TunnelDeckProps {
 /**
  * 設定済みトンネルのカード一覧を表示する
  */
-function TunnelDeck({
+const TunnelDeck = memo(function TunnelDeck({
   dashboard,
   hasCompletedInitialLoad,
   tunnels,
@@ -4230,7 +4248,7 @@ function TunnelDeck({
       ))}
     </section>
   );
-}
+});
 
 interface TunnelSlimListProps {
   tunnels: TunnelView[];

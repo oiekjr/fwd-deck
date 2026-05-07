@@ -2266,7 +2266,7 @@ function WorkspacePill({
           {workspaceDisplayPath || "Not selected"}
         </div>
       </div>
-      <Dropdown>
+      <Dropdown modal={false}>
         <Dropdown.Trigger
           type="button"
           className="size-7 rounded-sm"

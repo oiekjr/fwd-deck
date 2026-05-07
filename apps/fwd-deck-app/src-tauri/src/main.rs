@@ -2780,6 +2780,8 @@ struct PathView {
     use_global: bool,
     global_state_path: String,
     workspace_state_path: String,
+    global_state_exists: bool,
+    workspace_state_exists: bool,
     hide_dock_icon_when_window_hidden: bool,
     auto_stop_tunnels_on_quit: bool,
     hide_tracked_runtime_bar: bool,
@@ -4912,6 +4914,11 @@ fn path_view(paths: &RuntimePaths) -> PathView {
             .as_deref()
             .map(display_path)
             .unwrap_or_default(),
+        global_state_exists: paths.global_state_path.exists(),
+        workspace_state_exists: paths
+            .workspace_state_path
+            .as_deref()
+            .is_some_and(Path::exists),
         hide_dock_icon_when_window_hidden: paths.preferences.hide_dock_icon_when_window_hidden,
         auto_stop_tunnels_on_quit: paths.preferences.auto_stop_tunnels_on_quit,
         hide_tracked_runtime_bar: paths.preferences.hide_tracked_runtime_bar,

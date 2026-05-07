@@ -124,6 +124,8 @@ interface WorkspaceSelection {
   useGlobal: boolean;
   globalStatePath: string;
   workspaceStatePath: string;
+  globalStateExists: boolean;
+  workspaceStateExists: boolean;
   hideDockIconWhenWindowHidden: boolean;
   autoStopTunnelsOnQuit: boolean;
   hideTrackedRuntimeBar: boolean;
@@ -409,6 +411,8 @@ const initialPaths: WorkspaceSelection = {
   useGlobal: true,
   globalStatePath: "",
   workspaceStatePath: "",
+  globalStateExists: false,
+  workspaceStateExists: false,
   ...defaultApplicationSettings,
 };
 
@@ -2975,7 +2979,7 @@ function PathPanel({
           <Settings2 className="text-foreground/70" size={17} />
           <h3 className="text-sm font-bold">Configuration files</h3>
         </div>
-        <PathValue label="Local config" value={paths.localConfigPath} homePath={homePath} />
+        <ReadonlyPathField label="Local config" value={paths.localConfigPath} homePath={homePath} />
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
           <TextField
             label="Global config"
@@ -3093,8 +3097,18 @@ function PathPanel({
           <h3 className="text-sm font-bold">Runtime state</h3>
         </div>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <PathValue label="Global state" value={paths.globalStatePath} homePath={homePath} />
-          <PathValue label="Workspace state" value={paths.workspaceStatePath} homePath={homePath} />
+          <PathValue
+            label="Shared/CLI state"
+            value={paths.globalStatePath}
+            homePath={homePath}
+            exists={paths.globalStateExists}
+          />
+          <PathValue
+            label="Workspace app state"
+            value={paths.workspaceStatePath}
+            homePath={homePath}
+            exists={paths.workspaceStateExists}
+          />
         </div>
       </Card>
     </div>
@@ -3287,17 +3301,47 @@ interface PathValueProps {
   label: string;
   value: string;
   homePath: string | null;
+  exists?: boolean;
+}
+
+/**
+ * 読み取り専用パスをフォーム項目として表示する
+ */
+function ReadonlyPathField({ label, value, homePath }: PathValueProps): ReactElement {
+  const displayValue = formatPathForDisplay(value, homePath);
+
+  return (
+    <HeroTextField className="w-full gap-1" variant="secondary">
+      <HeroLabel className="text-xs font-semibold text-foreground/70">{label}</HeroLabel>
+      <HeroInput
+        className="h-9 w-full font-mono text-xs text-foreground/85"
+        fullWidth
+        variant="secondary"
+        value={displayValue || "Not selected"}
+        title={value}
+        readOnly
+      />
+    </HeroTextField>
+  );
 }
 
 /**
  * 読み取り専用パスを表示する
  */
-function PathValue({ label, value, homePath }: PathValueProps): ReactElement {
+function PathValue({ label, value, homePath, exists }: PathValueProps): ReactElement {
   const displayValue = formatPathForDisplay(value, homePath);
+  const isMissing = value.trim().length > 0 && exists === false;
 
   return (
     <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
-      <div className="text-xs font-semibold text-foreground/60">{label}</div>
+      <div className="flex min-h-6 items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-foreground/60">{label}</div>
+        {isMissing ? (
+          <Chip color="warning" size="sm" variant="soft">
+            Not created yet
+          </Chip>
+        ) : null}
+      </div>
       <div className="mt-1 min-h-5 truncate font-mono text-xs text-foreground/85" title={value}>
         {displayValue || "Not selected"}
       </div>
@@ -6424,6 +6468,8 @@ function workspaceSelectionEquals(left: WorkspaceSelection, right: WorkspaceSele
     left.useGlobal === right.useGlobal &&
     left.globalStatePath === right.globalStatePath &&
     left.workspaceStatePath === right.workspaceStatePath &&
+    left.globalStateExists === right.globalStateExists &&
+    left.workspaceStateExists === right.workspaceStateExists &&
     left.hideDockIconWhenWindowHidden === right.hideDockIconWhenWindowHidden &&
     left.autoStopTunnelsOnQuit === right.autoStopTunnelsOnQuit &&
     left.hideTrackedRuntimeBar === right.hideTrackedRuntimeBar

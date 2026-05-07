@@ -13,6 +13,7 @@
 
 - `name` と `tag` による SSHトンネル管理
 - local設定と global設定の統合読み込み
+- Git で共有できるポートフォワーディング設定ファイル
 - CLI と macOSアプリからの起動、停止、状態確認
 - stale なトンネルの復旧と監視
 - JSON出力、shell completion、設定検証、実行環境診断

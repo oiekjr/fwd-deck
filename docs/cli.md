@@ -31,8 +31,7 @@ fwd-deck open ~/projects/my-service
 | local | `./fwd-deck.toml` | 作業ディレクトリ固有の設定 |
 
 同じ `name` は global と local の両方に共存できます。  
-bare name を指定する操作では local が優先され、global を対象にする場合は `--scope global` を指定します。  
-`fwd-deck.toml` はローカル環境用の設定として git 管理から除外する想定です。
+bare name を指定する操作では local が優先され、global を対象にする場合は `--scope global` を指定します。
 
 CLI の local設定は、実行時の作業ディレクトリにある `./fwd-deck.toml` を基準にします。  
 `fwd-deck open` で開いた macOSアプリは、指定した Workspace 配下の `fwd-deck.toml` を local設定として扱います。

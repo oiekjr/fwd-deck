@@ -3662,9 +3662,22 @@ fn load_dashboard_inner(
 fn load_dashboard_from_runtime_paths(
     runtime_paths: RuntimePaths,
 ) -> Result<DashboardState, AppError> {
-    let config = load_effective_config(&runtime_paths.config_paths)?;
-    let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
-    let validation = validate_config(&config);
+    let (config_with_validation, statuses) = thread::scope(|scope| {
+        let statuses_handle = scope.spawn(|| load_scoped_runtime_statuses(&runtime_paths));
+        let config_with_validation =
+            load_effective_config(&runtime_paths.config_paths).map(|config| {
+                let validation = validate_config(&config);
+
+                (config, validation)
+            });
+        let statuses = statuses_handle
+            .join()
+            .expect("runtime status worker should not panic");
+
+        (config_with_validation, statuses)
+    });
+    let (config, validation) = config_with_validation?;
+    let statuses = statuses?;
 
     Ok(build_dashboard_state(
         runtime_paths,

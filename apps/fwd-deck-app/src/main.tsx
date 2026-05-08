@@ -903,6 +903,11 @@ function App(): ReactElement {
     };
   }, []);
 
+  const handleOpenSettingsEvent = useStableEvent((): void => {
+    setSettingsDraft((current) => current ?? paths);
+    void loadCliIntegration(true);
+  });
+
   useEffect(() => {
     if (!isTauriRuntimeAvailable()) {
       return;
@@ -912,8 +917,7 @@ function App(): ReactElement {
     let unlisten: (() => void) | null = null;
 
     void listen<void>(openSettingsEventName, () => {
-      setSettingsDraft((current) => current ?? paths);
-      void loadCliIntegration(true);
+      handleOpenSettingsEvent();
     })
       .then((nextUnlisten) => {
         if (isDisposed) {
@@ -929,7 +933,7 @@ function App(): ReactElement {
       isDisposed = true;
       unlisten?.();
     };
-  }, [loadCliIntegration, paths]);
+  }, [handleOpenSettingsEvent]);
 
   /**
    * 現在のパス設定に基づいてダッシュボードを再取得する
@@ -973,56 +977,60 @@ function App(): ReactElement {
     [applyLoadedDashboard, paths],
   );
 
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent): void {
-      if (isSettingsKeyboardShortcut(event)) {
-        event.preventDefault();
-        setSettingsDraft((current) => current ?? paths);
-        void loadCliIntegration(true);
-        return;
-      }
-
-      if (isRefreshKeyboardShortcut(event)) {
-        event.preventDefault();
-
-        if (!isBusy) {
-          void refreshDashboard();
-        }
-
-        return;
-      }
-
-      if (
-        isSearchKeyboardShortcut(event) &&
-        activeView === "dashboard" &&
-        settingsDraft === null &&
-        deleteTarget === null &&
-        editTarget === null
-      ) {
-        event.preventDefault();
-        searchInputRef.current?.focus();
-        searchInputRef.current?.select();
-        return;
-      }
-
-      if (event.key === "Escape" && !isBusy) {
-        setSettingsDraft(null);
-      }
+  const handleGlobalKeyDown = useStableEvent((event: KeyboardEvent): void => {
+    if (isSettingsKeyboardShortcut(event)) {
+      event.preventDefault();
+      setSettingsDraft((current) => current ?? paths);
+      void loadCliIntegration(true);
+      return;
     }
 
-    window.addEventListener("keydown", handleKeyDown);
+    if (isRefreshKeyboardShortcut(event)) {
+      event.preventDefault();
 
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [
-    activeView,
-    deleteTarget,
-    editTarget,
-    isBusy,
-    loadCliIntegration,
-    paths,
-    refreshDashboard,
-    settingsDraft,
-  ]);
+      if (!isBusy) {
+        void refreshDashboard();
+      }
+
+      return;
+    }
+
+    if (
+      isSearchKeyboardShortcut(event) &&
+      activeView === "dashboard" &&
+      settingsDraft === null &&
+      deleteTarget === null &&
+      editTarget === null
+    ) {
+      event.preventDefault();
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+      return;
+    }
+
+    if (event.key === "Escape" && !isBusy) {
+      setSettingsDraft(null);
+    }
+  });
+
+  useEffect(() => {
+    window.addEventListener("keydown", handleGlobalKeyDown);
+
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, [handleGlobalKeyDown]);
+
+  const handleTrayOperationResult = useStableEvent((payload: TrayOperationResultPayload): void => {
+    void refreshDashboard(paths, { persistPaths: false, silent: true });
+    showOperationToast({
+      kind: payload.kind,
+      summary: payload.summary,
+      detail: payload.detail ?? undefined,
+    });
+
+    if (payload.kind === "error") {
+      setActiveView("dashboard");
+    }
+  });
 
   useEffect(() => {
     if (!isTauriRuntimeAvailable()) {
@@ -1033,18 +1041,7 @@ function App(): ReactElement {
     let unlisten: (() => void) | null = null;
 
     void listen<TrayOperationResultPayload>(trayOperationResultEventName, (event) => {
-      const payload = event.payload;
-
-      void refreshDashboard(paths, { persistPaths: false, silent: true });
-      showOperationToast({
-        kind: payload.kind,
-        summary: payload.summary,
-        detail: payload.detail ?? undefined,
-      });
-
-      if (payload.kind === "error") {
-        setActiveView("dashboard");
-      }
+      handleTrayOperationResult(event.payload);
     })
       .then((nextUnlisten) => {
         if (isDisposed) {
@@ -1060,7 +1057,7 @@ function App(): ReactElement {
       isDisposed = true;
       unlisten?.();
     };
-  }, [paths, refreshDashboard, showOperationToast]);
+  }, [handleTrayOperationResult]);
 
   useEffect(() => {
     async function loadInitialDashboard(): Promise<void> {
@@ -1087,20 +1084,20 @@ function App(): ReactElement {
     void loadInitialDashboard();
   }, [updateRuntimeNowForDashboard]);
 
-  useEffect(() => {
-    if (!hasCompletedInitialLoad) {
+  const runAutoRefresh = useStableEvent((): void => {
+    if (autoRefreshInFlightRef.current || operationInFlightRef.current) {
       return;
     }
 
-    function runAutoRefresh(): void {
-      if (autoRefreshInFlightRef.current || operationInFlightRef.current) {
-        return;
-      }
+    autoRefreshInFlightRef.current = true;
+    void refreshDashboard(paths, { persistPaths: false, silent: true }).finally(() => {
+      autoRefreshInFlightRef.current = false;
+    });
+  });
 
-      autoRefreshInFlightRef.current = true;
-      void refreshDashboard(paths, { persistPaths: false, silent: true }).finally(() => {
-        autoRefreshInFlightRef.current = false;
-      });
+  useEffect(() => {
+    if (!hasCompletedInitialLoad) {
+      return;
     }
 
     function refreshWhenVisible(): void {
@@ -1119,7 +1116,7 @@ function App(): ReactElement {
       window.removeEventListener("focus", runAutoRefresh);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
-  }, [hasCompletedInitialLoad, paths, refreshDashboard]);
+  }, [hasCompletedInitialLoad, runAutoRefresh]);
 
   /**
    * 指定 name のトンネルを開始する

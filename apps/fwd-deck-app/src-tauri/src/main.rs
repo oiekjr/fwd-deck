@@ -77,13 +77,26 @@ const TRAY_MENU_REFRESH: &str = "tray-refresh";
 const TRAY_MENU_QUIT: &str = "tray-quit";
 const TRAY_MENU_CURRENT_WORKSPACE: &str = "tray-current-workspace";
 const TRAY_MENU_WORKSPACE_BROWSE: &str = "tray-workspace-browse";
-const TRAY_MENU_NO_TUNNELS: &str = "tray-no-tunnels";
+const TRAY_LABEL_FAVORITES: &str = "Favorites";
+const TRAY_LABEL_LOCAL_TUNNELS: &str = "Local Tunnels";
+const TRAY_LABEL_WORKSPACES: &str = "Workspaces";
+const TRAY_LABEL_GLOBAL_TUNNELS: &str = "Global Tunnels";
+const TRAY_LABEL_REFRESH_STATUS: &str = "Refresh Status";
+const TRAY_LABEL_SETTINGS: &str = "Settings...";
+const TRAY_LABEL_OPEN: &str = "Open Fwd Deck";
+const TRAY_LABEL_QUIT: &str = "Quit";
 const TRAY_MENU_NO_FAVORITE_TUNNELS: &str = "tray-no-favorite-tunnels";
-const TRAY_MENU_NO_AUTO_RECOVER_TUNNELS: &str = "tray-no-auto-recover-tunnels";
-const TRAY_MENU_INVALID_CONFIG: &str = "tray-invalid-config";
-const TRAY_TUNNEL_ITEM_PREFIX: &str = "tray-tunnel-";
+const TRAY_MENU_NO_GLOBAL_TUNNELS: &str = "tray-no-global-tunnels";
+const TRAY_MENU_NO_LOCAL_TUNNELS: &str = "tray-no-local-tunnels";
+const TRAY_MENU_INVALID_GLOBAL_CONFIG: &str = "tray-invalid-global-config";
+const TRAY_MENU_INVALID_LOCAL_CONFIG: &str = "tray-invalid-local-config";
+const TRAY_MENU_GLOBAL_START_ALL: &str = "tray-global-start-all";
+const TRAY_MENU_GLOBAL_STOP_ALL: &str = "tray-global-stop-all";
+const TRAY_MENU_LOCAL_START_ALL: &str = "tray-local-start-all";
+const TRAY_MENU_LOCAL_STOP_ALL: &str = "tray-local-stop-all";
+const TRAY_GLOBAL_TUNNEL_ITEM_PREFIX: &str = "tray-global-tunnel-";
+const TRAY_LOCAL_TUNNEL_ITEM_PREFIX: &str = "tray-local-tunnel-";
 const TRAY_FAVORITE_TUNNEL_ITEM_PREFIX: &str = "tray-favorite-tunnel-";
-const TRAY_AUTO_RECOVER_TUNNEL_ITEM_PREFIX: &str = "tray-auto-recover-tunnel-";
 const TRAY_WORKSPACE_ITEM_PREFIX: &str = "tray-workspace-";
 const TRAY_OPERATION_ID: &str = "tray";
 const APP_DISPLAY_NAME: &str = "Fwd Deck";
@@ -277,6 +290,7 @@ struct TrayState {
     tunnel_actions: Mutex<HashMap<String, TrayTunnelAction>>,
     workspace_actions: Mutex<HashMap<String, TrayWorkspaceAction>>,
     tunnel_items: Mutex<HashMap<String, CheckMenuItem<tauri::Wry>>>,
+    bulk_items: Mutex<HashMap<String, MenuItem<tauri::Wry>>>,
     favorite_submenu: Mutex<Option<Submenu<tauri::Wry>>>,
     favorite_refresh_sequence: AtomicU64,
 }
@@ -339,6 +353,10 @@ impl TrayState {
             .lock()
             .expect("tray item state should not be poisoned") = item_handles.tunnel_items;
         *self
+            .bulk_items
+            .lock()
+            .expect("tray bulk item state should not be poisoned") = item_handles.bulk_items;
+        *self
             .favorite_submenu
             .lock()
             .expect("tray submenu state should not be poisoned") = item_handles.favorite_submenu;
@@ -360,6 +378,7 @@ impl TrayState {
     fn update_tunnel_items_in_place(
         &self,
         items: &[TrayTunnelMenuItem],
+        bulk_items: &[TrayBulkMenuItem],
     ) -> Result<TrayInPlaceMenuUpdate, AppError> {
         let item_handles = self
             .tunnel_items
@@ -372,41 +391,16 @@ impl TrayState {
             return Ok(TrayInPlaceMenuUpdate::RebuildRequired);
         }
 
-        for item in items {
-            if let Some(menu_item) = item_handles.get(&item.menu_id) {
-                menu_item.set_text(&item.label)?;
-                menu_item.set_enabled(item.enabled)?;
-                menu_item.set_checked(item.checked)?;
-            }
-        }
-
-        self.set_tunnel_actions(tray_tunnel_actions_from_items(items));
-
-        Ok(TrayInPlaceMenuUpdate::Apply)
-    }
-
-    /// 既存の一部トンネル項目へ状態を反映する
-    fn update_tunnel_item_subset_in_place(
-        &self,
-        items: &[TrayTunnelMenuItem],
-        required_menu_id_prefix: &str,
-    ) -> Result<TrayInPlaceMenuUpdate, AppError> {
-        let item_handles = self
-            .tunnel_items
+        let bulk_item_handles = self
+            .bulk_items
             .lock()
-            .expect("tray item state should not be poisoned")
+            .expect("tray bulk item state should not be poisoned")
             .clone();
-        let current_item_ids = item_handles
-            .keys()
-            .filter(|id| id.starts_with(required_menu_id_prefix))
-            .cloned()
-            .collect::<HashSet<_>>();
-        let next_item_ids = items
-            .iter()
-            .map(|item| item.menu_id.clone())
-            .collect::<HashSet<_>>();
+        let bulk_item_ids = bulk_item_handles.keys().cloned().collect();
 
-        if current_item_ids != next_item_ids {
+        if tray_in_place_bulk_menu_update(bulk_item_ids, bulk_items)
+            == TrayInPlaceMenuUpdate::RebuildRequired
+        {
             return Ok(TrayInPlaceMenuUpdate::RebuildRequired);
         }
 
@@ -415,6 +409,12 @@ impl TrayState {
                 menu_item.set_text(&item.label)?;
                 menu_item.set_enabled(item.enabled)?;
                 menu_item.set_checked(item.checked)?;
+            }
+        }
+
+        for item in bulk_items {
+            if let Some(menu_item) = bulk_item_handles.get(&item.menu_id) {
+                menu_item.set_enabled(item.enabled)?;
             }
         }
 
@@ -549,9 +549,10 @@ struct TrayTunnelAction {
 /// トレイから実行する start / stop を表現する
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrayTunnelOperation {
-    Start,
+    Start { source_kind: ConfigSourceKind },
     Stop,
-    SetAutoRecover { enabled: bool },
+    StartAll { source_kind: ConfigSourceKind },
+    StopAll { source_kind: ConfigSourceKind },
 }
 
 /// トレイメニューへ表示するトンネル項目を表現する
@@ -562,6 +563,13 @@ struct TrayTunnelMenuItem {
     checked: bool,
     enabled: bool,
     action: TrayTunnelAction,
+}
+
+/// トレイメニューへ表示する一括操作項目を表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrayBulkMenuItem {
+    menu_id: String,
+    enabled: bool,
 }
 
 /// トレイメニューの動的操作対応表を表現する
@@ -575,7 +583,22 @@ struct TrayMenuActions {
 #[derive(Clone, Default)]
 struct TrayMenuItemHandles {
     tunnel_items: HashMap<String, CheckMenuItem<tauri::Wry>>,
+    bulk_items: HashMap<String, MenuItem<tauri::Wry>>,
     favorite_submenu: Option<Submenu<tauri::Wry>>,
+}
+
+/// トレイ項目ラベルへ設定スコープを含めるかを表現する
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayTunnelLabelStyle {
+    WithSource,
+    NameOnly,
+}
+
+/// スコープ別一括操作の有効状態を表現する
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrayScopeBulkState {
+    start_enabled: bool,
+    stop_enabled: bool,
 }
 
 /// トレイアイコンへ反映する接続状態を表現する
@@ -611,12 +634,17 @@ struct TrayWorkspaceMenuItem {
 /// トレイメニュー生成に必要な表示モデルを保持する
 #[derive(Debug, Clone)]
 struct TrayMenuModel {
-    tunnel_items: Vec<TrayTunnelMenuItem>,
+    global_tunnel_items: Vec<TrayTunnelMenuItem>,
+    local_tunnel_items: Vec<TrayTunnelMenuItem>,
     favorite_tunnel_items: Vec<TrayTunnelMenuItem>,
-    auto_recover_tunnel_items: Vec<TrayTunnelMenuItem>,
     workspace_items: Vec<TrayWorkspaceMenuItem>,
     icon_kind: TrayIconKind,
-    config_is_valid: bool,
+    global_config_is_valid: bool,
+    local_config_is_valid: bool,
+    global_start_all_enabled: bool,
+    local_start_all_enabled: bool,
+    global_stop_all_enabled: bool,
+    local_stop_all_enabled: bool,
 }
 
 /// トレイ操作結果をフロントエンドへ通知する
@@ -881,17 +909,11 @@ fn handle_tray_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent)
 /// トレイからの単体トンネル操作を実行する
 fn handle_tray_tunnel_action(app: &tauri::AppHandle, action: TrayTunnelAction) {
     let operation_lock = app.state::<OperationLockState>();
-    let updates_auto_recover_only =
-        matches!(action.operation, TrayTunnelOperation::SetAutoRecover { .. });
     let result = with_operation_lock(&operation_lock, || {
         run_tray_tunnel_action(app, action.clone())
     });
 
-    let _ = if updates_auto_recover_only {
-        refresh_tray_auto_recover_items_in_place_or_rebuild(app)
-    } else {
-        refresh_tray_menu_in_place_or_rebuild(app)
-    };
+    let _ = rebuild_tray_menu(app);
 
     match result {
         Ok(report) => emit_tray_operation_report(app, report),
@@ -904,33 +926,60 @@ fn run_tray_tunnel_action(
     app: &tauri::AppHandle,
     action: TrayTunnelAction,
 ) -> Result<OperationReport, AppError> {
-    let target = OperationTargetInput {
+    match action.operation {
+        TrayTunnelOperation::Start { source_kind } => start_tunnels_inner_for_source(
+            app,
+            None,
+            vec![tray_single_operation_target(&action)],
+            TRAY_OPERATION_ID,
+            Some(source_kind),
+        ),
+        TrayTunnelOperation::Stop => stop_tunnels_inner(
+            app,
+            None,
+            vec![tray_single_operation_target(&action)],
+            TRAY_OPERATION_ID,
+        ),
+        TrayTunnelOperation::StartAll { source_kind } => {
+            let targets = tray_configured_tunnel_targets_for_source(app, source_kind)?;
+            start_tunnels_inner_for_source(app, None, targets, TRAY_OPERATION_ID, Some(source_kind))
+        }
+        TrayTunnelOperation::StopAll { source_kind } => {
+            let targets = tray_tracked_tunnel_targets_for_source(app, source_kind)?;
+            stop_tunnels_inner(app, None, targets, TRAY_OPERATION_ID)
+        }
+    }
+}
+
+/// 単体トレイ操作を既存操作入力へ変換する
+fn tray_single_operation_target(action: &TrayTunnelAction) -> OperationTargetInput {
+    OperationTargetInput {
         id: action.id.clone(),
         runtime_id: action.runtime_id.clone(),
         runtime_scope: action.runtime_scope,
-    };
-
-    match action.operation {
-        TrayTunnelOperation::Start => {
-            start_tunnels_inner(app, None, vec![target], TRAY_OPERATION_ID)
-        }
-        TrayTunnelOperation::Stop => stop_tunnels_inner(app, None, vec![target], TRAY_OPERATION_ID),
-        TrayTunnelOperation::SetAutoRecover { enabled } => {
-            let runtime_id = action.runtime_id.as_deref().ok_or_else(|| {
-                AppError::InvalidInput(format!("未定義の runtime ID です: {}", action.id))
-            })?;
-
-            set_tunnel_auto_recover_inner(app, None, runtime_id, enabled)?;
-
-            Ok(OperationReport {
-                succeeded: vec![OperationSuccessView {
-                    id: action.id,
-                    message: auto_recover_toggle_message(enabled),
-                }],
-                failed: Vec::new(),
-            })
-        }
     }
+}
+
+/// 指定スコープの設定済みトンネルを一括開始対象へ変換する
+fn tray_configured_tunnel_targets_for_source(
+    app: &tauri::AppHandle,
+    source_kind: ConfigSourceKind,
+) -> Result<Vec<OperationTargetInput>, AppError> {
+    let runtime_paths = resolve_runtime_paths(app, None)?;
+    let config = load_effective_config(&runtime_paths.config_paths)?;
+
+    Ok(configured_tunnel_targets_for_source(&config, source_kind))
+}
+
+/// 指定スコープの追跡中トンネルを一括停止対象へ変換する
+fn tray_tracked_tunnel_targets_for_source(
+    app: &tauri::AppHandle,
+    source_kind: ConfigSourceKind,
+) -> Result<Vec<OperationTargetInput>, AppError> {
+    let runtime_paths = resolve_runtime_paths(app, None)?;
+    let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
+
+    Ok(tracked_tunnel_targets_for_source(&statuses, source_kind))
 }
 
 /// トレイからのワークスペース切り替えを実行する
@@ -1620,20 +1669,26 @@ fn build_tray_menu(
     let mut item_handles = TrayMenuItemHandles::default();
     let mut actions = TrayMenuActions::default();
     let menu = Menu::new(app)?;
-    let show = MenuItem::with_id(app, TRAY_MENU_SHOW, "Open Fwd Deck", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, TRAY_MENU_SHOW, TRAY_LABEL_OPEN, true, None::<&str>)?;
     let settings = MenuItem::with_id(
         app,
         TRAY_MENU_SETTINGS,
-        "Settings...",
+        TRAY_LABEL_SETTINGS,
         true,
         Some("CmdOrCtrl+,"),
     )?;
-    let refresh = MenuItem::with_id(app, TRAY_MENU_REFRESH, "Refresh Status", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, TRAY_MENU_QUIT, "Quit", true, None::<&str>)?;
-    let favorites = Submenu::new(app, "Favorites", true)?;
-    let tunnels = Submenu::new(app, "Tunnels", true)?;
-    let auto_recover = Submenu::new(app, "Auto recover", true)?;
-    let workspaces = Submenu::new(app, "Workspaces", true)?;
+    let refresh = MenuItem::with_id(
+        app,
+        TRAY_MENU_REFRESH,
+        TRAY_LABEL_REFRESH_STATUS,
+        true,
+        None::<&str>,
+    )?;
+    let quit = MenuItem::with_id(app, TRAY_MENU_QUIT, TRAY_LABEL_QUIT, true, None::<&str>)?;
+    let favorites = Submenu::new(app, TRAY_LABEL_FAVORITES, true)?;
+    let global_tunnels = Submenu::new(app, TRAY_LABEL_GLOBAL_TUNNELS, true)?;
+    let local_tunnels = Submenu::new(app, TRAY_LABEL_LOCAL_TUNNELS, true)?;
+    let workspaces = Submenu::new(app, TRAY_LABEL_WORKSPACES, true)?;
 
     item_handles.favorite_submenu = Some(favorites.clone());
 
@@ -1646,35 +1701,50 @@ fn build_tray_menu(
         TRAY_MENU_NO_FAVORITE_TUNNELS,
         "No favorite tunnels",
     )?;
-    append_tray_tunnel_menu_items(
+    append_tray_scope_bulk_menu_items(
         app,
-        &tunnels,
+        &local_tunnels,
         &mut actions,
         &mut item_handles,
-        model.tunnel_items,
-        TRAY_MENU_NO_TUNNELS,
-        "No tunnels configured",
+        ConfigSourceKind::Local,
+        model.local_start_all_enabled,
+        model.local_stop_all_enabled,
     )?;
     append_tray_tunnel_menu_items(
         app,
-        &auto_recover,
+        &local_tunnels,
         &mut actions,
         &mut item_handles,
-        model.auto_recover_tunnel_items,
-        TRAY_MENU_NO_AUTO_RECOVER_TUNNELS,
-        "No tunnels configured",
+        model.local_tunnel_items,
+        TRAY_MENU_NO_LOCAL_TUNNELS,
+        "No local tunnels",
     )?;
 
-    if !model.config_is_valid {
-        let invalid = MenuItem::with_id(
-            app,
-            TRAY_MENU_INVALID_CONFIG,
-            "Config has errors",
-            false,
-            None::<&str>,
-        )?;
-        tunnels.append(&PredefinedMenuItem::separator(app)?)?;
-        tunnels.append(&invalid)?;
+    if !model.local_config_is_valid {
+        append_tray_config_error_item(app, &local_tunnels, TRAY_MENU_INVALID_LOCAL_CONFIG)?;
+    }
+
+    append_tray_scope_bulk_menu_items(
+        app,
+        &global_tunnels,
+        &mut actions,
+        &mut item_handles,
+        ConfigSourceKind::Global,
+        model.global_start_all_enabled,
+        model.global_stop_all_enabled,
+    )?;
+    append_tray_tunnel_menu_items(
+        app,
+        &global_tunnels,
+        &mut actions,
+        &mut item_handles,
+        model.global_tunnel_items,
+        TRAY_MENU_NO_GLOBAL_TUNNELS,
+        "No global tunnels",
+    )?;
+
+    if !model.global_config_is_valid {
+        append_tray_config_error_item(app, &global_tunnels, TRAY_MENU_INVALID_GLOBAL_CONFIG)?;
     }
 
     for item in model.workspace_items {
@@ -1705,11 +1775,12 @@ fn build_tray_menu(
     workspaces.append(&browse_workspace)?;
 
     menu.append(&favorites)?;
-    menu.append(&tunnels)?;
-    menu.append(&auto_recover)?;
-    menu.append(&refresh)?;
+    menu.append(&global_tunnels)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&local_tunnels)?;
     menu.append(&workspaces)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&refresh)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&settings)?;
     menu.append(&show)?;
@@ -1719,6 +1790,21 @@ fn build_tray_menu(
     Ok((menu, actions, item_handles, icon_kind))
 }
 
+/// トレイメニューのトップレベル表示順を取得する
+#[cfg(test)]
+fn tray_top_level_menu_label_order() -> [&'static str; 8] {
+    [
+        TRAY_LABEL_FAVORITES,
+        TRAY_LABEL_GLOBAL_TUNNELS,
+        TRAY_LABEL_LOCAL_TUNNELS,
+        TRAY_LABEL_WORKSPACES,
+        TRAY_LABEL_REFRESH_STATUS,
+        TRAY_LABEL_SETTINGS,
+        TRAY_LABEL_OPEN,
+        TRAY_LABEL_QUIT,
+    ]
+}
+
 /// トレイメニュー生成に必要な表示モデルを読み込む
 fn load_tray_menu_model(app: &tauri::AppHandle) -> Result<TrayMenuModel, AppError> {
     let runtime_paths = resolve_runtime_paths(app, None)?;
@@ -1726,25 +1812,47 @@ fn load_tray_menu_model(app: &tauri::AppHandle) -> Result<TrayMenuModel, AppErro
     let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
     let validation = validate_config(&config);
     let status_lookup = RuntimeStatusLookup::new(&statuses);
-    let tunnel_items = tray_tunnel_menu_items(&config, &status_lookup, &validation);
+    let global_tunnel_items = tray_tunnel_menu_items_for_scope(
+        &config,
+        &status_lookup,
+        &validation,
+        ConfigSourceKind::Global,
+    );
+    let local_tunnel_items = tray_tunnel_menu_items_for_scope(
+        &config,
+        &status_lookup,
+        &validation,
+        ConfigSourceKind::Local,
+    );
     let favorite_tunnel_items = tray_favorite_tunnel_menu_items(
         &config,
         &status_lookup,
         &validation,
         &runtime_paths.preferences,
     );
-    let auto_recover_tunnel_items =
-        tray_auto_recover_tunnel_menu_items(&config, &runtime_paths.preferences);
     let workspace_items = tray_workspace_menu_items(&runtime_paths.preferences);
     let icon_kind = tray_icon_kind(&statuses);
+    let global_config_is_valid =
+        validation_is_valid_for_source(&validation, ConfigSourceKind::Global);
+    let local_config_is_valid =
+        validation_is_valid_for_source(&validation, ConfigSourceKind::Local);
+    let global_bulk_state =
+        tray_scope_bulk_state(&config, &statuses, &validation, ConfigSourceKind::Global);
+    let local_bulk_state =
+        tray_scope_bulk_state(&config, &statuses, &validation, ConfigSourceKind::Local);
 
     Ok(TrayMenuModel {
-        tunnel_items,
+        global_start_all_enabled: global_bulk_state.start_enabled,
+        local_start_all_enabled: local_bulk_state.start_enabled,
+        global_stop_all_enabled: global_bulk_state.stop_enabled,
+        local_stop_all_enabled: local_bulk_state.stop_enabled,
+        global_tunnel_items,
+        local_tunnel_items,
         favorite_tunnel_items,
-        auto_recover_tunnel_items,
         workspace_items,
         icon_kind,
-        config_is_valid: validation.is_valid(),
+        global_config_is_valid,
+        local_config_is_valid,
     })
 }
 
@@ -1752,32 +1860,16 @@ fn load_tray_menu_model(app: &tauri::AppHandle) -> Result<TrayMenuModel, AppErro
 fn refresh_tray_menu_in_place(app: &tauri::AppHandle) -> Result<TrayInPlaceMenuUpdate, AppError> {
     let model = load_tray_menu_model(app)?;
     let tunnel_items = tray_menu_model_tunnel_items(&model);
+    let bulk_items = tray_menu_model_bulk_items(&model);
 
     update_tray_icon_if_changed(app, model.icon_kind)?;
     app.state::<TrayState>()
-        .update_tunnel_items_in_place(&tunnel_items)
+        .update_tunnel_items_in_place(&tunnel_items, &bulk_items)
 }
 
 /// インプレース更新できない場合だけトレイメニュー全体を再構築する
 fn refresh_tray_menu_in_place_or_rebuild(app: &tauri::AppHandle) -> Result<(), AppError> {
     match refresh_tray_menu_in_place(app)? {
-        TrayInPlaceMenuUpdate::Apply => Ok(()),
-        TrayInPlaceMenuUpdate::RebuildRequired => rebuild_tray_menu(app),
-    }
-}
-
-/// Auto recover 項目だけを更新できない場合にトレイメニュー全体を再構築する
-fn refresh_tray_auto_recover_items_in_place_or_rebuild(
-    app: &tauri::AppHandle,
-) -> Result<(), AppError> {
-    let runtime_paths = resolve_runtime_paths(app, None)?;
-    let config = load_effective_config(&runtime_paths.config_paths)?;
-    let items = tray_auto_recover_tunnel_menu_items(&config, &runtime_paths.preferences);
-    let tray_state = app.state::<TrayState>();
-
-    match tray_state
-        .update_tunnel_item_subset_in_place(&items, TRAY_AUTO_RECOVER_TUNNEL_ITEM_PREFIX)?
-    {
         TrayInPlaceMenuUpdate::Apply => Ok(()),
         TrayInPlaceMenuUpdate::RebuildRequired => rebuild_tray_menu(app),
     }
@@ -1867,26 +1959,55 @@ fn tray_menu_model_tunnel_items(model: &TrayMenuModel) -> Vec<TrayTunnelMenuItem
     model
         .favorite_tunnel_items
         .iter()
-        .chain(model.tunnel_items.iter())
-        .chain(model.auto_recover_tunnel_items.iter())
+        .chain(model.global_tunnel_items.iter())
+        .chain(model.local_tunnel_items.iter())
         .cloned()
         .collect()
 }
 
-/// トレイメニュー項目から操作対応表を生成する
-fn tray_tunnel_actions_from_items(
-    items: &[TrayTunnelMenuItem],
-) -> HashMap<String, TrayTunnelAction> {
-    items
-        .iter()
-        .map(|item| (item.menu_id.clone(), item.action.clone()))
-        .collect()
+/// トレイメニューの一括操作項目を表示順でまとめる
+fn tray_menu_model_bulk_items(model: &TrayMenuModel) -> Vec<TrayBulkMenuItem> {
+    vec![
+        TrayBulkMenuItem {
+            menu_id: TRAY_MENU_GLOBAL_START_ALL.to_owned(),
+            enabled: model.global_start_all_enabled,
+        },
+        TrayBulkMenuItem {
+            menu_id: TRAY_MENU_GLOBAL_STOP_ALL.to_owned(),
+            enabled: model.global_stop_all_enabled,
+        },
+        TrayBulkMenuItem {
+            menu_id: TRAY_MENU_LOCAL_START_ALL.to_owned(),
+            enabled: model.local_start_all_enabled,
+        },
+        TrayBulkMenuItem {
+            menu_id: TRAY_MENU_LOCAL_STOP_ALL.to_owned(),
+            enabled: model.local_stop_all_enabled,
+        },
+    ]
 }
 
 /// 既存メニュー構造のまま項目を更新できるか判定する
 fn tray_in_place_menu_update(
     current_item_ids: HashSet<String>,
     next_items: &[TrayTunnelMenuItem],
+) -> TrayInPlaceMenuUpdate {
+    let next_item_ids = next_items
+        .iter()
+        .map(|item| item.menu_id.clone())
+        .collect::<HashSet<_>>();
+
+    if current_item_ids == next_item_ids {
+        TrayInPlaceMenuUpdate::Apply
+    } else {
+        TrayInPlaceMenuUpdate::RebuildRequired
+    }
+}
+
+/// 既存メニュー構造のまま一括操作項目を更新できるか判定する
+fn tray_in_place_bulk_menu_update(
+    current_item_ids: HashSet<String>,
+    next_items: &[TrayBulkMenuItem],
 ) -> TrayInPlaceMenuUpdate {
     let next_item_ids = next_items
         .iter()
@@ -1948,6 +2069,69 @@ fn append_tray_tunnel_menu_items(
     Ok(())
 }
 
+/// スコープ別トンネルメニューへ一括操作項目を追加する
+fn append_tray_scope_bulk_menu_items(
+    app: &tauri::AppHandle,
+    submenu: &Submenu<tauri::Wry>,
+    actions: &mut TrayMenuActions,
+    item_handles: &mut TrayMenuItemHandles,
+    source_kind: ConfigSourceKind,
+    start_enabled: bool,
+    stop_enabled: bool,
+) -> Result<(), AppError> {
+    let start = MenuItem::with_id(
+        app,
+        tray_start_all_menu_id_for_source(source_kind),
+        "Start All",
+        start_enabled,
+        None::<&str>,
+    )?;
+    let stop = MenuItem::with_id(
+        app,
+        tray_stop_all_menu_id_for_source(source_kind),
+        "Stop All",
+        stop_enabled,
+        None::<&str>,
+    )?;
+
+    actions.tunnel_actions.insert(
+        tray_start_all_menu_id_for_source(source_kind).to_owned(),
+        tray_bulk_action(source_kind, TrayTunnelOperation::StartAll { source_kind }),
+    );
+    actions.tunnel_actions.insert(
+        tray_stop_all_menu_id_for_source(source_kind).to_owned(),
+        tray_bulk_action(source_kind, TrayTunnelOperation::StopAll { source_kind }),
+    );
+    item_handles.bulk_items.insert(
+        tray_start_all_menu_id_for_source(source_kind).to_owned(),
+        start.clone(),
+    );
+    item_handles.bulk_items.insert(
+        tray_stop_all_menu_id_for_source(source_kind).to_owned(),
+        stop.clone(),
+    );
+
+    submenu.append(&start)?;
+    submenu.append(&stop)?;
+    submenu.append(&PredefinedMenuItem::separator(app)?)?;
+
+    Ok(())
+}
+
+/// スコープ別トンネルメニューへ設定エラー表示を追加する
+fn append_tray_config_error_item(
+    app: &tauri::AppHandle,
+    submenu: &Submenu<tauri::Wry>,
+    menu_id: &str,
+) -> Result<(), AppError> {
+    let invalid = MenuItem::with_id(app, menu_id, "Config has errors", false, None::<&str>)?;
+
+    submenu.append(&PredefinedMenuItem::separator(app)?)?;
+    submenu.append(&invalid)?;
+
+    Ok(())
+}
+
 /// 接続状態からトレイアイコン種別を決定する
 fn tray_icon_kind(statuses: &[ScopedRuntimeStatus]) -> TrayIconKind {
     if statuses
@@ -1970,18 +2154,20 @@ fn tray_icon_image(kind: TrayIconKind) -> Result<Image<'static>, AppError> {
     Ok(Image::from_bytes(bytes)?.to_owned())
 }
 
-/// 設定済みトンネルをトレイメニュー項目へ変換する
-fn tray_tunnel_menu_items(
+/// スコープ別の通常トンネル項目を生成する
+fn tray_tunnel_menu_items_for_scope(
     config: &EffectiveConfig,
     status_lookup: &RuntimeStatusLookup<'_>,
     validation: &ValidationReport,
+    source_kind: ConfigSourceKind,
 ) -> Vec<TrayTunnelMenuItem> {
     tray_tunnel_menu_items_matching(
         config,
         status_lookup,
         validation,
-        TRAY_TUNNEL_ITEM_PREFIX,
-        |_| true,
+        tray_tunnel_menu_id_prefix_for_source(source_kind),
+        TrayTunnelLabelStyle::NameOnly,
+        |resolved, _runtime_id| resolved.source.kind == source_kind,
     )
 }
 
@@ -2003,37 +2189,9 @@ fn tray_favorite_tunnel_menu_items(
         status_lookup,
         validation,
         TRAY_FAVORITE_TUNNEL_ITEM_PREFIX,
-        |runtime_id| favorite_runtime_ids.contains(runtime_id),
+        TrayTunnelLabelStyle::WithSource,
+        |_resolved, runtime_id| favorite_runtime_ids.contains(runtime_id),
     )
-}
-
-/// 自動復旧トグル用のトレイメニュー項目を生成する
-fn tray_auto_recover_tunnel_menu_items(
-    config: &EffectiveConfig,
-    preferences: &AppPreferences,
-) -> Vec<TrayTunnelMenuItem> {
-    let auto_recover_runtime_ids = preferences
-        .auto_recover_tunnel_runtime_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
-    let mut runtime_id_cache = RuntimeIdCache::default();
-    let mut items = config
-        .tunnels
-        .iter()
-        .enumerate()
-        .map(|(index, resolved)| {
-            let runtime_id = runtime_id_cache.runtime_id_for_resolved_tunnel(resolved);
-            let is_enabled = auto_recover_runtime_ids.contains(runtime_id.as_str());
-            let sort_key = tray_tunnel_sort_key(resolved, &runtime_id);
-            let item = tray_auto_recover_tunnel_menu_item(index, resolved, runtime_id, is_enabled);
-
-            (sort_key, item)
-        })
-        .collect::<Vec<_>>();
-
-    items.sort_by(|left, right| left.0.cmp(&right.0));
-    items.into_iter().map(|(_, item)| item).collect()
 }
 
 /// 条件に一致する設定済みトンネルをトレイメニュー項目へ変換する
@@ -2042,12 +2200,12 @@ fn tray_tunnel_menu_items_matching<F>(
     status_lookup: &RuntimeStatusLookup<'_>,
     validation: &ValidationReport,
     menu_id_prefix: &str,
-    include_runtime_id: F,
+    label_style: TrayTunnelLabelStyle,
+    include_tunnel: F,
 ) -> Vec<TrayTunnelMenuItem>
 where
-    F: Fn(&str) -> bool,
+    F: Fn(&ResolvedTunnelConfig, &str) -> bool,
 {
-    let can_start = validation.is_valid();
     let mut runtime_id_cache = RuntimeIdCache::default();
     let mut items = config
         .tunnels
@@ -2055,11 +2213,12 @@ where
         .enumerate()
         .filter_map(|(index, resolved)| {
             let runtime_id = runtime_id_cache.runtime_id_for_resolved_tunnel(resolved);
-            if !include_runtime_id(&runtime_id) {
+            if !include_tunnel(resolved, &runtime_id) {
                 return None;
             }
 
             let status = status_lookup.for_resolved_tunnel(resolved, &runtime_id);
+            let can_start = validation_is_valid_for_source(validation, resolved.source.kind);
             let sort_key = tray_tunnel_sort_key(resolved, &runtime_id);
             let item = tray_tunnel_menu_item(
                 menu_id_prefix,
@@ -2068,6 +2227,7 @@ where
                 &runtime_id,
                 status,
                 can_start,
+                label_style,
             );
 
             Some((sort_key, item))
@@ -2131,6 +2291,7 @@ fn tray_tunnel_menu_item(
     runtime_id: &str,
     status: Option<&ScopedRuntimeStatus>,
     can_start: bool,
+    label_style: TrayTunnelLabelStyle,
 ) -> TrayTunnelMenuItem {
     let is_running = status
         .map(|status| status.status.process_state == ProcessState::Running)
@@ -2141,17 +2302,24 @@ fn tray_tunnel_menu_item(
     let operation = if is_running {
         TrayTunnelOperation::Stop
     } else {
-        TrayTunnelOperation::Start
+        TrayTunnelOperation::Start {
+            source_kind: resolved.source.kind,
+        }
     };
     let runtime_scope = match operation {
-        TrayTunnelOperation::Start => None,
+        TrayTunnelOperation::Start { .. } => None,
         TrayTunnelOperation::Stop => status.map(|status| status.runtime_scope),
-        TrayTunnelOperation::SetAutoRecover { .. } => None,
+        TrayTunnelOperation::StartAll { .. } | TrayTunnelOperation::StopAll { .. } => None,
     };
 
     TrayTunnelMenuItem {
         menu_id: format!("{menu_id_prefix}{index}"),
-        label: tray_tunnel_label(&resolved.tunnel.name, resolved.source.kind, is_stale),
+        label: tray_tunnel_label(
+            &resolved.tunnel.name,
+            resolved.source.kind,
+            is_stale,
+            label_style,
+        ),
         checked: is_running,
         enabled: is_running || can_start,
         action: TrayTunnelAction {
@@ -2159,29 +2327,6 @@ fn tray_tunnel_menu_item(
             runtime_id: Some(runtime_id.to_owned()),
             runtime_scope,
             operation,
-        },
-    }
-}
-
-/// 1 件のトンネルを自動復旧トグル用のトレイメニュー項目へ変換する
-fn tray_auto_recover_tunnel_menu_item(
-    index: usize,
-    resolved: &ResolvedTunnelConfig,
-    runtime_id: String,
-    is_enabled: bool,
-) -> TrayTunnelMenuItem {
-    TrayTunnelMenuItem {
-        menu_id: format!("{TRAY_AUTO_RECOVER_TUNNEL_ITEM_PREFIX}{index}"),
-        label: tray_tunnel_label(&resolved.tunnel.name, resolved.source.kind, false),
-        checked: is_enabled,
-        enabled: true,
-        action: TrayTunnelAction {
-            id: resolved.tunnel.name.clone(),
-            runtime_id: Some(runtime_id),
-            runtime_scope: None,
-            operation: TrayTunnelOperation::SetAutoRecover {
-                enabled: !is_enabled,
-            },
         },
     }
 }
@@ -2198,12 +2343,138 @@ fn tray_tunnel_sort_key(
     )
 }
 
+/// スコープ別トンネル項目の prefix を取得する
+fn tray_tunnel_menu_id_prefix_for_source(source_kind: ConfigSourceKind) -> &'static str {
+    match source_kind {
+        ConfigSourceKind::Global => TRAY_GLOBAL_TUNNEL_ITEM_PREFIX,
+        ConfigSourceKind::Local => TRAY_LOCAL_TUNNEL_ITEM_PREFIX,
+    }
+}
+
+/// スコープ別一括開始項目の menu ID を取得する
+fn tray_start_all_menu_id_for_source(source_kind: ConfigSourceKind) -> &'static str {
+    match source_kind {
+        ConfigSourceKind::Global => TRAY_MENU_GLOBAL_START_ALL,
+        ConfigSourceKind::Local => TRAY_MENU_LOCAL_START_ALL,
+    }
+}
+
+/// スコープ別一括停止項目の menu ID を取得する
+fn tray_stop_all_menu_id_for_source(source_kind: ConfigSourceKind) -> &'static str {
+    match source_kind {
+        ConfigSourceKind::Global => TRAY_MENU_GLOBAL_STOP_ALL,
+        ConfigSourceKind::Local => TRAY_MENU_LOCAL_STOP_ALL,
+    }
+}
+
+/// スコープ別一括操作を生成する
+fn tray_bulk_action(
+    source_kind: ConfigSourceKind,
+    operation: TrayTunnelOperation,
+) -> TrayTunnelAction {
+    TrayTunnelAction {
+        id: source_kind.to_string(),
+        runtime_id: None,
+        runtime_scope: None,
+        operation,
+    }
+}
+
+/// 指定スコープに検証エラーが存在しないか判定する
+fn validation_is_valid_for_source(
+    validation: &ValidationReport,
+    source_kind: ConfigSourceKind,
+) -> bool {
+    validation
+        .errors
+        .iter()
+        .all(|error| error.source.kind != source_kind)
+}
+
+/// スコープ別一括操作の有効状態を生成する
+fn tray_scope_bulk_state(
+    config: &EffectiveConfig,
+    statuses: &[ScopedRuntimeStatus],
+    validation: &ValidationReport,
+    source_kind: ConfigSourceKind,
+) -> TrayScopeBulkState {
+    TrayScopeBulkState {
+        start_enabled: validation_is_valid_for_source(validation, source_kind)
+            && configured_tunnel_count_for_source(config, source_kind) > 0,
+        stop_enabled: tracked_tunnel_count_for_source(statuses, source_kind) > 0,
+    }
+}
+
+/// 指定スコープの設定済みトンネル件数を取得する
+fn configured_tunnel_count_for_source(
+    config: &EffectiveConfig,
+    source_kind: ConfigSourceKind,
+) -> usize {
+    config
+        .tunnels
+        .iter()
+        .filter(|resolved| resolved.source.kind == source_kind)
+        .count()
+}
+
+/// 指定スコープの追跡中トンネル件数を取得する
+fn tracked_tunnel_count_for_source(
+    statuses: &[ScopedRuntimeStatus],
+    source_kind: ConfigSourceKind,
+) -> usize {
+    statuses
+        .iter()
+        .filter(|status| status.status.state.source_kind == source_kind)
+        .count()
+}
+
+/// 指定スコープの設定済みトンネルを操作対象へ変換する
+fn configured_tunnel_targets_for_source(
+    config: &EffectiveConfig,
+    source_kind: ConfigSourceKind,
+) -> Vec<OperationTargetInput> {
+    let mut runtime_id_cache = RuntimeIdCache::default();
+
+    config
+        .tunnels
+        .iter()
+        .filter(|resolved| resolved.source.kind == source_kind)
+        .map(|resolved| OperationTargetInput {
+            id: resolved.tunnel.name.clone(),
+            runtime_id: Some(runtime_id_cache.runtime_id_for_resolved_tunnel(resolved)),
+            runtime_scope: None,
+        })
+        .collect()
+}
+
+/// 指定スコープの追跡中トンネルを操作対象へ変換する
+fn tracked_tunnel_targets_for_source(
+    statuses: &[ScopedRuntimeStatus],
+    source_kind: ConfigSourceKind,
+) -> Vec<OperationTargetInput> {
+    statuses
+        .iter()
+        .filter(|status| status.status.state.source_kind == source_kind)
+        .map(|status| OperationTargetInput {
+            id: status.status.state.name.clone(),
+            runtime_id: Some(status.status.state.runtime_id.clone()),
+            runtime_scope: Some(status.runtime_scope),
+        })
+        .collect()
+}
+
 /// トレイ表示用のトンネル名を生成する
-fn tray_tunnel_label(id: &str, source: ConfigSourceKind, is_stale: bool) -> String {
-    if is_stale {
-        format!("{id} ({source}, stale)")
-    } else {
-        format!("{id} ({source})")
+fn tray_tunnel_label(
+    id: &str,
+    source: ConfigSourceKind,
+    is_stale: bool,
+    style: TrayTunnelLabelStyle,
+) -> String {
+    match (style, is_stale) {
+        (TrayTunnelLabelStyle::WithSource, true) => format!("{id} ({source}, stale)"),
+        (TrayTunnelLabelStyle::WithSource, false) => format!("{id} ({source})"),
+        (TrayTunnelLabelStyle::NameOnly, true) => format!("{id} (stale)"),
+        (TrayTunnelLabelStyle::NameOnly, false) => id.to_owned(),
     }
 }
 
@@ -3605,7 +3876,7 @@ fn set_tunnel_auto_recover(
 ) -> Result<PathView, String> {
     let result = set_tunnel_auto_recover_inner(&app, paths, &runtime_id, enabled);
     if result.is_ok() {
-        let _ = refresh_tray_auto_recover_items_in_place_or_rebuild(&app);
+        let _ = refresh_tray_menu_in_place_or_rebuild(&app);
     }
 
     command_result(result)
@@ -3708,10 +3979,21 @@ fn start_tunnels_inner(
     targets: Vec<OperationTargetInput>,
     operation_id: &str,
 ) -> Result<OperationReport, AppError> {
+    start_tunnels_inner_for_source(app, paths, targets, operation_id, None)
+}
+
+/// トンネル開始処理を任意の検証スコープで実行する
+fn start_tunnels_inner_for_source(
+    app: &tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    targets: Vec<OperationTargetInput>,
+    operation_id: &str,
+    validation_source_kind: Option<ConfigSourceKind>,
+) -> Result<OperationReport, AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
 
-    ensure_valid_config(&config)?;
+    ensure_valid_config_for_source(&config, validation_source_kind)?;
     let lookup = ConfiguredTunnelLookup::new(&config);
     let mut progress = OperationProgressEmitter::new(app, operation_id, targets.len());
     let report = run_start_tunnel_operations(&runtime_paths, &lookup, &targets, &mut progress)?;
@@ -5214,15 +5496,31 @@ fn timeout_view(timeouts: ResolvedTimeoutConfig) -> TimeoutView {
 
 /// 設定が開始可能な状態であることを検証する
 fn ensure_valid_config(config: &EffectiveConfig) -> Result<(), AppError> {
-    let report = validate_config(config);
+    ensure_valid_config_for_source(config, None)
+}
 
-    if report.is_valid() {
+/// 設定が指定スコープで開始可能な状態であることを検証する
+fn ensure_valid_config_for_source(
+    config: &EffectiveConfig,
+    source_kind: Option<ConfigSourceKind>,
+) -> Result<(), AppError> {
+    let report = validate_config(config);
+    let errors = report
+        .errors
+        .into_iter()
+        .filter(|error| {
+            source_kind
+                .map(|source_kind| error.source.kind == source_kind)
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+
+    if errors.is_empty() {
         return Ok(());
     }
 
     Err(AppError::InvalidConfig(
-        report
-            .errors
+        errors
             .into_iter()
             .map(|error| error.message)
             .collect::<Vec<_>>()
@@ -6284,15 +6582,6 @@ fn stop_success_message(stopped: StoppedTunnel) -> String {
 /// 停止済みの場合の成功メッセージを生成する
 fn stop_already_stopped_message(id: &str) -> String {
     format!("{id} はすでに停止済みです")
-}
-
-/// 自動復旧トグルの成功メッセージを生成する
-fn auto_recover_toggle_message(enabled: bool) -> String {
-    if enabled {
-        "Auto recover を有効にしました".to_owned()
-    } else {
-        "Auto recover を無効にしました".to_owned()
-    }
 }
 
 /// トンネル設定の local endpoint を生成する
@@ -7627,7 +7916,25 @@ show_tracked_runtime_bar = true
         assert!(operation_ran);
     }
 
-    /// トレイメニュー項目が runtime 状態に応じた toggle 操作を表現することを検証する
+    /// トレイメニューのトップレベル順序が Global、Local、Other の区分を表すことを検証する
+    #[test]
+    fn tray_top_level_menu_order_groups_global_local_and_other() {
+        assert_eq!(
+            tray_top_level_menu_label_order(),
+            [
+                "Favorites",
+                "Global Tunnels",
+                "Local Tunnels",
+                "Workspaces",
+                "Refresh Status",
+                "Settings...",
+                "Open Fwd Deck",
+                "Quit"
+            ]
+        );
+    }
+
+    /// スコープ別トレイメニュー項目が runtime 状態に応じた toggle 操作を表現することを検証する
     #[test]
     fn tray_menu_items_reflect_running_and_stale_tunnels() {
         let running =
@@ -7651,10 +7958,21 @@ show_tracked_runtime_bar = true
         let validation = validate_config(&config);
         let status_lookup = RuntimeStatusLookup::new(&statuses);
 
-        let items = tray_tunnel_menu_items(&config, &status_lookup, &validation);
+        let local_items = tray_tunnel_menu_items_for_scope(
+            &config,
+            &status_lookup,
+            &validation,
+            ConfigSourceKind::Local,
+        );
+        let global_items = tray_tunnel_menu_items_for_scope(
+            &config,
+            &status_lookup,
+            &validation,
+            ConfigSourceKind::Global,
+        );
 
-        let running_item = tray_item_by_id(&items, "running-db");
-        assert_eq!(running_item.label, "running-db (local)");
+        let running_item = tray_item_by_id(&local_items, "running-db");
+        assert_eq!(running_item.label, "running-db");
         assert!(running_item.checked);
         assert!(running_item.enabled);
         assert_eq!(running_item.action.operation, TrayTunnelOperation::Stop);
@@ -7663,20 +7981,275 @@ show_tracked_runtime_bar = true
             Some(RuntimeScope::Workspace)
         );
 
-        let stale_item = tray_item_by_id(&items, "stale-db");
-        assert_eq!(stale_item.label, "stale-db (local, stale)");
+        let stale_item = tray_item_by_id(&local_items, "stale-db");
+        assert_eq!(stale_item.label, "stale-db (stale)");
         assert!(!stale_item.checked);
         assert!(stale_item.enabled);
-        assert_eq!(stale_item.action.operation, TrayTunnelOperation::Start);
+        assert_eq!(
+            stale_item.action.operation,
+            TrayTunnelOperation::Start {
+                source_kind: ConfigSourceKind::Local
+            }
+        );
 
-        let idle_item = tray_item_by_id(&items, "idle-db");
-        assert_eq!(idle_item.label, "idle-db (local)");
+        let idle_item = tray_item_by_id(&local_items, "idle-db");
+        assert_eq!(idle_item.label, "idle-db");
         assert!(!idle_item.checked);
         assert!(idle_item.enabled);
-        assert_eq!(idle_item.action.operation, TrayTunnelOperation::Start);
+        assert_eq!(
+            idle_item.action.operation,
+            TrayTunnelOperation::Start {
+                source_kind: ConfigSourceKind::Local
+            }
+        );
 
-        let global_item = tray_item_by_id(&items, "global-db");
-        assert_eq!(global_item.label, "global-db (global)");
+        let global_item = tray_item_by_id(&global_items, "global-db");
+        assert_eq!(global_item.label, "global-db");
+        assert!(
+            local_items
+                .iter()
+                .all(|item| item.menu_id.starts_with(TRAY_LOCAL_TUNNEL_ITEM_PREFIX))
+        );
+        assert!(
+            global_items
+                .iter()
+                .all(|item| item.menu_id.starts_with(TRAY_GLOBAL_TUNNEL_ITEM_PREFIX))
+        );
+    }
+
+    /// スコープ別メニューが同名トンネルを runtime ID で一意に扱うことを検証する
+    #[test]
+    fn tray_menu_items_keep_same_names_separate_by_scope() {
+        let local = resolved_tunnel_with_port("same-db", PathBuf::from("fwd-deck.toml"), 15432);
+        let global = resolved_tunnel_with_source_and_port(
+            "same-db",
+            ConfigSourceKind::Global,
+            PathBuf::from("global-fwd-deck.toml"),
+            25432,
+        );
+        let config = EffectiveConfig::new(Vec::new(), vec![local.clone(), global.clone()]);
+        let statuses = vec![scoped_runtime_status(
+            &global,
+            RuntimeScope::Global,
+            ProcessState::Running,
+        )];
+        let validation = validate_config(&config);
+        let status_lookup = RuntimeStatusLookup::new(&statuses);
+
+        let local_items = tray_tunnel_menu_items_for_scope(
+            &config,
+            &status_lookup,
+            &validation,
+            ConfigSourceKind::Local,
+        );
+        let global_items = tray_tunnel_menu_items_for_scope(
+            &config,
+            &status_lookup,
+            &validation,
+            ConfigSourceKind::Global,
+        );
+
+        let local_item = tray_item_by_id(&local_items, "same-db");
+        let global_item = tray_item_by_id(&global_items, "same-db");
+        assert_eq!(local_item.label, "same-db");
+        assert_eq!(global_item.label, "same-db");
+        assert_ne!(local_item.action.runtime_id, global_item.action.runtime_id);
+        assert_eq!(
+            local_item.action.operation,
+            TrayTunnelOperation::Start {
+                source_kind: ConfigSourceKind::Local
+            }
+        );
+        assert_eq!(global_item.action.operation, TrayTunnelOperation::Stop);
+    }
+
+    /// スコープ別メニュー項目が対象スコープなしの場合に空になることを検証する
+    #[test]
+    fn tray_menu_items_are_empty_for_missing_scope() {
+        let local = resolved_tunnel_with_port("local-db", PathBuf::from("fwd-deck.toml"), 15432);
+        let config = EffectiveConfig::new(Vec::new(), vec![local]);
+        let statuses = Vec::new();
+        let validation = validate_config(&config);
+        let status_lookup = RuntimeStatusLookup::new(&statuses);
+
+        let global_items = tray_tunnel_menu_items_for_scope(
+            &config,
+            &status_lookup,
+            &validation,
+            ConfigSourceKind::Global,
+        );
+
+        assert!(global_items.is_empty());
+    }
+
+    /// スコープ別一括開始対象が設定済みトンネルを対象スコープに限定することを検証する
+    #[test]
+    fn configured_tunnel_targets_for_source_include_only_target_scope() {
+        let local = resolved_tunnel_with_port("local-db", PathBuf::from("fwd-deck.toml"), 15432);
+        let global = resolved_tunnel_with_source_and_port(
+            "global-db",
+            ConfigSourceKind::Global,
+            PathBuf::from("global-fwd-deck.toml"),
+            25432,
+        );
+        let config = EffectiveConfig::new(Vec::new(), vec![local.clone(), global.clone()]);
+        let global_runtime_id = runtime_id_for_resolved_tunnel(&global);
+
+        let targets = configured_tunnel_targets_for_source(&config, ConfigSourceKind::Global);
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "global-db");
+        assert_eq!(
+            targets[0].runtime_id.as_deref(),
+            Some(global_runtime_id.as_str())
+        );
+        assert_eq!(targets[0].runtime_scope, None);
+    }
+
+    /// スコープ別一括停止対象が追跡中トンネルだけを対象にすることを検証する
+    #[test]
+    fn tracked_tunnel_targets_for_source_include_only_tracked_scope() {
+        let local_running =
+            resolved_tunnel_with_port("local-running", PathBuf::from("fwd-deck.toml"), 15432);
+        let local_idle =
+            resolved_tunnel_with_port("local-idle", PathBuf::from("fwd-deck.toml"), 15433);
+        let global_running = resolved_tunnel_with_source_and_port(
+            "global-running",
+            ConfigSourceKind::Global,
+            PathBuf::from("global-fwd-deck.toml"),
+            25432,
+        );
+        let statuses = vec![
+            scoped_runtime_status(
+                &local_running,
+                RuntimeScope::Workspace,
+                ProcessState::Running,
+            ),
+            scoped_runtime_status(&global_running, RuntimeScope::Global, ProcessState::Running),
+        ];
+        let local_runtime_id = runtime_id_for_resolved_tunnel(&local_running);
+
+        let targets = tracked_tunnel_targets_for_source(&statuses, ConfigSourceKind::Local);
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "local-running");
+        assert_eq!(
+            targets[0].runtime_id.as_deref(),
+            Some(local_runtime_id.as_str())
+        );
+        assert_eq!(targets[0].runtime_scope, Some(RuntimeScope::Workspace));
+        assert!(
+            targets
+                .iter()
+                .all(|target| target.id != local_idle.tunnel.name)
+        );
+    }
+
+    /// 一括操作の有効状態が設定件数、追跡状態、スコープ別検証結果を反映することを検証する
+    #[test]
+    fn tray_scope_bulk_state_reflects_scope_config_and_status() {
+        let local_running =
+            resolved_tunnel_with_port("local-running", PathBuf::from("fwd-deck.toml"), 15432);
+        let mut local_invalid =
+            resolved_tunnel_with_port("local-invalid", PathBuf::from("fwd-deck.toml"), 15433);
+        let global = resolved_tunnel_with_source_and_port(
+            "global-db",
+            ConfigSourceKind::Global,
+            PathBuf::from("global-fwd-deck.toml"),
+            25432,
+        );
+        local_invalid.tunnel.remote_host.clear();
+        let config = EffectiveConfig::new(
+            Vec::new(),
+            vec![local_running.clone(), local_invalid, global],
+        );
+        let statuses = vec![scoped_runtime_status(
+            &local_running,
+            RuntimeScope::Workspace,
+            ProcessState::Running,
+        )];
+        let validation = validate_config(&config);
+
+        let local_state =
+            tray_scope_bulk_state(&config, &statuses, &validation, ConfigSourceKind::Local);
+        let global_state =
+            tray_scope_bulk_state(&config, &statuses, &validation, ConfigSourceKind::Global);
+
+        assert_eq!(
+            local_state,
+            TrayScopeBulkState {
+                start_enabled: false,
+                stop_enabled: true
+            }
+        );
+        assert_eq!(
+            global_state,
+            TrayScopeBulkState {
+                start_enabled: true,
+                stop_enabled: false
+            }
+        );
+    }
+
+    /// 一括操作項目が Global、Local の順序と有効状態を保持することを検証する
+    #[test]
+    fn tray_menu_model_bulk_items_reflect_scope_order_and_enabled_state() {
+        let model = TrayMenuModel {
+            global_tunnel_items: Vec::new(),
+            local_tunnel_items: Vec::new(),
+            favorite_tunnel_items: Vec::new(),
+            workspace_items: Vec::new(),
+            icon_kind: TrayIconKind::Idle,
+            global_config_is_valid: true,
+            local_config_is_valid: true,
+            global_start_all_enabled: true,
+            local_start_all_enabled: false,
+            global_stop_all_enabled: false,
+            local_stop_all_enabled: true,
+        };
+
+        let items = tray_menu_model_bulk_items(&model);
+
+        assert_eq!(
+            items,
+            vec![
+                TrayBulkMenuItem {
+                    menu_id: TRAY_MENU_GLOBAL_START_ALL.to_owned(),
+                    enabled: true
+                },
+                TrayBulkMenuItem {
+                    menu_id: TRAY_MENU_GLOBAL_STOP_ALL.to_owned(),
+                    enabled: false
+                },
+                TrayBulkMenuItem {
+                    menu_id: TRAY_MENU_LOCAL_START_ALL.to_owned(),
+                    enabled: false
+                },
+                TrayBulkMenuItem {
+                    menu_id: TRAY_MENU_LOCAL_STOP_ALL.to_owned(),
+                    enabled: true
+                }
+            ]
+        );
+    }
+
+    /// 開始前検証が対象スコープ以外の設定エラーを無視できることを検証する
+    #[test]
+    fn scoped_start_validation_ignores_other_scope_errors() {
+        let mut local_invalid =
+            resolved_tunnel_with_port("local-invalid", PathBuf::from("fwd-deck.toml"), 15432);
+        let global = resolved_tunnel_with_source_and_port(
+            "global-db",
+            ConfigSourceKind::Global,
+            PathBuf::from("global-fwd-deck.toml"),
+            25432,
+        );
+        local_invalid.tunnel.remote_host.clear();
+        let config = EffectiveConfig::new(Vec::new(), vec![local_invalid, global]);
+
+        assert!(ensure_valid_config_for_source(&config, Some(ConfigSourceKind::Global)).is_ok());
+        assert!(ensure_valid_config_for_source(&config, Some(ConfigSourceKind::Local)).is_err());
+        assert!(ensure_valid_config(&config).is_err());
     }
 
     /// トレイのお気に入り項目が保存済み runtime ID だけを表示順どおりに抽出することを検証する
@@ -7739,39 +8312,6 @@ show_tracked_runtime_bar = true
             tray_item_by_id(&items, "same-db").action.operation,
             TrayTunnelOperation::Stop
         );
-    }
-
-    /// トレイの自動復旧項目が保存済み runtime ID の checked 状態を反映することを検証する
-    #[test]
-    fn tray_auto_recover_menu_items_reflect_enabled_runtime_ids() {
-        let watched =
-            resolved_tunnel_with_port("watched-db", PathBuf::from("fwd-deck.toml"), 15432);
-        let regular =
-            resolved_tunnel_with_port("regular-db", PathBuf::from("fwd-deck.toml"), 15433);
-        let config = EffectiveConfig::new(Vec::new(), vec![regular.clone(), watched.clone()]);
-        let preferences = AppPreferences {
-            auto_recover_tunnel_runtime_ids: vec![runtime_id_for_resolved_tunnel(&watched)],
-            ..AppPreferences::default()
-        };
-
-        let items = tray_auto_recover_tunnel_menu_items(&config, &preferences);
-
-        let watched_item = tray_item_by_id(&items, "watched-db");
-        let regular_item = tray_item_by_id(&items, "regular-db");
-        assert!(watched_item.checked);
-        assert!(!regular_item.checked);
-        assert_eq!(
-            watched_item.action.operation,
-            TrayTunnelOperation::SetAutoRecover { enabled: false }
-        );
-        assert_eq!(
-            regular_item.action.operation,
-            TrayTunnelOperation::SetAutoRecover { enabled: true }
-        );
-        assert!(items.iter().all(|item| {
-            item.menu_id
-                .starts_with(TRAY_AUTO_RECOVER_TUNNEL_ITEM_PREFIX)
-        }));
     }
 
     /// 部分成功したトレイ操作が警告通知になることを検証する
@@ -7846,12 +8386,23 @@ show_tracked_runtime_bar = true
         let running_status_lookup = RuntimeStatusLookup::new(&running_statuses);
         let expanded_statuses = Vec::new();
         let expanded_status_lookup = RuntimeStatusLookup::new(&expanded_statuses);
-        let idle_items = tray_tunnel_menu_items(&config, &idle_status_lookup, &validation);
-        let running_items = tray_tunnel_menu_items(&config, &running_status_lookup, &validation);
-        let expanded_items = tray_tunnel_menu_items(
+        let idle_items = tray_tunnel_menu_items_for_scope(
+            &config,
+            &idle_status_lookup,
+            &validation,
+            ConfigSourceKind::Local,
+        );
+        let running_items = tray_tunnel_menu_items_for_scope(
+            &config,
+            &running_status_lookup,
+            &validation,
+            ConfigSourceKind::Local,
+        );
+        let expanded_items = tray_tunnel_menu_items_for_scope(
             &expanded_config,
             &expanded_status_lookup,
             &expanded_validation,
+            ConfigSourceKind::Local,
         );
 
         assert_eq!(
@@ -7864,15 +8415,52 @@ show_tracked_runtime_bar = true
         );
     }
 
-    /// 設定エラー時は開始系のトレイ項目だけが無効化されることを検証する
+    /// 周期更新が同一構造の一括操作項目だけをインプレース更新対象にすることを検証する
+    #[test]
+    fn tray_in_place_bulk_menu_update_requires_same_item_ids() {
+        let bulk_items = vec![
+            TrayBulkMenuItem {
+                menu_id: TRAY_MENU_LOCAL_START_ALL.to_owned(),
+                enabled: true,
+            },
+            TrayBulkMenuItem {
+                menu_id: TRAY_MENU_LOCAL_STOP_ALL.to_owned(),
+                enabled: false,
+            },
+        ];
+        let same_ids = bulk_items
+            .iter()
+            .map(|item| item.menu_id.clone())
+            .collect::<HashSet<_>>();
+        let mut missing_ids = same_ids.clone();
+        missing_ids.remove(TRAY_MENU_LOCAL_STOP_ALL);
+
+        assert_eq!(
+            tray_in_place_bulk_menu_update(same_ids, &bulk_items),
+            TrayInPlaceMenuUpdate::Apply
+        );
+        assert_eq!(
+            tray_in_place_bulk_menu_update(missing_ids, &bulk_items),
+            TrayInPlaceMenuUpdate::RebuildRequired
+        );
+    }
+
+    /// 設定エラー時は該当スコープの開始系トレイ項目だけが無効化されることを検証する
     #[test]
     fn tray_menu_items_disable_start_actions_when_config_is_invalid() {
         let running =
             resolved_tunnel_with_port("running-db", PathBuf::from("fwd-deck.toml"), 15432);
         let mut invalid =
             resolved_tunnel_with_port("idle-db", PathBuf::from("fwd-deck.toml"), 15433);
+        let global = resolved_tunnel_with_source_and_port(
+            "global-db",
+            ConfigSourceKind::Global,
+            PathBuf::from("global-fwd-deck.toml"),
+            15435,
+        );
         invalid.tunnel.remote_host.clear();
-        let config = EffectiveConfig::new(Vec::new(), vec![running.clone(), invalid.clone()]);
+        let config =
+            EffectiveConfig::new(Vec::new(), vec![running.clone(), invalid.clone(), global]);
         let statuses = vec![scoped_runtime_status(
             &running,
             RuntimeScope::Workspace,
@@ -7881,10 +8469,30 @@ show_tracked_runtime_bar = true
         let validation = validate_config(&config);
         let status_lookup = RuntimeStatusLookup::new(&statuses);
 
-        let items = tray_tunnel_menu_items(&config, &status_lookup, &validation);
+        let local_items = tray_tunnel_menu_items_for_scope(
+            &config,
+            &status_lookup,
+            &validation,
+            ConfigSourceKind::Local,
+        );
+        let global_items = tray_tunnel_menu_items_for_scope(
+            &config,
+            &status_lookup,
+            &validation,
+            ConfigSourceKind::Global,
+        );
 
-        assert!(tray_item_by_id(&items, "running-db").enabled);
-        assert!(!tray_item_by_id(&items, "idle-db").enabled);
+        assert!(tray_item_by_id(&local_items, "running-db").enabled);
+        assert!(!tray_item_by_id(&local_items, "idle-db").enabled);
+        assert!(tray_item_by_id(&global_items, "global-db").enabled);
+        assert!(!validation_is_valid_for_source(
+            &validation,
+            ConfigSourceKind::Local
+        ));
+        assert!(validation_is_valid_for_source(
+            &validation,
+            ConfigSourceKind::Global
+        ));
     }
 
     /// トレイのワークスペース項目が現在値と履歴を分けて表現することを検証する

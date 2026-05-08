@@ -1,7 +1,7 @@
 # CLI Reference
 
 `fwd-deck` の CLIコマンド、設定ファイル、実行状態、JSON出力をまとめます。  
-代表例と重要な制約は CLIヘルプにも表示します。
+代表例と重要な制約は CLIヘルプにも表示されます。
 
 ## Global Options
 
@@ -15,26 +15,26 @@ fwd-deck open ~/projects/my-service
 
 | オプション | 説明 |
 | --- | --- |
-| `--config PATH` | local設定ファイルのパスを指定します。 |
-| `--global-config PATH` | global設定ファイルのパスを指定します。 |
-| `--no-global` | global設定ファイルを読み込みません。 |
+| `--config PATH` | ローカル設定ファイルのパスを指定します。 |
+| `--global-config PATH` | グローバル設定ファイルのパスを指定します。 |
+| `--no-global` | グローバル設定ファイルを読み込みません。 |
 | `--state PATH` | 起動中トンネルの PID などを保存する実行状態ファイルのパスを指定します。 |
 | `--json` | 対応コマンドの出力を JSON として標準出力へ表示します。 |
 
 ## Configuration Files
 
-既定では以下の2つの設定ファイルを読み込みます。
+既定では次の2つの設定ファイルを読み込みます。
 
 | 種別 | パス | 用途 |
 | --- | --- | --- |
 | global | `~/.config/fwd-deck/config.toml` | 複数プロジェクトで共有する設定 |
 | local | `./fwd-deck.toml` | 作業ディレクトリ固有の設定 |
 
-同じ `name` は global と local の両方に共存できます。  
-bare name を指定する操作では local が優先され、global を対象にする場合は `--scope global` を指定します。
+同じ `name` はローカル設定とグローバル設定の両方に共存できます。  
+スコープなしの `name` を指定する操作ではローカル設定が優先され、グローバル設定を対象にする場合は `--scope global` を指定します。
 
-CLI の local設定は、実行時の作業ディレクトリにある `./fwd-deck.toml` を基準にします。  
-`fwd-deck open` で開いた macOSアプリは、指定した Workspace 配下の `fwd-deck.toml` を local設定として扱います。
+CLI のローカル設定は、実行時の作業ディレクトリにある `./fwd-deck.toml` を基準にします。  
+`fwd-deck open` で開いた macOSアプリは、指定した Workspace 配下の `fwd-deck.toml` をローカル設定として扱います。
 
 ## Configuration Format
 
@@ -66,24 +66,24 @@ connect_timeout_seconds = 10
 
 | フィールド | 必須 | 説明 |
 | --- | --- | --- |
-| `name` | Yes | トンネルを識別する表示名です。 |
-| `description` | No | `show` や `list --query` で使う説明です。 |
-| `tags` | No | `start --tag` や `list --tag` で使うタグです。 |
-| `local_host` | No | ローカル側 bind address です。省略時は `127.0.0.1` です。 |
-| `local_port` | Yes | ローカル側ポートです。 |
-| `remote_host` | Yes | 転送先ホストです。 |
-| `remote_port` | Yes | 転送先ポートです。 |
-| `ssh_user` | Yes | SSHユーザーです。 |
-| `ssh_host` | Yes | SSH接続先ホストです。 |
-| `ssh_port` | No | SSH接続先ポートです。省略時は SSH の既定値を使います。 |
-| `identity_file` | No | SSH秘密鍵ファイルです。 |
-| `timeouts` | No | トンネル単位のタイムアウト上書きです。 |
+| `name` | 必須 | トンネルを識別する表示名です。 |
+| `description` | 任意 | `show` や `list --query` で使う説明です。 |
+| `tags` | 任意 | `start --tag` や `list --tag` で使うタグです。 |
+| `local_host` | 任意 | ローカル側のバインドアドレスです。省略時は `127.0.0.1` です。 |
+| `local_port` | 必須 | ローカル側ポートです。 |
+| `remote_host` | 必須 | 転送先ホストです。 |
+| `remote_port` | 必須 | 転送先ポートです。 |
+| `ssh_user` | 必須 | SSHユーザーです。 |
+| `ssh_host` | 必須 | SSH接続先ホストです。 |
+| `ssh_port` | 任意 | SSH接続先ポートです。省略時は SSH の既定値を使います。 |
+| `identity_file` | 任意 | SSH秘密鍵ファイルです。 |
+| `timeouts` | 任意 | トンネル単位のタイムアウト上書きです。 |
 
 `tags` は小文字 ASCII の `a-z`, `0-9`, `-`, `_`, `.`, `/` を使えます。  
 同一設定ファイル内の `name` 重複と `local_port` 重複は検証エラーです。  
-global と local の間で同じ `name` や `local_port` を使う設定は許容します。  
-同じ `local_port` のトンネルを同時に起動しようとした場合、後から起動した側が local endpoint 使用中として失敗します。  
-`local_port` が `1024` 未満の場合、`validate` は権限が必要になる可能性を warning として表示します。
+ローカル設定とグローバル設定の間で同じ `name` や `local_port` を使う設定は許容されます。  
+同じ `local_port` のトンネルを同時に起動しようとした場合、後から起動した側がローカルエンドポイント使用中として失敗します。  
+`local_port` が `1024` 未満の場合、`validate` は権限が必要になる可能性を警告として表示します。
 
 ### Timeout Fields
 
@@ -95,7 +95,7 @@ global と local の間で同じ `name` や `local_port` を使う設定は許�
 | `connect_timeout_seconds` | `15` | SSH接続のタイムアウト秒数です。 |
 | `server_alive_interval_seconds` | `30` | SSH keepalive の送信間隔です。 |
 | `server_alive_count_max` | `3` | SSH keepalive の失敗許容回数です。 |
-| `start_grace_milliseconds` | `300` | 起動後の早期終了確認に使う基準時間で、Start 成功時は local port の LISTEN 確認も短く待ちます。 |
+| `start_grace_milliseconds` | `300` | 起動後の早期終了確認に使う基準時間で、起動成功時はローカルポートの `LISTEN` 状態の確認も短時間待機します。 |
 
 ## Runtime State
 
@@ -125,11 +125,11 @@ fwd-deck open ~/projects/my-service
 相対パスは CLI の現在ディレクトリを基準に解決します。
 起動要求に成功した場合は、`Fwd Deck.app で Workspace を開きました: ...` の形式で開いた Workspace の絶対パスを標準出力へ表示します。
 
-既存アプリが起動中の場合は、新しいウィンドウを作らずに既存ウィンドウで Workspace を切り替えます。
-Workspace 切り替え時は旧 Workspace の local トンネルを停止し、global トンネルは維持します。
-旧 Workspace の local トンネル停止に失敗した場合は、Workspace 切り替えを中止します。
+macOSアプリがすでに起動中の場合は、新しいウィンドウを作らずに既存ウィンドウで Workspace を切り替えます。
+Workspace 切り替え時は旧 Workspace の localスコープのトンネルを停止し、globalスコープのトンネルは維持します。
+旧 Workspace の localスコープのトンネル停止に失敗した場合は、Workspace 切り替えを中止します。
 
-macOS 以外では、`open` は macOSアプリの起動が未対応であることをエラーとして表示します。
+macOS 以外では、`open` は macOSアプリの起動が未対応である旨をエラーとして表示します。
 macOSアプリが未インストールの場合は、先に Homebrew cask からインストールしてください。
 
 ```sh
@@ -149,9 +149,9 @@ fwd-deck list --tag dev --query db
 ```
 
 設定済みトンネルを一覧表示します。  
-`--query` は `name` と `description` に対して大文字小文字を区別しない部分一致検索を行います。  
+`--query` は `name` と `description` に対して大文字と小文字を区別しない部分一致検索を行います。  
 `--tag` は複数指定でき、指定したタグをすべて持つトンネルだけを表示します。  
-通常の `list` は `REMOTE` の host 部分を省略表示し、`--wide` は `REMOTE` を省略せずに表示します。
+通常の `list` は `REMOTE` のホスト部分を省略表示し、`--wide` は `REMOTE` を省略せずに表示します。
 
 ### `show`
 
@@ -162,8 +162,8 @@ fwd-deck --json show dev-db
 
 統合後のトンネル詳細を表示します。  
 `description`, `tags`, 接続先、有効なタイムアウト設定、読み込み元の設定ファイルを確認できます。  
-同じ `name` が local と global の両方にある場合、bare name は local を優先します。  
-global を対象にする場合は `--scope global` を指定します。
+同じ `name` がローカル設定とグローバル設定の両方にある場合、スコープなしの `name` はローカル設定を優先します。  
+グローバル設定を対象にする場合は `--scope global` を指定します。
 
 ### `start`
 
@@ -186,9 +186,9 @@ NAME を指定しない場合は対話選択を表示します。
 `--all`、NAME、`--tag` は同時に指定できません。  
 `--dry-run` は SSH を起動せず、状態ファイルも更新せずに実行予定だけを表示します。
 
-同じ `name` が local と global の両方にある場合、bare name は local を優先します。  
-global を対象にする場合は `--scope global` を指定します。  
-local endpoint が使用中の場合、取得できる範囲でそのポートを使っている LISTENプロセスも表示します。
+同じ `name` がローカル設定とグローバル設定の両方にある場合、スコープなしの `name` はローカル設定を優先します。  
+グローバル設定を対象にする場合は `--scope global` を指定します。  
+ローカルエンドポイントが使用中の場合、取得できる範囲でそのポートを使っている `LISTEN` 状態のプロセスも表示します。
 
 ### `status`
 
@@ -198,7 +198,7 @@ fwd-deck --json status
 ```
 
 状態ファイル上で追跡しているトンネルの状態を表示します。  
-状態ファイルに記録された PID を使い、追跡中トンネルが実行中か stale かを判定します。
+状態ファイルに記録された PID を使い、追跡中トンネルが実行中か stale状態かを判定します。
 
 ### `recover`
 
@@ -208,8 +208,8 @@ fwd-deck recover dev-db
 fwd-deck recover dev-db --scope global
 ```
 
-stale な追跡中トンネルを現在の設定に基づいて再起動します。  
-NAME を省略した場合は、状態ファイルで stale と判定された追跡中トンネルを対象にします。  
+stale状態の追跡中トンネルを現在の設定に基づいて再起動します。  
+NAME を省略した場合は、状態ファイルで stale状態と判定された追跡中トンネルを対象にします。  
 NAME を指定した場合は、指定トンネルだけを復旧対象にします。
 
 ### `watch`
@@ -220,7 +220,7 @@ fwd-deck watch dev-db --interval-seconds 5
 fwd-deck watch dev-db --scope global --interval-seconds 5
 ```
 
-追跡中のトンネルを監視し、stale になった場合に現在の設定で再起動します。  
+追跡中のトンネルを監視し、stale状態になった場合に現在の設定で再起動します。  
 NAME を省略した場合は、状態ファイル上の追跡中トンネルを監視します。  
 `--interval-seconds` は監視間隔を秒単位で指定します。
 
@@ -240,8 +240,8 @@ NAME を指定しない場合は対話選択を表示します。
 `--all` と NAME は同時に指定できません。  
 `--dry-run` は、実際の停止や状態ファイル更新を行わずに実行予定だけを表示します。
 
-同じ `name` が local と global の両方にある場合、bare name は local を優先します。  
-global を対象にする場合は `--scope global` を指定します。
+同じ `name` がローカル設定とグローバル設定の両方にある場合、スコープなしの `name` はローカル設定を優先します。  
+グローバル設定を対象にする場合は `--scope global` を指定します。
 
 ### `config`
 
@@ -260,13 +260,13 @@ fwd-deck config remove --scope local
 fwd-deck config remove --scope global
 ```
 
-`config add`, `config edit`, `config remove` は、global設定または local設定を対話形式で編集します。  
-`--scope` を省略すると、編集する local または global 設定を対話選択します。  
+`config add`, `config edit`, `config remove` は、ローカル設定またはグローバル設定を対話形式で編集します。  
+`--scope` を省略すると、編集するローカル設定またはグローバル設定を対話選択します。  
 `--scope local` は `./fwd-deck.toml`、`--scope global` は `~/.config/fwd-deck/config.toml` を対象にします。  
 `config add` は対象ファイルが存在しない場合に新規作成し、既定値の `[timeouts]` も書き込みます。  
 同一設定ファイル内で重複する `name` と `local_port` は入力時に拒否します。  
-`config edit` は既存値を初期値として表示し、空入力は既存値維持として扱います。  
-同じ `name` が global設定と local設定の両方に存在する場合、対話実行時は編集対象を選択します。  
+`config edit` は既存値を初期値として表示し、空入力は既存値の維持として扱います。  
+同じ `name` がローカル設定とグローバル設定の両方に存在する場合、対話実行時は編集対象を選択します。  
 非対話実行時は `--scope` を指定します。
 
 `config import-ssh` は SSHコマンドを解析し、`-L` ごとに1件の `[[tunnels]]` を追加します。
@@ -284,8 +284,8 @@ fwd-deck config remove --scope global
 
 解析対象は `-L`, `-i`, `-p`, `-l`, `user@host`, `-o ConnectTimeout`, `-o ServerAliveInterval`, `-o ServerAliveCountMax` です。
 `-N`, `-v`, `-o ExitOnForwardFailure` は設定として保持する必要がないため無視します。
-その他の保持できないSSHオプションは warning として表示し、取り込み自体は継続します。
-Unix socket転送、`-R`, `-D`、壊れた `-L`、SSHユーザー不足、転送指定なしはエラーです。
+その他の保持できないSSHオプションは警告として表示し、取り込み自体は継続します。
+Unixソケット転送、`-R`, `-D`、壊れた `-L`、SSHユーザー不足、転送指定なしはエラーです。
 
 `config add` はタイムアウト設定を入力しないため、新規作成時の既定値から変更する場合は TOML を直接編集します。  
 `config edit` もタイムアウト設定を変更しないため、必要な場合は TOML を直接編集します。
@@ -320,8 +320,8 @@ fwd-deck validate
 fwd-deck --json validate
 ```
 
-設定ファイルを検証し、エラーと warning を表示します。  
-読み込んだ local と global の設定を統合したうえで検証します。
+設定ファイルを検証し、エラーと警告を表示します。  
+読み込んだローカル設定とグローバル設定を統合したうえで検証します。
 
 ### `doctor`
 
@@ -329,7 +329,7 @@ fwd-deck --json validate
 fwd-deck doctor
 ```
 
-設定ファイルの有無、設定検証、状態ファイルの読み書き、`ssh` / `lsof` の起動可否、`identity_file` の存在、local endpoint の使用状況をまとめて確認します。
+設定ファイルの有無、設定検証、状態ファイルの読み書き、`ssh` / `lsof` の起動可否、`identity_file` の存在、ローカルエンドポイントの使用状況をまとめて確認します。
 
 ## JSON Output
 

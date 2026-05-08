@@ -654,7 +654,7 @@ function App(): ReactElement {
     () => buildTunnelLookup(dashboardTunnels),
     [dashboardTunnels],
   );
-  const filteredTunnels = useMemo<TunnelView[]>(
+  const filteredTunnels = useMemo<readonly TunnelView[]>(
     () => filterTunnels(dashboardTunnels, filters, tunnelSearchIndex, homePath),
     [dashboardTunnels, filters, tunnelSearchIndex, homePath],
   );
@@ -2750,7 +2750,7 @@ function maximumViewportScrollTop(): number {
 interface DashboardViewProps {
   dashboard: DashboardState | null;
   hasCompletedInitialLoad: boolean;
-  filteredTunnels: TunnelView[];
+  filteredTunnels: readonly TunnelView[];
   hasActiveFilters: boolean;
   homePath: string | null;
   selectedIds: Set<string>;
@@ -4731,7 +4731,7 @@ function OperationToast({ toast, onDismiss, onExited }: OperationToastProps): Re
 interface TunnelDeckProps {
   dashboard: DashboardState | null;
   hasCompletedInitialLoad: boolean;
-  tunnels: TunnelView[];
+  tunnels: readonly TunnelView[];
   filters: TunnelFilters;
   displayMode: TunnelDisplayMode;
   hasActiveFilters: boolean;
@@ -4883,7 +4883,7 @@ const TunnelDeck = memo(function TunnelDeck({
 });
 
 interface TunnelSlimListProps {
-  tunnels: TunnelView[];
+  tunnels: readonly TunnelView[];
   query: string;
   selectedIds: Set<string>;
   selectedVisibleCount: number;
@@ -7173,13 +7173,23 @@ function filterTunnels(
   filters: TunnelFilters,
   searchIndex: TunnelSearchIndex,
   homePath: string | null,
-): TunnelView[] {
+): readonly TunnelView[] {
   const query = filters.query.trim().toLowerCase();
   const hasStatusFilter = hasPartialFilterSelection(filters.statuses, allStatusFilters);
   const hasScopeFilter = hasPartialFilterSelection(filters.scopes, allScopeFilters);
   const selectedStatuses = hasStatusFilter ? new Set(filters.statuses) : null;
   const selectedScopes = hasScopeFilter ? new Set(filters.scopes) : null;
   const selectedTags = filters.tags.length > 0 ? new Set(filters.tags) : null;
+
+  if (
+    query.length === 0 &&
+    selectedStatuses === null &&
+    selectedScopes === null &&
+    selectedTags === null &&
+    !filters.favoritesOnly
+  ) {
+    return tunnels;
+  }
 
   return tunnels.filter((tunnel) => {
     const status = tunnelStatus(tunnel);

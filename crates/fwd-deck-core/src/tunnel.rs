@@ -350,20 +350,32 @@ where
     let mut state_file = read_state_file(state_path)?;
     let probe = RuntimeStatusProbe::from_states(&state_file.tunnels);
     let mut results = Vec::with_capacity(runtime_ids.len());
-    let mut has_state_changes = false;
+    let mut removal_counts = HashMap::<String, usize>::new();
 
-    for (index, runtime_id) in runtime_ids.iter().enumerate() {
-        let result = stop_tunnel_from_state_file(&mut state_file, &probe, runtime_id);
+    {
+        let indexed_states = index_tunnel_states_by_runtime_id(&state_file);
+        let mut removed_runtime_ids = HashSet::<String>::new();
 
-        if result.is_ok() {
-            has_state_changes = true;
+        for (index, runtime_id) in runtime_ids.iter().enumerate() {
+            let result = stop_tunnel_from_indexed_state_file(
+                &indexed_states,
+                &removed_runtime_ids,
+                &probe,
+                runtime_id,
+            );
+
+            if result.is_ok() {
+                removed_runtime_ids.insert(runtime_id.clone());
+                *removal_counts.entry(runtime_id.clone()).or_default() += 1;
+            }
+
+            on_result(index, &result);
+            results.push(result);
         }
-
-        on_result(index, &result);
-        results.push(result);
     }
 
-    if has_state_changes {
+    if !removal_counts.is_empty() {
+        remove_tunnel_states_by_runtime_id_counts(&mut state_file, &mut removal_counts);
         write_state_file(state_path, &state_file)?;
     }
 
@@ -395,6 +407,66 @@ fn stop_tunnel_from_state_file(
         state,
         previous_state,
     })
+}
+
+/// 状態ファイル内のトンネルを runtime ID で参照できる索引を生成する
+fn index_tunnel_states_by_runtime_id(state_file: &TunnelStateFile) -> HashMap<&str, &TunnelState> {
+    let mut states = HashMap::with_capacity(state_file.tunnels.len());
+
+    for state in &state_file.tunnels {
+        states.entry(state.runtime_id.as_str()).or_insert(state);
+    }
+
+    states
+}
+
+/// 索引済み状態ファイルから指定トンネルを停止対象として解決する
+fn stop_tunnel_from_indexed_state_file(
+    states: &HashMap<&str, &TunnelState>,
+    removed_runtime_ids: &HashSet<String>,
+    probe: &RuntimeStatusProbe,
+    runtime_id: &str,
+) -> Result<StoppedTunnel, TunnelRuntimeError> {
+    if removed_runtime_ids.contains(runtime_id) {
+        return Err(TunnelRuntimeError::NotTracked {
+            runtime_id: runtime_id.to_owned(),
+        });
+    }
+
+    let Some(state) = states.get(runtime_id).copied() else {
+        return Err(TunnelRuntimeError::NotTracked {
+            runtime_id: runtime_id.to_owned(),
+        });
+    };
+    let previous_state = probe.process_state_for(state);
+
+    if previous_state == ProcessState::Running {
+        stop_process(state)?;
+    }
+
+    Ok(StoppedTunnel {
+        state: state.clone(),
+        previous_state,
+    })
+}
+
+/// 停止済み runtime ID に対応する状態だけを状態ファイルから削除する
+fn remove_tunnel_states_by_runtime_id_counts(
+    state_file: &mut TunnelStateFile,
+    removal_counts: &mut HashMap<String, usize>,
+) {
+    state_file.tunnels.retain(|state| {
+        let Some(count) = removal_counts.get_mut(&state.runtime_id) else {
+            return true;
+        };
+
+        if *count == 0 {
+            return true;
+        }
+
+        *count -= 1;
+        false
+    });
 }
 
 /// トンネル状態から実行状態を判定する
@@ -1112,6 +1184,41 @@ mod tests {
                 if stopped.state.name == "cache" && stopped.previous_state == ProcessState::Stale
         ));
         assert_eq!(reported_indexes, vec![0, 1, 2]);
+        assert!(
+            read_state_file(&state_path)
+                .expect("read state file")
+                .tunnels
+                .is_empty()
+        );
+    }
+
+    /// 一括停止で重複指定された runtime ID は 1 回だけ削除されることを検証する
+    #[test]
+    fn stop_tunnels_reports_duplicate_runtime_id_as_not_tracked_after_first_stop() {
+        let temp_dir = TempDir::new().expect("create state directory");
+        let state_path = temp_dir.path().join("state.toml");
+        let db = resolved_tunnel();
+        let mut state = TunnelStateFile::new();
+        state.upsert(TunnelState::from_resolved_tunnel(
+            &db,
+            u32::MAX,
+            1_700_000_000,
+        ));
+        write_state_file(&state_path, &state).expect("write state file");
+        let runtime_id = runtime_id_for_resolved_tunnel(&db);
+        let runtime_ids = vec![runtime_id.clone(), runtime_id.clone()];
+
+        let results = stop_tunnels(&runtime_ids, &state_path).expect("stop tunnels");
+
+        assert!(matches!(
+            &results[0],
+            Ok(stopped)
+                if stopped.state.name == "db" && stopped.previous_state == ProcessState::Stale
+        ));
+        assert!(matches!(
+            &results[1],
+            Err(TunnelRuntimeError::NotTracked { runtime_id: duplicate }) if duplicate == &runtime_id
+        ));
         assert!(
             read_state_file(&state_path)
                 .expect("read state file")

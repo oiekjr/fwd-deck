@@ -20,7 +20,7 @@ toml.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
-objc2-app-kit = { workspace = true, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-app-kit = { workspace = true, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSCell", "NSControl", "NSImage", "NSResponder", "NSView"] }
 objc2-foundation = { workspace = true, features = ["std", "NSData", "NSProcessInfo", "NSString"] }
 
 [dev-dependencies]

@@ -81,6 +81,8 @@ type TunnelDisplayMode = "card" | "slim";
 
 type AddTunnelMode = "manual" | "ssh-command";
 
+type RunningTunnelsOnQuitDefaultAction = "stop" | "keep";
+
 type HeroButtonVariant =
   | "danger"
   | "danger-soft"
@@ -132,6 +134,7 @@ interface WorkspaceSelection {
   workspaceStateExists: boolean;
   showDockIconWhenWindowHidden: boolean;
   confirmRunningTunnelsOnQuit: boolean;
+  runningTunnelsOnQuitDefaultAction: RunningTunnelsOnQuitDefaultAction;
   showTrackedRuntimeBar: boolean;
 }
 
@@ -141,12 +144,16 @@ interface WorkspaceSelectionInput {
   useGlobal: boolean;
   showDockIconWhenWindowHidden: boolean;
   confirmRunningTunnelsOnQuit: boolean;
+  runningTunnelsOnQuitDefaultAction: RunningTunnelsOnQuitDefaultAction;
   showTrackedRuntimeBar: boolean;
 }
 
 type ApplicationSettingsDefaults = Pick<
   WorkspaceSelection,
-  "showDockIconWhenWindowHidden" | "confirmRunningTunnelsOnQuit" | "showTrackedRuntimeBar"
+  | "showDockIconWhenWindowHidden"
+  | "confirmRunningTunnelsOnQuit"
+  | "runningTunnelsOnQuitDefaultAction"
+  | "showTrackedRuntimeBar"
 >;
 
 interface OperationTarget {
@@ -458,6 +465,7 @@ interface VisibleTunnelSelectionSummary {
 const defaultApplicationSettings: ApplicationSettingsDefaults = {
   showDockIconWhenWindowHidden: true,
   confirmRunningTunnelsOnQuit: true,
+  runningTunnelsOnQuitDefaultAction: "stop",
   showTrackedRuntimeBar: true,
 };
 
@@ -3615,6 +3623,35 @@ function PathPanel({
               <Switch.Thumb />
             </Switch.Control>
           </Switch>
+        </div>
+        <div className="flex flex-col gap-2 rounded-lg border border-border bg-muted/35 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+          <span className="text-sm font-semibold">Default quit action without confirmation</span>
+          <div className="inline-flex w-full rounded-md border border-border bg-card p-0.5 sm:w-auto">
+            <HeroButton
+              type="button"
+              variant={paths.runningTunnelsOnQuitDefaultAction === "stop" ? "primary" : "ghost"}
+              size="sm"
+              className="h-7 flex-1 px-2 sm:flex-none"
+              onPress={() => onChange("runningTunnelsOnQuitDefaultAction", "stop")}
+              aria-pressed={paths.runningTunnelsOnQuitDefaultAction === "stop"}
+              isDisabled={isBusy}
+            >
+              <CircleStop size={14} />
+              Stop tunnels
+            </HeroButton>
+            <HeroButton
+              type="button"
+              variant={paths.runningTunnelsOnQuitDefaultAction === "keep" ? "primary" : "ghost"}
+              size="sm"
+              className="h-7 flex-1 px-2 sm:flex-none"
+              onPress={() => onChange("runningTunnelsOnQuitDefaultAction", "keep")}
+              aria-pressed={paths.runningTunnelsOnQuitDefaultAction === "keep"}
+              isDisabled={isBusy}
+            >
+              <Unlink size={14} />
+              Keep running
+            </HeroButton>
+          </div>
         </div>
         <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
           <Switch
@@ -7055,6 +7092,7 @@ function workspaceSelectionEquals(left: WorkspaceSelection, right: WorkspaceSele
     left.workspaceStateExists === right.workspaceStateExists &&
     left.showDockIconWhenWindowHidden === right.showDockIconWhenWindowHidden &&
     left.confirmRunningTunnelsOnQuit === right.confirmRunningTunnelsOnQuit &&
+    left.runningTunnelsOnQuitDefaultAction === right.runningTunnelsOnQuitDefaultAction &&
     left.showTrackedRuntimeBar === right.showTrackedRuntimeBar
   );
 }
@@ -8029,6 +8067,7 @@ function normalizeWorkspaceSelection(paths: WorkspaceSelection): WorkspaceSelect
     useGlobal: paths.useGlobal,
     showDockIconWhenWindowHidden: paths.showDockIconWhenWindowHidden,
     confirmRunningTunnelsOnQuit: paths.confirmRunningTunnelsOnQuit,
+    runningTunnelsOnQuitDefaultAction: paths.runningTunnelsOnQuitDefaultAction,
     showTrackedRuntimeBar: paths.showTrackedRuntimeBar,
   };
 }

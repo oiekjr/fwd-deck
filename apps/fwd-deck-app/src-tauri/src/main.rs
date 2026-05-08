@@ -31,7 +31,10 @@ use fwd_deck_core::{
 #[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSApp, NSImage};
+use objc2_app_kit::{
+    NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAlertStyle, NSApp,
+    NSControlStateValueOn, NSImage,
+};
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSData, NSProcessInfo, NSString};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -43,13 +46,13 @@ use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{TrayIcon, TrayIconBuilder},
 };
-use tauri_plugin_dialog::{
-    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
-};
+#[cfg(any(not(target_os = "macos"), test))]
+use tauri_plugin_dialog::MessageDialogResult;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use thiserror::Error;
 
 const APP_PREFERENCES_FILE_NAME: &str = "preferences.toml";
-const APP_PREFERENCES_VERSION: u32 = 7;
+const APP_PREFERENCES_VERSION: u32 = 8;
 const WORKSPACE_HISTORY_LIMIT: usize = 10;
 const WORKSPACE_STATES_DIR: &str = "workspace-states";
 const STATE_FILE_NAME: &str = "state.toml";
@@ -65,6 +68,7 @@ const TRAY_OPERATION_RESULT_EVENT: &str = "tray-operation-result";
 const OPEN_SETTINGS_EVENT: &str = "open-settings";
 const MAIN_WINDOW_LABEL: &str = "main";
 const APP_MENU_SETTINGS: &str = "app-settings";
+const APP_MENU_QUIT: &str = "app-quit";
 const TRAY_ID: &str = "main-tray";
 const TRAY_ICON_IDLE_BYTES: &[u8] = include_bytes!("../icons/tray-idle-template.png");
 const TRAY_ICON_ACTIVE_BYTES: &[u8] = include_bytes!("../icons/tray-active-template.png");
@@ -104,7 +108,9 @@ const QUIT_DIALOG_TITLE: &str = "Fwd Deck を終了";
 const QUIT_DIALOG_STOP_LABEL: &str = "停止して終了";
 const QUIT_DIALOG_KEEP_LABEL: &str = "停止せず終了";
 const QUIT_DIALOG_CANCEL_LABEL: &str = "キャンセル";
+const QUIT_DIALOG_SUPPRESSION_LABEL: &str = "次回から確認しない";
 const QUIT_ERROR_TITLE: &str = "ポートフォワーディングを停止できませんでした";
+const QUIT_PREFERENCE_ERROR_TITLE: &str = "終了時確認設定を保存できませんでした";
 const QUIT_STALE_CLEANUP_ERROR_TITLE: &str = "stale 状態を削除できませんでした";
 const CLI_INSTALL_LINK_PATH: &str = "/usr/local/bin/fwd-deck";
 const HOMEBREW_CLI_PATHS: [&str; 2] = ["/opt/homebrew/bin/fwd-deck", "/usr/local/bin/fwd-deck"];
@@ -664,6 +670,13 @@ struct WorkspaceOpenRequestPayload {
     error: Option<String>,
 }
 
+/// アプリ上部メニューの操作種別を表現する
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppMenuAction {
+    OpenSettings,
+    Quit,
+}
+
 /// アプリ上部メニューを作成する
 fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::default(app)?;
@@ -682,12 +695,25 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             true,
             Some("CmdOrCtrl+,"),
         )?;
+        let quit = MenuItem::with_id(
+            app,
+            APP_MENU_QUIT,
+            format!("Quit {APP_DISPLAY_NAME}"),
+            true,
+            Some("CmdOrCtrl+Q"),
+        )?;
         let separator = PredefinedMenuItem::separator(app)?;
 
         let _ = app_submenu.remove_at(0)?;
         app_submenu.insert(&about, 0)?;
         app_submenu.insert(&settings, 2)?;
         app_submenu.insert(&separator, 3)?;
+
+        let item_count = app_submenu.items()?.len();
+        if item_count > 0 {
+            let _ = app_submenu.remove_at(item_count - 1)?;
+        }
+        app_submenu.append(&quit)?;
     }
 
     Ok(menu)
@@ -716,11 +742,20 @@ fn app_about_metadata(app: &tauri::AppHandle) -> tauri::Result<AboutMetadata<'st
 
 /// アプリ上部メニューの選択を処理する
 fn handle_app_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
-    if event.id().as_ref() != APP_MENU_SETTINGS {
-        return;
+    match app_menu_action(event.id().as_ref()) {
+        Some(AppMenuAction::OpenSettings) => open_settings_window(app),
+        Some(AppMenuAction::Quit) => app.exit(0),
+        None => {}
     }
+}
 
-    open_settings_window(app);
+/// アプリ上部メニュー ID を操作種別へ変換する
+fn app_menu_action(menu_id: &str) -> Option<AppMenuAction> {
+    match menu_id {
+        APP_MENU_SETTINGS => Some(AppMenuAction::OpenSettings),
+        APP_MENU_QUIT => Some(AppMenuAction::Quit),
+        _ => None,
+    }
 }
 
 /// Settings 表示をフロントエンドへ要求する
@@ -2688,7 +2723,8 @@ struct QuitTunnelTargets {
 /// 終了時に起動中トンネルを扱う方針を表現する
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuitRunningTunnelsAction {
-    AutoStop,
+    StopAndQuit,
+    QuitOnly,
     Prompt,
 }
 
@@ -2798,7 +2834,7 @@ fn handle_collected_quit_context(
     }
 
     match context.running_action {
-        QuitRunningTunnelsAction::AutoStop => match stop_quit_tunnel_targets(&targets.running) {
+        QuitRunningTunnelsAction::StopAndQuit => match stop_quit_tunnel_targets(&targets.running) {
             Ok(()) => perform_confirmed_quit(app.clone(), quit_state, request),
             Err(failure) => show_quit_error_dialog(
                 app.clone(),
@@ -2807,6 +2843,9 @@ fn handle_collected_quit_context(
                 quit_stop_failure_message(&failure),
             ),
         },
+        QuitRunningTunnelsAction::QuitOnly => {
+            perform_confirmed_quit(app.clone(), quit_state, request)
+        }
         QuitRunningTunnelsAction::Prompt => {
             show_quit_confirmation_dialog(app.clone(), quit_state, request, targets.running);
         }
@@ -2830,9 +2869,12 @@ fn collect_quit_tunnel_context(app: &tauri::AppHandle) -> Result<QuitTunnelConte
 /// アプリ設定から終了時の起動中トンネル処理を決定する
 fn quit_running_tunnels_action(preferences: &AppPreferences) -> QuitRunningTunnelsAction {
     if preferences.confirm_running_tunnels_on_quit {
-        QuitRunningTunnelsAction::Prompt
-    } else {
-        QuitRunningTunnelsAction::AutoStop
+        return QuitRunningTunnelsAction::Prompt;
+    }
+
+    match preferences.running_tunnels_on_quit_default_action {
+        RunningTunnelsOnQuitDefaultAction::Stop => QuitRunningTunnelsAction::StopAndQuit,
+        RunningTunnelsOnQuitDefaultAction::Keep => QuitRunningTunnelsAction::QuitOnly,
     }
 }
 
@@ -2871,6 +2913,40 @@ fn quit_tunnel_targets_from_statuses(
 }
 
 /// 終了確認ダイアログを表示する
+#[cfg(target_os = "macos")]
+fn show_quit_confirmation_dialog(
+    app: tauri::AppHandle,
+    quit_state: QuitConfirmationStateHandle,
+    request: QuitRequest,
+    targets: Vec<QuitTunnelTarget>,
+) {
+    let app_for_callback = app.clone();
+    let quit_state_for_callback = quit_state.clone();
+
+    let result = app.run_on_main_thread(move || {
+        let dialog_result = show_quit_confirmation_ns_alert();
+        handle_quit_dialog_result(
+            app_for_callback,
+            quit_state_for_callback,
+            request,
+            targets,
+            dialog_result.action,
+            dialog_result.suppress_confirmation,
+        );
+    });
+
+    if let Err(error) = result {
+        show_quit_error_dialog(
+            app,
+            quit_state,
+            QUIT_ERROR_TITLE,
+            format!("終了確認ダイアログを表示できませんでした。\n\n{error}"),
+        );
+    }
+}
+
+/// 終了確認ダイアログを表示する
+#[cfg(not(target_os = "macos"))]
 fn show_quit_confirmation_dialog(
     app: tauri::AppHandle,
     quit_state: QuitConfirmationStateHandle,
@@ -2895,8 +2971,66 @@ fn show_quit_confirmation_dialog(
                 request,
                 targets,
                 quit_dialog_action(&result),
+                false,
             );
         });
+}
+
+/// 終了確認ダイアログの結果を保持する
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuitConfirmationDialogResult {
+    action: QuitDialogAction,
+    suppress_confirmation: bool,
+}
+
+/// macOS 標準の抑止チェックボックス付き終了確認を表示する
+#[cfg(target_os = "macos")]
+fn show_quit_confirmation_ns_alert() -> QuitConfirmationDialogResult {
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return QuitConfirmationDialogResult {
+            action: QuitDialogAction::Cancel,
+            suppress_confirmation: false,
+        };
+    };
+
+    let alert = NSAlert::new(main_thread);
+    alert.setMessageText(&NSString::from_str(QUIT_DIALOG_TITLE));
+    alert.setInformativeText(&NSString::from_str(quit_confirmation_message()));
+    alert.setAlertStyle(NSAlertStyle::Warning);
+    alert.addButtonWithTitle(&NSString::from_str(QUIT_DIALOG_STOP_LABEL));
+    alert.addButtonWithTitle(&NSString::from_str(QUIT_DIALOG_KEEP_LABEL));
+    alert.addButtonWithTitle(&NSString::from_str(QUIT_DIALOG_CANCEL_LABEL));
+    alert.setShowsSuppressionButton(true);
+
+    if let Some(button) = alert.suppressionButton() {
+        button.setTitle(&NSString::from_str(QUIT_DIALOG_SUPPRESSION_LABEL));
+    }
+
+    let action = quit_dialog_action_from_ns_alert_response(alert.runModal());
+    let suppress_confirmation = alert
+        .suppressionButton()
+        .is_some_and(|button| button.state() == NSControlStateValueOn);
+
+    QuitConfirmationDialogResult {
+        action,
+        suppress_confirmation,
+    }
+}
+
+/// macOS 標準ダイアログの戻り値を内部アクションへ変換する
+#[cfg(target_os = "macos")]
+fn quit_dialog_action_from_ns_alert_response(
+    response: objc2_app_kit::NSModalResponse,
+) -> QuitDialogAction {
+    if response == NSAlertFirstButtonReturn {
+        return QuitDialogAction::StopAndQuit;
+    }
+
+    if response == NSAlertSecondButtonReturn {
+        return QuitDialogAction::QuitOnly;
+    }
+
+    QuitDialogAction::Cancel
 }
 
 /// 終了確認ダイアログの本文を生成する
@@ -2905,6 +3039,7 @@ fn quit_confirmation_message() -> &'static str {
 }
 
 /// 終了確認ダイアログの結果を内部処理へ変換する
+#[cfg(any(not(target_os = "macos"), test))]
 fn quit_dialog_action(result: &MessageDialogResult) -> QuitDialogAction {
     match result {
         MessageDialogResult::Yes => QuitDialogAction::StopAndQuit,
@@ -2926,7 +3061,21 @@ fn handle_quit_dialog_result(
     request: QuitRequest,
     targets: Vec<QuitTunnelTarget>,
     action: QuitDialogAction,
+    suppress_confirmation: bool,
 ) {
+    if let Some(default_action) =
+        quit_dialog_default_action_preference(action, suppress_confirmation)
+        && let Err(error) = persist_quit_confirmation_preference(&app, default_action)
+    {
+        show_quit_error_dialog(
+            app,
+            quit_state,
+            QUIT_PREFERENCE_ERROR_TITLE,
+            format!("終了時確認設定の保存に失敗しました。\n\n{error}"),
+        );
+        return;
+    }
+
     match action {
         QuitDialogAction::StopAndQuit => match stop_quit_tunnel_targets(&targets) {
             Ok(()) => perform_confirmed_quit(app, quit_state, request),
@@ -2940,6 +3089,39 @@ fn handle_quit_dialog_result(
         QuitDialogAction::QuitOnly => perform_confirmed_quit(app, quit_state, request),
         QuitDialogAction::Cancel => quit_state.set(QuitConfirmationState::Idle),
     }
+}
+
+/// ダイアログ結果から保存する終了時既定動作を取得する
+fn quit_dialog_default_action_preference(
+    action: QuitDialogAction,
+    suppress_confirmation: bool,
+) -> Option<RunningTunnelsOnQuitDefaultAction> {
+    if !suppress_confirmation {
+        return None;
+    }
+
+    match action {
+        QuitDialogAction::StopAndQuit => Some(RunningTunnelsOnQuitDefaultAction::Stop),
+        QuitDialogAction::QuitOnly => Some(RunningTunnelsOnQuitDefaultAction::Keep),
+        QuitDialogAction::Cancel => None,
+    }
+}
+
+/// 終了確認を次回から省略する設定を保存する
+fn persist_quit_confirmation_preference(
+    app: &tauri::AppHandle,
+    default_action: RunningTunnelsOnQuitDefaultAction,
+) -> Result<(), AppError> {
+    let app_config_dir = app_config_dir(app)?;
+    let preferences_path = preferences_path_from_app_config_dir(&app_config_dir);
+    let mut preferences = read_preferences_file(&preferences_path)?;
+    let original_preferences = preferences.clone();
+
+    normalize_loaded_preferences(&mut preferences);
+    preferences.confirm_running_tunnels_on_quit = false;
+    preferences.running_tunnels_on_quit_default_action = default_action;
+
+    write_preferences_file_if_changed(&preferences_path, &original_preferences, &preferences)
 }
 
 /// 終了前に対象トンネルを停止または stale 削除する
@@ -3011,7 +3193,17 @@ struct WorkspaceSelection {
     use_global: Option<bool>,
     show_dock_icon_when_window_hidden: Option<bool>,
     confirm_running_tunnels_on_quit: Option<bool>,
+    running_tunnels_on_quit_default_action: Option<RunningTunnelsOnQuitDefaultAction>,
     show_tracked_runtime_bar: Option<bool>,
+}
+
+/// 確認を省略した終了時の起動中トンネル処理を表現する
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RunningTunnelsOnQuitDefaultAction {
+    #[default]
+    Stop,
+    Keep,
 }
 
 /// アプリ固有の設定を表現する
@@ -3024,6 +3216,7 @@ struct AppPreferences {
     global_config_path: Option<PathBuf>,
     show_dock_icon_when_window_hidden: bool,
     confirm_running_tunnels_on_quit: bool,
+    running_tunnels_on_quit_default_action: RunningTunnelsOnQuitDefaultAction,
     show_tracked_runtime_bar: bool,
     favorite_tunnel_runtime_ids: Vec<String>,
     auto_recover_tunnel_runtime_ids: Vec<String>,
@@ -3042,6 +3235,7 @@ struct AppPreferencesFile {
     hide_dock_icon_when_window_hidden: Option<bool>,
     confirm_running_tunnels_on_quit: Option<bool>,
     auto_stop_tunnels_on_quit: Option<bool>,
+    running_tunnels_on_quit_default_action: Option<RunningTunnelsOnQuitDefaultAction>,
     show_tracked_runtime_bar: Option<bool>,
     hide_tracked_runtime_bar: Option<bool>,
     favorite_tunnel_runtime_ids: Vec<String>,
@@ -3059,6 +3253,7 @@ impl Default for AppPreferences {
             global_config_path: None,
             show_dock_icon_when_window_hidden: true,
             confirm_running_tunnels_on_quit: true,
+            running_tunnels_on_quit_default_action: RunningTunnelsOnQuitDefaultAction::Stop,
             show_tracked_runtime_bar: true,
             favorite_tunnel_runtime_ids: Vec::new(),
             auto_recover_tunnel_runtime_ids: Vec::new(),
@@ -3079,6 +3274,7 @@ impl Default for AppPreferencesFile {
             hide_dock_icon_when_window_hidden: None,
             confirm_running_tunnels_on_quit: None,
             auto_stop_tunnels_on_quit: None,
+            running_tunnels_on_quit_default_action: None,
             show_tracked_runtime_bar: None,
             hide_tracked_runtime_bar: None,
             favorite_tunnel_runtime_ids: Vec::new(),
@@ -3110,6 +3306,9 @@ impl From<AppPreferencesFile> for AppPreferences {
                         .unwrap_or(true)
                 },
             ),
+            running_tunnels_on_quit_default_action: file
+                .running_tunnels_on_quit_default_action
+                .unwrap_or_default(),
             show_tracked_runtime_bar: file.show_tracked_runtime_bar.unwrap_or_else(|| {
                 file.hide_tracked_runtime_bar
                     .map(|should_hide| !should_hide)
@@ -3157,6 +3356,7 @@ struct PathView {
     workspace_state_exists: bool,
     show_dock_icon_when_window_hidden: bool,
     confirm_running_tunnels_on_quit: bool,
+    running_tunnels_on_quit_default_action: RunningTunnelsOnQuitDefaultAction,
     show_tracked_runtime_bar: bool,
 }
 
@@ -4764,6 +4964,12 @@ fn apply_workspace_selection(
         preferences.confirm_running_tunnels_on_quit = confirm_running_tunnels_on_quit;
     }
 
+    if let Some(running_tunnels_on_quit_default_action) =
+        selection.running_tunnels_on_quit_default_action
+    {
+        preferences.running_tunnels_on_quit_default_action = running_tunnels_on_quit_default_action;
+    }
+
     if let Some(show_tracked_runtime_bar) = selection.show_tracked_runtime_bar {
         preferences.show_tracked_runtime_bar = show_tracked_runtime_bar;
     }
@@ -5479,6 +5685,9 @@ fn path_view(paths: &RuntimePaths) -> PathView {
             .is_some_and(Path::exists),
         show_dock_icon_when_window_hidden: paths.preferences.show_dock_icon_when_window_hidden,
         confirm_running_tunnels_on_quit: paths.preferences.confirm_running_tunnels_on_quit,
+        running_tunnels_on_quit_default_action: paths
+            .preferences
+            .running_tunnels_on_quit_default_action,
         show_tracked_runtime_bar: paths.preferences.show_tracked_runtime_bar,
     }
 }
@@ -7243,6 +7452,10 @@ use_global = true
         assert_eq!(preferences.version, APP_PREFERENCES_VERSION);
         assert!(preferences.show_dock_icon_when_window_hidden);
         assert!(preferences.confirm_running_tunnels_on_quit);
+        assert_eq!(
+            preferences.running_tunnels_on_quit_default_action,
+            RunningTunnelsOnQuitDefaultAction::Stop
+        );
         assert!(preferences.show_tracked_runtime_bar);
         assert!(preferences.favorite_tunnel_runtime_ids.is_empty());
         assert!(preferences.auto_recover_tunnel_runtime_ids.is_empty());
@@ -7270,6 +7483,10 @@ hide_tracked_runtime_bar = true
 
         assert!(!preferences.show_dock_icon_when_window_hidden);
         assert!(!preferences.confirm_running_tunnels_on_quit);
+        assert_eq!(
+            preferences.running_tunnels_on_quit_default_action,
+            RunningTunnelsOnQuitDefaultAction::Stop
+        );
         assert!(!preferences.show_tracked_runtime_bar);
     }
 
@@ -7288,6 +7505,7 @@ show_dock_icon_when_window_hidden = true
 hide_dock_icon_when_window_hidden = true
 confirm_running_tunnels_on_quit = true
 auto_stop_tunnels_on_quit = true
+running_tunnels_on_quit_default_action = "keep"
 show_tracked_runtime_bar = true
 hide_tracked_runtime_bar = true
 "#,
@@ -7298,6 +7516,10 @@ hide_tracked_runtime_bar = true
 
         assert!(preferences.show_dock_icon_when_window_hidden);
         assert!(preferences.confirm_running_tunnels_on_quit);
+        assert_eq!(
+            preferences.running_tunnels_on_quit_default_action,
+            RunningTunnelsOnQuitDefaultAction::Keep
+        );
         assert!(preferences.show_tracked_runtime_bar);
     }
 
@@ -7309,6 +7531,7 @@ hide_tracked_runtime_bar = true
         let preferences = AppPreferences {
             show_dock_icon_when_window_hidden: false,
             confirm_running_tunnels_on_quit: false,
+            running_tunnels_on_quit_default_action: RunningTunnelsOnQuitDefaultAction::Keep,
             show_tracked_runtime_bar: false,
             ..AppPreferences::default()
         };
@@ -7319,9 +7542,14 @@ hide_tracked_runtime_bar = true
 
         assert!(!persisted.show_dock_icon_when_window_hidden);
         assert!(!persisted.confirm_running_tunnels_on_quit);
+        assert_eq!(
+            persisted.running_tunnels_on_quit_default_action,
+            RunningTunnelsOnQuitDefaultAction::Keep
+        );
         assert!(!persisted.show_tracked_runtime_bar);
         assert!(content.contains("show_dock_icon_when_window_hidden = false"));
         assert!(content.contains("confirm_running_tunnels_on_quit = false"));
+        assert!(content.contains("running_tunnels_on_quit_default_action = \"keep\""));
         assert!(content.contains("show_tracked_runtime_bar = false"));
         assert!(!content.contains("hide_dock_icon_when_window_hidden"));
         assert!(!content.contains("auto_stop_tunnels_on_quit"));
@@ -7412,6 +7640,7 @@ hide_tracked_runtime_bar = true
                 use_global: None,
                 show_dock_icon_when_window_hidden: Some(true),
                 confirm_running_tunnels_on_quit: None,
+                running_tunnels_on_quit_default_action: None,
                 show_tracked_runtime_bar: None,
             },
         )
@@ -7433,12 +7662,40 @@ hide_tracked_runtime_bar = true
                 use_global: None,
                 show_dock_icon_when_window_hidden: None,
                 confirm_running_tunnels_on_quit: Some(true),
+                running_tunnels_on_quit_default_action: None,
                 show_tracked_runtime_bar: None,
             },
         )
         .expect("apply quit confirmation preference");
 
         assert!(preferences.confirm_running_tunnels_on_quit);
+    }
+
+    /// ワークスペース選択入力から終了時既定動作設定が反映されることを検証する
+    #[test]
+    fn workspace_selection_updates_running_tunnels_on_quit_default_action() {
+        let mut preferences = AppPreferences::default();
+
+        apply_workspace_selection(
+            &mut preferences,
+            WorkspaceSelection {
+                workspace_path: None,
+                global_config_path: None,
+                use_global: None,
+                show_dock_icon_when_window_hidden: None,
+                confirm_running_tunnels_on_quit: None,
+                running_tunnels_on_quit_default_action: Some(
+                    RunningTunnelsOnQuitDefaultAction::Keep,
+                ),
+                show_tracked_runtime_bar: None,
+            },
+        )
+        .expect("apply quit default action preference");
+
+        assert_eq!(
+            preferences.running_tunnels_on_quit_default_action,
+            RunningTunnelsOnQuitDefaultAction::Keep
+        );
     }
 
     /// ワークスペース選択入力から Tracked runtimeバー表示設定が反映されることを検証する
@@ -7454,6 +7711,7 @@ hide_tracked_runtime_bar = true
                 use_global: None,
                 show_dock_icon_when_window_hidden: None,
                 confirm_running_tunnels_on_quit: None,
+                running_tunnels_on_quit_default_action: None,
                 show_tracked_runtime_bar: Some(true),
             },
         )
@@ -7477,6 +7735,7 @@ hide_tracked_runtime_bar = true
                 use_global: None,
                 show_dock_icon_when_window_hidden: None,
                 confirm_running_tunnels_on_quit: None,
+                running_tunnels_on_quit_default_action: None,
                 show_tracked_runtime_bar: None,
             },
         )
@@ -7489,6 +7748,7 @@ hide_tracked_runtime_bar = true
                 use_global: None,
                 show_dock_icon_when_window_hidden: None,
                 confirm_running_tunnels_on_quit: None,
+                running_tunnels_on_quit_default_action: None,
                 show_tracked_runtime_bar: None,
             },
         )
@@ -7501,6 +7761,7 @@ hide_tracked_runtime_bar = true
                 use_global: None,
                 show_dock_icon_when_window_hidden: None,
                 confirm_running_tunnels_on_quit: None,
+                running_tunnels_on_quit_default_action: None,
                 show_tracked_runtime_bar: None,
             },
         )
@@ -7538,6 +7799,7 @@ hide_tracked_runtime_bar = true
                     use_global: None,
                     show_dock_icon_when_window_hidden: None,
                     confirm_running_tunnels_on_quit: None,
+                    running_tunnels_on_quit_default_action: None,
                     show_tracked_runtime_bar: None,
                 },
             )
@@ -7587,6 +7849,7 @@ hide_tracked_runtime_bar = true
                 use_global: None,
                 show_dock_icon_when_window_hidden: None,
                 confirm_running_tunnels_on_quit: None,
+                running_tunnels_on_quit_default_action: None,
                 show_tracked_runtime_bar: None,
             },
         )
@@ -7601,6 +7864,7 @@ hide_tracked_runtime_bar = true
                 use_global: None,
                 show_dock_icon_when_window_hidden: None,
                 confirm_running_tunnels_on_quit: None,
+                running_tunnels_on_quit_default_action: None,
                 show_tracked_runtime_bar: None,
             },
         )
@@ -7631,6 +7895,7 @@ hide_tracked_runtime_bar = true
                 use_global: None,
                 show_dock_icon_when_window_hidden: None,
                 confirm_running_tunnels_on_quit: None,
+                running_tunnels_on_quit_default_action: None,
                 show_tracked_runtime_bar: None,
             },
         )
@@ -7645,6 +7910,7 @@ hide_tracked_runtime_bar = true
                 use_global: None,
                 show_dock_icon_when_window_hidden: None,
                 confirm_running_tunnels_on_quit: None,
+                running_tunnels_on_quit_default_action: None,
                 show_tracked_runtime_bar: None,
             },
         )
@@ -8092,6 +8358,17 @@ hide_tracked_runtime_bar = true
         .expect("run operation with lock");
 
         assert!(operation_ran);
+    }
+
+    /// アプリ上部メニュー ID が終了確認へ進む操作を含むことを検証する
+    #[test]
+    fn app_menu_action_maps_settings_and_quit_items() {
+        assert_eq!(
+            app_menu_action(APP_MENU_SETTINGS),
+            Some(AppMenuAction::OpenSettings)
+        );
+        assert_eq!(app_menu_action(APP_MENU_QUIT), Some(AppMenuAction::Quit));
+        assert_eq!(app_menu_action("unknown"), None);
     }
 
     /// トレイメニューのトップレベル順序が Global、Local、Other の区分を表すことを検証する
@@ -8885,12 +9162,38 @@ hide_tracked_runtime_bar = true
         );
     }
 
-    /// 終了時確認設定が起動中トンネルの扱いを切り替えることを検証する
+    /// 抑止チェック付きダイアログ結果が保存対象の終了時既定動作へ変換されることを検証する
+    #[test]
+    fn quit_dialog_default_action_preference_reflects_suppressed_action() {
+        assert_eq!(
+            quit_dialog_default_action_preference(QuitDialogAction::StopAndQuit, true),
+            Some(RunningTunnelsOnQuitDefaultAction::Stop)
+        );
+        assert_eq!(
+            quit_dialog_default_action_preference(QuitDialogAction::QuitOnly, true),
+            Some(RunningTunnelsOnQuitDefaultAction::Keep)
+        );
+        assert_eq!(
+            quit_dialog_default_action_preference(QuitDialogAction::Cancel, true),
+            None
+        );
+        assert_eq!(
+            quit_dialog_default_action_preference(QuitDialogAction::StopAndQuit, false),
+            None
+        );
+    }
+
+    /// 終了時確認設定と既定動作が起動中トンネルの扱いを切り替えることを検証する
     #[test]
     fn quit_running_tunnels_action_reflects_confirmation_preference() {
         let prompt_preferences = AppPreferences::default();
         let auto_stop_preferences = AppPreferences {
             confirm_running_tunnels_on_quit: false,
+            ..AppPreferences::default()
+        };
+        let quit_only_preferences = AppPreferences {
+            confirm_running_tunnels_on_quit: false,
+            running_tunnels_on_quit_default_action: RunningTunnelsOnQuitDefaultAction::Keep,
             ..AppPreferences::default()
         };
 
@@ -8900,7 +9203,11 @@ hide_tracked_runtime_bar = true
         );
         assert_eq!(
             quit_running_tunnels_action(&auto_stop_preferences),
-            QuitRunningTunnelsAction::AutoStop
+            QuitRunningTunnelsAction::StopAndQuit
+        );
+        assert_eq!(
+            quit_running_tunnels_action(&quit_only_preferences),
+            QuitRunningTunnelsAction::QuitOnly
         );
     }
 

@@ -1085,7 +1085,11 @@ function App(): ReactElement {
   }, [updateRuntimeNowForDashboard]);
 
   const runAutoRefresh = useStableEvent((): void => {
-    if (autoRefreshInFlightRef.current || operationInFlightRef.current) {
+    if (
+      document.visibilityState !== "visible" ||
+      autoRefreshInFlightRef.current ||
+      operationInFlightRef.current
+    ) {
       return;
     }
 

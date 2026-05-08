@@ -6152,6 +6152,10 @@ fn auto_recover_current_stale_tunnels(
     now: u64,
 ) -> Result<AutoRecoverReport, AppError> {
     let runtime_paths = resolve_runtime_paths(app, None)?;
+    if auto_recover_scan_can_be_skipped(&runtime_paths, worker_state) {
+        return Ok(AutoRecoverReport::default());
+    }
+
     let config = load_effective_config(&runtime_paths.config_paths)?;
 
     if !config.has_sources() {
@@ -6169,6 +6173,15 @@ fn auto_recover_current_stale_tunnels(
     report.extend(start_auto_recover_targets(&targets, worker_state, now));
 
     Ok(report)
+}
+
+/// 自動復旧スキャンを省略できるか判定する
+fn auto_recover_scan_can_be_skipped(
+    paths: &RuntimePaths,
+    worker_state: &AutoRecoverWorkerState,
+) -> bool {
+    paths.preferences.auto_recover_tunnel_runtime_ids.is_empty()
+        && worker_state.pending_confirmations.is_empty()
 }
 
 /// 現在の state から watched stale トンネルを収集する
@@ -8950,6 +8963,46 @@ show_tracked_runtime_bar = true
             .collect::<Vec<_>>();
 
         assert_eq!(ids, vec!["global-db", "active-db"]);
+    }
+
+    /// 自動復旧対象も確認待ちもない場合にスキャン省略可能と判定することを検証する
+    #[test]
+    fn auto_recover_scan_can_be_skipped_without_watched_tunnels_or_pending_confirmations() {
+        let paths = runtime_paths_with_preferences(AppPreferences::default());
+        let worker_state = AutoRecoverWorkerState::default();
+
+        assert!(auto_recover_scan_can_be_skipped(&paths, &worker_state));
+    }
+
+    /// 自動復旧対象がある場合にスキャンを省略しないことを検証する
+    #[test]
+    fn auto_recover_scan_cannot_be_skipped_with_watched_tunnels() {
+        let preferences = AppPreferences {
+            auto_recover_tunnel_runtime_ids: vec!["local:fwd-deck.toml:db".to_owned()],
+            ..AppPreferences::default()
+        };
+        let paths = runtime_paths_with_preferences(preferences);
+        let worker_state = AutoRecoverWorkerState::default();
+
+        assert!(!auto_recover_scan_can_be_skipped(&paths, &worker_state));
+    }
+
+    /// 確認待ちがある場合にスキャンを省略しないことを検証する
+    #[test]
+    fn auto_recover_scan_cannot_be_skipped_with_pending_confirmations() {
+        let runtime_id = "local:fwd-deck.toml:db".to_owned();
+        let paths = runtime_paths_with_preferences(AppPreferences::default());
+        let mut worker_state = AutoRecoverWorkerState::default();
+        worker_state.pending_confirmations.insert(
+            runtime_id,
+            AutoRecoverPendingConfirmation {
+                id: "db".to_owned(),
+                runtime_scope: RuntimeScope::Workspace,
+                confirm_after_unix_seconds: 100,
+            },
+        );
+
+        assert!(!auto_recover_scan_can_be_skipped(&paths, &worker_state));
     }
 
     /// 確認待ちの自動復旧が running 確認後に成功になることを検証する

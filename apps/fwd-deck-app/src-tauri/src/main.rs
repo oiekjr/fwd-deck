@@ -906,12 +906,29 @@ fn handle_tray_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent)
     }
 }
 
-/// トレイからの単体トンネル操作を実行する
+/// トレイからのトンネル操作をバックグラウンドへ委譲する
 fn handle_tray_tunnel_action(app: &tauri::AppHandle, action: TrayTunnelAction) {
+    let app_for_worker = app.clone();
+    let app_for_error = app.clone();
+
+    let result = thread::Builder::new()
+        .name("tray-tunnel-action".to_owned())
+        .spawn(move || {
+            execute_tray_tunnel_action(&app_for_worker, action);
+        });
+
+    if let Err(error) = result {
+        emit_tray_operation_error(
+            &app_for_error,
+            format!("トレイ操作を開始できませんでした: {error}"),
+        );
+    }
+}
+
+/// トレイからのトンネル操作を実行して結果を通知する
+fn execute_tray_tunnel_action(app: &tauri::AppHandle, action: TrayTunnelAction) {
     let operation_lock = app.state::<OperationLockState>();
-    let result = with_operation_lock(&operation_lock, || {
-        run_tray_tunnel_action(app, action.clone())
-    });
+    let result = with_operation_lock(&operation_lock, || run_tray_tunnel_action(app, action));
 
     let _ = rebuild_tray_menu(app);
 
@@ -921,7 +938,7 @@ fn handle_tray_tunnel_action(app: &tauri::AppHandle, action: TrayTunnelAction) {
     }
 }
 
-/// トレイの単体操作を既存 start / stop 処理へ委譲する
+/// トレイのトンネル操作を既存 start / stop 処理へ委譲する
 fn run_tray_tunnel_action(
     app: &tauri::AppHandle,
     action: TrayTunnelAction,

@@ -420,12 +420,18 @@ impl RuntimeStatusProbe {
             .into_iter()
             .map(|pid| (pid, process_is_running(pid)))
             .collect::<HashMap<_, _>>();
+        let running_pids = states
+            .iter()
+            .map(|state| state.pid)
+            .filter(|pid| pid_is_running.get(pid).copied().unwrap_or(false))
+            .collect::<HashSet<_>>();
         let local_ports = states
             .iter()
-            .filter(|state| pid_is_running.get(&state.pid).copied().unwrap_or(false))
+            .filter(|state| running_pids.contains(&state.pid))
             .map(|state| state.local_port)
             .collect::<HashSet<_>>();
-        let local_port_processes = find_local_port_processes_by_ports(&local_ports);
+        let local_port_processes =
+            find_local_port_processes_by_ports_for_pids(&local_ports, &running_pids);
 
         Self {
             pid_is_running,
@@ -639,19 +645,42 @@ fn find_local_port_processes(local_port: u16) -> LocalPortProcesses {
 
 /// 指定PIDが local port をLISTENしているかを判定する
 fn local_port_is_listening_for_pid(pid: u32, local_port: u16) -> bool {
-    find_local_port_processes(local_port).contains_pid(pid)
+    find_local_port_processes_by_ports_for_pids(&HashSet::from([local_port]), &HashSet::from([pid]))
+        .remove(&local_port)
+        .unwrap_or_default()
+        .contains_pid(pid)
 }
 
 /// 複数ローカルポートの LISTEN プロセスを 1 回の lsof で取得する
 fn find_local_port_processes_by_ports(
     local_ports: &HashSet<u16>,
 ) -> HashMap<u16, LocalPortProcesses> {
-    if local_ports.is_empty() {
+    find_local_port_processes_by_ports_with_pid_filter(local_ports, None)
+}
+
+/// 指定PIDが使う複数ローカルポートの LISTEN プロセスを取得する
+fn find_local_port_processes_by_ports_for_pids(
+    local_ports: &HashSet<u16>,
+    pids: &HashSet<u32>,
+) -> HashMap<u16, LocalPortProcesses> {
+    find_local_port_processes_by_ports_with_pid_filter(local_ports, Some(pids))
+}
+
+/// 必要に応じて PID を絞り込んで LISTEN プロセスを取得する
+fn find_local_port_processes_by_ports_with_pid_filter(
+    local_ports: &HashSet<u16>,
+    pids: Option<&HashSet<u32>>,
+) -> HashMap<u16, LocalPortProcesses> {
+    if local_ports.is_empty() || pids.is_some_and(HashSet::is_empty) {
         return HashMap::new();
     }
 
     let mut command = Command::new("lsof");
     command.arg("-nP");
+
+    if let Some(pids) = pids {
+        command.arg("-a").arg("-p").arg(lsof_pid_list(pids));
+    }
 
     for local_port in local_ports {
         command.arg(format!("-iTCP:{local_port}"));
@@ -675,6 +704,17 @@ fn find_local_port_processes_by_ports(
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     group_local_port_processes_by_port(parse_lsof_processes(&stdout), local_ports)
+}
+
+/// lsof の PID 絞り込み引数を生成する
+fn lsof_pid_list(pids: &HashSet<u32>) -> String {
+    let mut pids = pids.iter().copied().collect::<Vec<_>>();
+    pids.sort_unstable();
+
+    pids.into_iter()
+        .map(|pid| pid.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// lsof の field 出力からプロセス情報を抽出する
@@ -1276,6 +1316,16 @@ n127.0.0.1:25432 (LISTEN)
             }]))
         );
         assert!(!grouped.contains_key(&5432));
+    }
+
+    /// lsof の PID 絞り込み引数が安定した順序で生成されることを検証する
+    #[test]
+    fn lsof_pid_list_sorts_pids() {
+        let pids = HashSet::from([42, 7, 100]);
+
+        let pid_list = lsof_pid_list(&pids);
+
+        assert_eq!(pid_list, "7,42,100");
     }
 
     /// ポート使用プロセス情報がエラー表示へ含まれることを検証する

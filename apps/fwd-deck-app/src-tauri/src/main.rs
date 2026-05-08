@@ -5581,11 +5581,13 @@ fn validate_new_tunnels(
     kind: ConfigSourceKind,
     tunnels: &[TunnelConfig],
 ) -> Result<(), AppError> {
+    let index = ScopedTunnelValidationIndex::new(config, kind);
     let mut names = HashSet::new();
     let mut local_ports = HashMap::<u16, String>::new();
 
     for tunnel in tunnels {
-        validate_new_tunnel(config, kind, tunnel)?;
+        validate_tunnel_fields(tunnel)?;
+        validate_new_tunnel_against_index(&index, tunnel)?;
 
         if !names.insert(tunnel.name.clone()) {
             return Err(AppError::InvalidInput(format!(
@@ -5600,6 +5602,62 @@ fn validate_new_tunnels(
                 tunnel.local_port
             )));
         }
+    }
+
+    Ok(())
+}
+
+/// 追加検証用に同一 scope の既存トンネルを索引化する
+#[derive(Debug)]
+struct ScopedTunnelValidationIndex<'a> {
+    by_name: HashMap<&'a str, &'a ResolvedTunnelConfig>,
+    by_local_port: HashMap<u16, &'a ResolvedTunnelConfig>,
+}
+
+impl<'a> ScopedTunnelValidationIndex<'a> {
+    /// 統合済み設定から指定 scope の検証索引を初期化する
+    fn new(config: &'a EffectiveConfig, kind: ConfigSourceKind) -> Self {
+        let mut by_name = HashMap::new();
+        let mut by_local_port = HashMap::new();
+
+        for resolved in &config.tunnels {
+            if resolved.source.kind != kind {
+                continue;
+            }
+
+            by_name
+                .entry(resolved.tunnel.name.as_str())
+                .or_insert(resolved);
+            by_local_port
+                .entry(resolved.tunnel.local_port)
+                .or_insert(resolved);
+        }
+
+        Self {
+            by_name,
+            by_local_port,
+        }
+    }
+}
+
+/// 追加候補が既存トンネルと競合しないことを検証する
+fn validate_new_tunnel_against_index(
+    index: &ScopedTunnelValidationIndex<'_>,
+    tunnel: &TunnelConfig,
+) -> Result<(), AppError> {
+    if let Some(existing) = index.by_name.get(tunnel.name.as_str()) {
+        return Err(AppError::InvalidInput(format!(
+            "同じ name のトンネルが既に存在します: {} ({})",
+            existing.tunnel.name,
+            format_path_for_display(&existing.source.path)
+        )));
+    }
+
+    if let Some(existing) = index.by_local_port.get(&tunnel.local_port) {
+        return Err(AppError::InvalidInput(format!(
+            "local_port は既存トンネルと重複しています: {} ({})",
+            tunnel.local_port, existing.tunnel.name
+        )));
     }
 
     Ok(())
@@ -9395,6 +9453,39 @@ show_tracked_runtime_bar = true
 
         assert!(
             matches!(result, Err(AppError::InvalidInput(message)) if message.contains("local_port"))
+        );
+    }
+
+    /// 複数追加時に既存 name 重複が一括検証で拒否されることを検証する
+    #[test]
+    fn validate_new_tunnels_rejects_existing_duplicate_name() {
+        let source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml"));
+        let config = EffectiveConfig::new(
+            Vec::new(),
+            vec![ResolvedTunnelConfig::new(
+                source,
+                tunnel_config("db", 15432),
+            )],
+        );
+        let tunnels = vec![tunnel_config("cache", 16379), tunnel_config("db", 25432)];
+
+        let result = validate_new_tunnels(&config, ConfigSourceKind::Local, &tunnels);
+
+        assert!(
+            matches!(result, Err(AppError::InvalidInput(message)) if message.contains("同じ name"))
+        );
+    }
+
+    /// 複数追加時に候補内 local_port 重複が拒否されることを検証する
+    #[test]
+    fn validate_new_tunnels_rejects_candidate_duplicate_local_port() {
+        let config = EffectiveConfig::new(Vec::new(), Vec::new());
+        let tunnels = vec![tunnel_config("db", 15432), tunnel_config("cache", 15432)];
+
+        let result = validate_new_tunnels(&config, ConfigSourceKind::Local, &tunnels);
+
+        assert!(
+            matches!(result, Err(AppError::InvalidInput(message)) if message.contains("追加候補内で local_port"))
         );
     }
 

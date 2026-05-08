@@ -120,16 +120,16 @@ fwd-deck open
 fwd-deck open ~/projects/my-service
 ```
 
-現在のディレクトリ、または指定した `PATH` を macOSアプリの Workspace として開きます。
-`PATH` は既存ディレクトリである必要があります。
-相対パスは CLI の現在ディレクトリを基準に解決します。
+現在のディレクトリ、または指定した `PATH` を macOSアプリの Workspace として開きます。  
+`PATH` は既存ディレクトリである必要があります。  
+相対パスは CLI の現在ディレクトリを基準に解決します。  
 起動要求に成功した場合は、`Fwd Deck.app で Workspace を開きました: ...` の形式で開いた Workspace の絶対パスを標準出力へ表示します。
 
-macOSアプリがすでに起動中の場合は、新しいウィンドウを作らずに既存ウィンドウで Workspace を切り替えます。
-Workspace 切り替え時は旧 Workspace の localスコープのトンネルを停止し、globalスコープのトンネルは維持します。
+macOSアプリがすでに起動中の場合は、新しいウィンドウを作らずに既存ウィンドウで Workspace を切り替えます。  
+Workspace 切り替え時は旧 Workspace の localスコープのトンネルを停止し、globalスコープのトンネルは維持します。  
 旧 Workspace の localスコープのトンネル停止に失敗した場合は、Workspace 切り替えを中止します。
 
-macOS 以外では、`open` は macOSアプリの起動が未対応である旨をエラーとして表示します。
+macOS 以外では、`open` は macOSアプリの起動が未対応である旨をエラーとして表示します。  
 macOSアプリが未インストールの場合は、先に Homebrew cask からインストールしてください。
 
 ```sh
@@ -249,9 +249,15 @@ NAME を指定しない場合は対話選択を表示します。
 fwd-deck config add
 fwd-deck config add --scope local
 fwd-deck config add --scope global
-fwd-deck config import-ssh --scope local --name dev-db -- ssh -N -L 15432:db.example.com:5432 ec2-user@bastion.example.com
-fwd-deck config import-ssh --scope local --name-prefix imc -- ssh -N -L 15432:db.example.com:5432 -L 15433:db2.example.com:5432 ec2-user@bastion.example.com
-fwd-deck config import-ssh --scope global --command 'ssh -N -L 15432:db.example.com:5432 ec2-user@bastion.example.com'
+fwd-deck config import-ssh --scope local --name dev-db -- \
+  ssh -N -L 15432:db.example.com:5432 ec2-user@bastion.example.com
+fwd-deck config import-ssh --scope local --name-prefix imc -- \
+  ssh -N \
+    -L 15432:db.example.com:5432 \
+    -L 15433:db2.example.com:5432 \
+    ec2-user@bastion.example.com
+fwd-deck config import-ssh --scope global --command \
+  'ssh -N -L 15432:db.example.com:5432 ec2-user@bastion.example.com'
 fwd-deck config edit dev-db
 fwd-deck config edit dev-db --scope local
 fwd-deck config edit dev-db --scope global
@@ -269,22 +275,22 @@ fwd-deck config remove --scope global
 同じ `name` がローカル設定とグローバル設定の両方に存在する場合、対話実行時は編集対象を選択します。  
 非対話実行時は `--scope` を指定します。
 
-`config import-ssh` は SSHコマンドを解析し、`-L` ごとに1件の `[[tunnels]]` を追加します。
-`--command TEXT` でコマンド文字列を渡すか、`--` 以降に `ssh` コマンド引数を渡します。
-`ssh` コマンド名は含めても省略しても構いません。
+`config import-ssh` は SSHコマンドを解析し、`-L` ごとに1件の `[[tunnels]]` を追加します。  
+`--command TEXT` でコマンド文字列を渡すか、`--` 以降に `ssh` コマンド引数を渡します。  
+`ssh` コマンド名は含めても省略しても構いません。  
 複数の `-L` がある場合は複数トンネルとして追加します。
 
-`--name NAME` は `-L` が1つの場合だけ指定できます。
-複数の `-L` には `--name-prefix PREFIX` を指定すると、`PREFIX-1`, `PREFIX-2` のように連番名を生成します。
+`--name NAME` は `-L` が1つの場合だけ指定できます。  
+複数の `-L` には `--name-prefix PREFIX` を指定すると、`PREFIX-1`, `PREFIX-2` のように連番名を生成します。  
 `--name` も `--name-prefix` も省略した場合は、`tunnel-<uuid8>` 形式の名前を自動生成します。
 
-取り込み候補には既定で `imported` タグを付与します。
-付与しない場合は `--no-import-tag` を指定します。
+取り込み候補には既定で `imported` タグを付与します。  
+付与しない場合は `--no-import-tag` を指定します。  
 追加タグは `--tag TAG` を複数回指定できます。
 
-解析対象は `-L`, `-i`, `-p`, `-l`, `user@host`, `-o ConnectTimeout`, `-o ServerAliveInterval`, `-o ServerAliveCountMax` です。
-`-N`, `-v`, `-o ExitOnForwardFailure` は設定として保持する必要がないため無視します。
-その他の保持できないSSHオプションは警告として表示し、取り込み自体は継続します。
+解析対象は `-L`, `-i`, `-p`, `-l`, `user@host`, `-o ConnectTimeout`, `-o ServerAliveInterval`, `-o ServerAliveCountMax` です。  
+`-N`, `-v`, `-o ExitOnForwardFailure` は設定として保持する必要がないため無視します。  
+その他の保持できないSSHオプションは警告として表示し、取り込み自体は継続します。  
 Unixソケット転送、`-R`, `-D`、壊れた `-L`、SSHユーザー不足、転送指定なしはエラーです。
 
 `config add` はタイムアウト設定を入力しないため、新規作成時の既定値から変更する場合は TOML を直接編集します。  
@@ -329,7 +335,14 @@ fwd-deck --json validate
 fwd-deck doctor
 ```
 
-設定ファイルの有無、設定検証、状態ファイルの読み書き、`ssh` / `lsof` の起動可否、`identity_file` の存在、ローカルエンドポイントの使用状況をまとめて確認します。
+次の項目をまとめて確認します。
+
+- 設定ファイルの有無
+- 設定検証
+- 状態ファイルの読み書き
+- `ssh` / `lsof` の起動可否
+- `identity_file` の存在
+- ローカルエンドポイントの使用状況
 
 ## JSON Output
 

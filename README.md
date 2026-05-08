@@ -45,7 +45,7 @@ brew upgrade --cask fwd-deck-app
 ```
 
 CLI または macOSアプリのどちらか一方だけを更新する場合は、対象の `brew upgrade` だけを実行してください。
-macOSアプリが起動中の場合は、終了してから `brew upgrade --cask fwd-deck-app` を実行します。
+macOSアプリが起動中の場合は、終了してから `brew upgrade --cask fwd-deck-app` を実行します。  
 更新後のバージョンは次のコマンドで確認できます。
 
 ```sh
@@ -63,7 +63,7 @@ cp fwd-deck.example.toml fwd-deck.toml
 
 macOSアプリを初めて起動した場合は、グローバル設定が未作成であれば `~/.config/fwd-deck/config.toml` に同じ example 設定を自動作成します。
 
-`fwd-deck.toml` を自分の SSH接続先に合わせて編集し、設定と実行環境を確認します。
+`fwd-deck.toml` を自分の SSH接続先に合わせて編集し、設定と実行環境を確認します。  
 既存の SSHコマンドを使う場合は、`config import-ssh` で `-L` を設定ファイルへ取り込めます。
 
 ```sh
@@ -79,7 +79,7 @@ fwd-deck list
 fwd-deck start dev-db --dry-run
 ```
 
-現在のディレクトリを macOSアプリの Workspace として開く場合は `open` を使います。
+現在のディレクトリを macOSアプリの Workspace として開く場合は `open` を使います。  
 macOSアプリが未インストールの場合は、先に Homebrew cask からインストールしてください。
 
 ```sh
@@ -87,7 +87,7 @@ fwd-deck open
 fwd-deck open ~/projects/my-service
 ```
 
-既存アプリが起動中の場合は、既存ウィンドウで Workspace を切り替えます。
+既存アプリが起動中の場合は、既存ウィンドウで Workspace を切り替えます。  
 切り替え時は旧 Workspace の localスコープのトンネルを停止し、globalスコープのトンネルは維持します。
 
 アプリ表示中は `Cmd+R` または `Ctrl+R` で Dashboard を再読み込みできます。

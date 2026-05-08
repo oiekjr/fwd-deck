@@ -34,7 +34,7 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApp, NSImage};
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSData, NSProcessInfo, NSString};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 #[cfg(target_os = "macos")]
 use tauri::menu::AboutMetadata;
 use tauri::{
@@ -49,7 +49,7 @@ use tauri_plugin_dialog::{
 use thiserror::Error;
 
 const APP_PREFERENCES_FILE_NAME: &str = "preferences.toml";
-const APP_PREFERENCES_VERSION: u32 = 6;
+const APP_PREFERENCES_VERSION: u32 = 7;
 const WORKSPACE_HISTORY_LIMIT: usize = 10;
 const WORKSPACE_STATES_DIR: &str = "workspace-states";
 const STATE_FILE_NAME: &str = "state.toml";
@@ -1124,12 +1124,12 @@ fn emit_tray_operation_error(app: &tauri::AppHandle, message: String) {
 /// トレイから Dock 表示設定を切り替える
 fn handle_tray_dock_visibility_toggle(app: &tauri::AppHandle) {
     match toggle_hidden_window_dock_preference(app) {
-        Ok(should_hide) => {
+        Ok(should_show) => {
             let _ = rebuild_tray_menu(app);
-            let summary = if should_hide {
-                "ウィンドウ非表示中は Dock アイコンを隠します"
-            } else {
+            let summary = if should_show {
                 "ウィンドウ非表示中も Dock アイコンを表示します"
+            } else {
+                "ウィンドウ非表示中は Dock アイコンを隠します"
             };
 
             let _ = app.emit(
@@ -2538,7 +2538,7 @@ fn apply_hidden_window_dock_visibility(app: &tauri::AppHandle) -> Result<(), App
     let runtime_paths = resolve_runtime_paths(app, None)?;
     set_dock_visibility(
         app,
-        !runtime_paths.preferences.hide_dock_icon_when_window_hidden,
+        runtime_paths.preferences.show_dock_icon_when_window_hidden,
     )
 }
 
@@ -2549,22 +2549,22 @@ fn toggle_hidden_window_dock_preference(app: &tauri::AppHandle) -> Result<bool, 
     let mut preferences = read_preferences_file(&preferences_path)?;
 
     normalize_loaded_preferences(&mut preferences);
-    preferences.hide_dock_icon_when_window_hidden = !preferences.hide_dock_icon_when_window_hidden;
+    preferences.show_dock_icon_when_window_hidden = !preferences.show_dock_icon_when_window_hidden;
 
     let runtime_paths = runtime_paths_from_preferences(&app_config_dir, preferences)?;
     write_preferences_file(&preferences_path, &runtime_paths.preferences)?;
     apply_window_state_dock_visibility(
         app,
-        runtime_paths.preferences.hide_dock_icon_when_window_hidden,
+        runtime_paths.preferences.show_dock_icon_when_window_hidden,
     )?;
 
-    Ok(runtime_paths.preferences.hide_dock_icon_when_window_hidden)
+    Ok(runtime_paths.preferences.show_dock_icon_when_window_hidden)
 }
 
 /// 現在のウィンドウ表示状態に応じて Dock 表示設定を反映する
 fn apply_window_state_dock_visibility(
     app: &tauri::AppHandle,
-    hide_when_window_hidden: bool,
+    show_when_window_hidden: bool,
 ) -> Result<(), AppError> {
     let is_window_visible = app
         .get_webview_window(MAIN_WINDOW_LABEL)
@@ -2572,7 +2572,7 @@ fn apply_window_state_dock_visibility(
         .transpose()?
         .unwrap_or(false);
 
-    set_dock_visibility(app, is_window_visible || !hide_when_window_hidden)
+    set_dock_visibility(app, is_window_visible || show_when_window_hidden)
 }
 
 /// Dock 表示状態を切り替える
@@ -2829,10 +2829,10 @@ fn collect_quit_tunnel_context(app: &tauri::AppHandle) -> Result<QuitTunnelConte
 
 /// アプリ設定から終了時の起動中トンネル処理を決定する
 fn quit_running_tunnels_action(preferences: &AppPreferences) -> QuitRunningTunnelsAction {
-    if preferences.auto_stop_tunnels_on_quit {
-        QuitRunningTunnelsAction::AutoStop
-    } else {
+    if preferences.confirm_running_tunnels_on_quit {
         QuitRunningTunnelsAction::Prompt
+    } else {
+        QuitRunningTunnelsAction::AutoStop
     }
 }
 
@@ -3009,24 +3009,41 @@ struct WorkspaceSelection {
     workspace_path: Option<String>,
     global_config_path: Option<String>,
     use_global: Option<bool>,
-    hide_dock_icon_when_window_hidden: Option<bool>,
-    auto_stop_tunnels_on_quit: Option<bool>,
-    hide_tracked_runtime_bar: Option<bool>,
+    show_dock_icon_when_window_hidden: Option<bool>,
+    confirm_running_tunnels_on_quit: Option<bool>,
+    show_tracked_runtime_bar: Option<bool>,
 }
 
 /// アプリ固有の設定を表現する
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct AppPreferences {
     version: u32,
     active_workspace_path: Option<PathBuf>,
     workspace_history: Vec<PathBuf>,
     use_global: bool,
     global_config_path: Option<PathBuf>,
-    hide_dock_icon_when_window_hidden: bool,
-    auto_stop_tunnels_on_quit: bool,
-    #[serde(alias = "show_tracked_runtime_bar")]
-    hide_tracked_runtime_bar: bool,
+    show_dock_icon_when_window_hidden: bool,
+    confirm_running_tunnels_on_quit: bool,
+    show_tracked_runtime_bar: bool,
+    favorite_tunnel_runtime_ids: Vec<String>,
+    auto_recover_tunnel_runtime_ids: Vec<String>,
+}
+
+/// preferences.toml の新旧キーを読み込むための中間表現を保持する
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct AppPreferencesFile {
+    version: u32,
+    active_workspace_path: Option<PathBuf>,
+    workspace_history: Vec<PathBuf>,
+    use_global: bool,
+    global_config_path: Option<PathBuf>,
+    show_dock_icon_when_window_hidden: Option<bool>,
+    hide_dock_icon_when_window_hidden: Option<bool>,
+    confirm_running_tunnels_on_quit: Option<bool>,
+    auto_stop_tunnels_on_quit: Option<bool>,
+    show_tracked_runtime_bar: Option<bool>,
+    hide_tracked_runtime_bar: Option<bool>,
     favorite_tunnel_runtime_ids: Vec<String>,
     auto_recover_tunnel_runtime_ids: Vec<String>,
 }
@@ -3040,12 +3057,77 @@ impl Default for AppPreferences {
             workspace_history: Vec::new(),
             use_global: true,
             global_config_path: None,
-            hide_dock_icon_when_window_hidden: false,
-            auto_stop_tunnels_on_quit: false,
-            hide_tracked_runtime_bar: false,
+            show_dock_icon_when_window_hidden: true,
+            confirm_running_tunnels_on_quit: true,
+            show_tracked_runtime_bar: true,
             favorite_tunnel_runtime_ids: Vec::new(),
             auto_recover_tunnel_runtime_ids: Vec::new(),
         }
+    }
+}
+
+impl Default for AppPreferencesFile {
+    /// 既定の読み込み用 preferences を初期化する
+    fn default() -> Self {
+        Self {
+            version: APP_PREFERENCES_VERSION,
+            active_workspace_path: None,
+            workspace_history: Vec::new(),
+            use_global: true,
+            global_config_path: None,
+            show_dock_icon_when_window_hidden: None,
+            hide_dock_icon_when_window_hidden: None,
+            confirm_running_tunnels_on_quit: None,
+            auto_stop_tunnels_on_quit: None,
+            show_tracked_runtime_bar: None,
+            hide_tracked_runtime_bar: None,
+            favorite_tunnel_runtime_ids: Vec::new(),
+            auto_recover_tunnel_runtime_ids: Vec::new(),
+        }
+    }
+}
+
+impl From<AppPreferencesFile> for AppPreferences {
+    /// 読み込み用 preferences を実効設定へ変換する
+    fn from(file: AppPreferencesFile) -> Self {
+        Self {
+            version: file.version,
+            active_workspace_path: file.active_workspace_path,
+            workspace_history: file.workspace_history,
+            use_global: file.use_global,
+            global_config_path: file.global_config_path,
+            show_dock_icon_when_window_hidden: file
+                .show_dock_icon_when_window_hidden
+                .unwrap_or_else(|| {
+                    file.hide_dock_icon_when_window_hidden
+                        .map(|should_hide| !should_hide)
+                        .unwrap_or(true)
+                }),
+            confirm_running_tunnels_on_quit: file.confirm_running_tunnels_on_quit.unwrap_or_else(
+                || {
+                    file.auto_stop_tunnels_on_quit
+                        .map(|should_auto_stop| !should_auto_stop)
+                        .unwrap_or(true)
+                },
+            ),
+            show_tracked_runtime_bar: file.show_tracked_runtime_bar.unwrap_or_else(|| {
+                file.hide_tracked_runtime_bar
+                    .map(|should_hide| !should_hide)
+                    .unwrap_or(true)
+            }),
+            favorite_tunnel_runtime_ids: file.favorite_tunnel_runtime_ids,
+            auto_recover_tunnel_runtime_ids: file.auto_recover_tunnel_runtime_ids,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AppPreferences {
+    /// 旧キーを含む preferences を肯定形設定へ読み込む
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        AppPreferencesFile::deserialize(deserializer).map(AppPreferences::from)
     }
 }
 
@@ -3073,9 +3155,9 @@ struct PathView {
     workspace_state_path: String,
     global_state_exists: bool,
     workspace_state_exists: bool,
-    hide_dock_icon_when_window_hidden: bool,
-    auto_stop_tunnels_on_quit: bool,
-    hide_tracked_runtime_bar: bool,
+    show_dock_icon_when_window_hidden: bool,
+    confirm_running_tunnels_on_quit: bool,
+    show_tracked_runtime_bar: bool,
 }
 
 /// CLI integration の状態種別を表現する
@@ -4674,16 +4756,16 @@ fn apply_workspace_selection(
         preferences.global_config_path = non_empty_path(Some(global_config_path));
     }
 
-    if let Some(hide_dock_icon_when_window_hidden) = selection.hide_dock_icon_when_window_hidden {
-        preferences.hide_dock_icon_when_window_hidden = hide_dock_icon_when_window_hidden;
+    if let Some(show_dock_icon_when_window_hidden) = selection.show_dock_icon_when_window_hidden {
+        preferences.show_dock_icon_when_window_hidden = show_dock_icon_when_window_hidden;
     }
 
-    if let Some(auto_stop_tunnels_on_quit) = selection.auto_stop_tunnels_on_quit {
-        preferences.auto_stop_tunnels_on_quit = auto_stop_tunnels_on_quit;
+    if let Some(confirm_running_tunnels_on_quit) = selection.confirm_running_tunnels_on_quit {
+        preferences.confirm_running_tunnels_on_quit = confirm_running_tunnels_on_quit;
     }
 
-    if let Some(hide_tracked_runtime_bar) = selection.hide_tracked_runtime_bar {
-        preferences.hide_tracked_runtime_bar = hide_tracked_runtime_bar;
+    if let Some(show_tracked_runtime_bar) = selection.show_tracked_runtime_bar {
+        preferences.show_tracked_runtime_bar = show_tracked_runtime_bar;
     }
 
     Ok(())
@@ -5395,9 +5477,9 @@ fn path_view(paths: &RuntimePaths) -> PathView {
             .workspace_state_path
             .as_deref()
             .is_some_and(Path::exists),
-        hide_dock_icon_when_window_hidden: paths.preferences.hide_dock_icon_when_window_hidden,
-        auto_stop_tunnels_on_quit: paths.preferences.auto_stop_tunnels_on_quit,
-        hide_tracked_runtime_bar: paths.preferences.hide_tracked_runtime_bar,
+        show_dock_icon_when_window_hidden: paths.preferences.show_dock_icon_when_window_hidden,
+        confirm_running_tunnels_on_quit: paths.preferences.confirm_running_tunnels_on_quit,
+        show_tracked_runtime_bar: paths.preferences.show_tracked_runtime_bar,
     }
 }
 
@@ -7140,7 +7222,7 @@ mod tests {
         assert!(fs::symlink_metadata(&fixture.install_path).is_err());
     }
 
-    /// version 1 の preferences が現在の既定値で補完されることを検証する
+    /// version 1 の preferences が現在の肯定形既定値で補完されることを検証する
     #[test]
     fn version_one_preferences_are_normalized_to_current_defaults() {
         let temp_dir = TempDir::new().expect("create a temporary directory");
@@ -7159,16 +7241,16 @@ use_global = true
         normalize_loaded_preferences(&mut preferences);
 
         assert_eq!(preferences.version, APP_PREFERENCES_VERSION);
-        assert!(!preferences.hide_dock_icon_when_window_hidden);
-        assert!(!preferences.auto_stop_tunnels_on_quit);
-        assert!(!preferences.hide_tracked_runtime_bar);
+        assert!(preferences.show_dock_icon_when_window_hidden);
+        assert!(preferences.confirm_running_tunnels_on_quit);
+        assert!(preferences.show_tracked_runtime_bar);
         assert!(preferences.favorite_tunnel_runtime_ids.is_empty());
         assert!(preferences.auto_recover_tunnel_runtime_ids.is_empty());
     }
 
-    /// 旧 show_tracked_runtime_bar キーを含む preferences が読み込めることを検証する
+    /// 旧否定形キーが肯定形設定へ反転して読み込まれることを検証する
     #[test]
-    fn legacy_show_tracked_runtime_bar_preference_is_accepted() {
+    fn legacy_negative_application_preferences_are_inverted() {
         let temp_dir = TempDir::new().expect("create a temporary directory");
         let path = temp_dir.path().join("preferences.toml");
         fs::write(
@@ -7177,55 +7259,57 @@ use_global = true
 version = 6
 workspace_history = []
 use_global = true
-show_tracked_runtime_bar = true
+hide_dock_icon_when_window_hidden = true
+auto_stop_tunnels_on_quit = true
+hide_tracked_runtime_bar = true
 "#,
         )
         .expect("write legacy preferences");
 
         let preferences = read_preferences_file(&path).expect("read legacy preferences");
 
-        assert!(preferences.hide_tracked_runtime_bar);
+        assert!(!preferences.show_dock_icon_when_window_hidden);
+        assert!(!preferences.confirm_running_tunnels_on_quit);
+        assert!(!preferences.show_tracked_runtime_bar);
     }
 
-    /// Dock 非表示設定が preferences に保存されることを検証する
+    /// 新旧キーが混在する場合は肯定形キーを優先することを検証する
     #[test]
-    fn dock_visibility_preference_is_persisted() {
+    fn positive_application_preferences_take_precedence_over_legacy_keys() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("preferences.toml");
+        fs::write(
+            &path,
+            r#"
+version = 7
+workspace_history = []
+use_global = true
+show_dock_icon_when_window_hidden = true
+hide_dock_icon_when_window_hidden = true
+confirm_running_tunnels_on_quit = true
+auto_stop_tunnels_on_quit = true
+show_tracked_runtime_bar = true
+hide_tracked_runtime_bar = true
+"#,
+        )
+        .expect("write mixed preferences");
+
+        let preferences = read_preferences_file(&path).expect("read mixed preferences");
+
+        assert!(preferences.show_dock_icon_when_window_hidden);
+        assert!(preferences.confirm_running_tunnels_on_quit);
+        assert!(preferences.show_tracked_runtime_bar);
+    }
+
+    /// Application設定が肯定形キーだけで preferences に保存されることを検証する
+    #[test]
+    fn application_preferences_are_persisted_with_positive_keys() {
         let temp_dir = TempDir::new().expect("create a temporary directory");
         let path = temp_dir.path().join("preferences.toml");
         let preferences = AppPreferences {
-            hide_dock_icon_when_window_hidden: true,
-            ..AppPreferences::default()
-        };
-
-        write_preferences_file(&path, &preferences).expect("write preferences");
-        let persisted = read_preferences_file(&path).expect("read preferences");
-
-        assert!(persisted.hide_dock_icon_when_window_hidden);
-    }
-
-    /// 終了時自動停止設定が preferences に保存されることを検証する
-    #[test]
-    fn auto_stop_tunnels_on_quit_preference_is_persisted() {
-        let temp_dir = TempDir::new().expect("create a temporary directory");
-        let path = temp_dir.path().join("preferences.toml");
-        let preferences = AppPreferences {
-            auto_stop_tunnels_on_quit: true,
-            ..AppPreferences::default()
-        };
-
-        write_preferences_file(&path, &preferences).expect("write preferences");
-        let persisted = read_preferences_file(&path).expect("read preferences");
-
-        assert!(persisted.auto_stop_tunnels_on_quit);
-    }
-
-    /// Tracked runtimeバー非表示設定が preferences に保存されることを検証する
-    #[test]
-    fn tracked_runtime_bar_preference_is_persisted() {
-        let temp_dir = TempDir::new().expect("create a temporary directory");
-        let path = temp_dir.path().join("preferences.toml");
-        let preferences = AppPreferences {
-            hide_tracked_runtime_bar: true,
+            show_dock_icon_when_window_hidden: false,
+            confirm_running_tunnels_on_quit: false,
+            show_tracked_runtime_bar: false,
             ..AppPreferences::default()
         };
 
@@ -7233,9 +7317,15 @@ show_tracked_runtime_bar = true
         let persisted = read_preferences_file(&path).expect("read preferences");
         let content = fs::read_to_string(&path).expect("read persisted preferences content");
 
-        assert!(persisted.hide_tracked_runtime_bar);
-        assert!(content.contains("hide_tracked_runtime_bar = true"));
-        assert!(!content.contains("show_tracked_runtime_bar"));
+        assert!(!persisted.show_dock_icon_when_window_hidden);
+        assert!(!persisted.confirm_running_tunnels_on_quit);
+        assert!(!persisted.show_tracked_runtime_bar);
+        assert!(content.contains("show_dock_icon_when_window_hidden = false"));
+        assert!(content.contains("confirm_running_tunnels_on_quit = false"));
+        assert!(content.contains("show_tracked_runtime_bar = false"));
+        assert!(!content.contains("hide_dock_icon_when_window_hidden"));
+        assert!(!content.contains("auto_stop_tunnels_on_quit"));
+        assert!(!content.contains("hide_tracked_runtime_bar"));
     }
 
     /// お気に入り runtime ID が preferences に保存されることを検証する
@@ -7309,7 +7399,7 @@ show_tracked_runtime_bar = true
         );
     }
 
-    /// ワークスペース選択入力から Dock 非表示設定が反映されることを検証する
+    /// ワークスペース選択入力から Dock 表示設定が反映されることを検証する
     #[test]
     fn workspace_selection_updates_dock_visibility_preference() {
         let mut preferences = AppPreferences::default();
@@ -7320,19 +7410,19 @@ show_tracked_runtime_bar = true
                 workspace_path: None,
                 global_config_path: None,
                 use_global: None,
-                hide_dock_icon_when_window_hidden: Some(true),
-                auto_stop_tunnels_on_quit: None,
-                hide_tracked_runtime_bar: None,
+                show_dock_icon_when_window_hidden: Some(true),
+                confirm_running_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("apply dock visibility preference");
 
-        assert!(preferences.hide_dock_icon_when_window_hidden);
+        assert!(preferences.show_dock_icon_when_window_hidden);
     }
 
-    /// ワークスペース選択入力から終了時自動停止設定が反映されることを検証する
+    /// ワークスペース選択入力から終了時確認設定が反映されることを検証する
     #[test]
-    fn workspace_selection_updates_auto_stop_tunnels_on_quit_preference() {
+    fn workspace_selection_updates_confirm_running_tunnels_on_quit_preference() {
         let mut preferences = AppPreferences::default();
 
         apply_workspace_selection(
@@ -7341,17 +7431,17 @@ show_tracked_runtime_bar = true
                 workspace_path: None,
                 global_config_path: None,
                 use_global: None,
-                hide_dock_icon_when_window_hidden: None,
-                auto_stop_tunnels_on_quit: Some(true),
-                hide_tracked_runtime_bar: None,
+                show_dock_icon_when_window_hidden: None,
+                confirm_running_tunnels_on_quit: Some(true),
+                show_tracked_runtime_bar: None,
             },
         )
-        .expect("apply quit auto-stop preference");
+        .expect("apply quit confirmation preference");
 
-        assert!(preferences.auto_stop_tunnels_on_quit);
+        assert!(preferences.confirm_running_tunnels_on_quit);
     }
 
-    /// ワークスペース選択入力から Tracked runtimeバー非表示設定が反映されることを検証する
+    /// ワークスペース選択入力から Tracked runtimeバー表示設定が反映されることを検証する
     #[test]
     fn workspace_selection_updates_tracked_runtime_bar_preference() {
         let mut preferences = AppPreferences::default();
@@ -7362,14 +7452,14 @@ show_tracked_runtime_bar = true
                 workspace_path: None,
                 global_config_path: None,
                 use_global: None,
-                hide_dock_icon_when_window_hidden: None,
-                auto_stop_tunnels_on_quit: None,
-                hide_tracked_runtime_bar: Some(true),
+                show_dock_icon_when_window_hidden: None,
+                confirm_running_tunnels_on_quit: None,
+                show_tracked_runtime_bar: Some(true),
             },
         )
         .expect("apply tracked runtime bar preference");
 
-        assert!(preferences.hide_tracked_runtime_bar);
+        assert!(preferences.show_tracked_runtime_bar);
     }
 
     /// ワークスペース選択時に履歴が先頭へ移動し重複しないことを検証する
@@ -7385,9 +7475,9 @@ show_tracked_runtime_bar = true
                 workspace_path: Some(first.path().display().to_string()),
                 global_config_path: None,
                 use_global: None,
-                hide_dock_icon_when_window_hidden: None,
-                auto_stop_tunnels_on_quit: None,
-                hide_tracked_runtime_bar: None,
+                show_dock_icon_when_window_hidden: None,
+                confirm_running_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("select first workspace");
@@ -7397,9 +7487,9 @@ show_tracked_runtime_bar = true
                 workspace_path: Some(second.path().display().to_string()),
                 global_config_path: None,
                 use_global: None,
-                hide_dock_icon_when_window_hidden: None,
-                auto_stop_tunnels_on_quit: None,
-                hide_tracked_runtime_bar: None,
+                show_dock_icon_when_window_hidden: None,
+                confirm_running_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("select second workspace");
@@ -7409,9 +7499,9 @@ show_tracked_runtime_bar = true
                 workspace_path: Some(first.path().display().to_string()),
                 global_config_path: None,
                 use_global: None,
-                hide_dock_icon_when_window_hidden: None,
-                auto_stop_tunnels_on_quit: None,
-                hide_tracked_runtime_bar: None,
+                show_dock_icon_when_window_hidden: None,
+                confirm_running_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("select first workspace again");
@@ -7446,9 +7536,9 @@ show_tracked_runtime_bar = true
                     workspace_path: Some(workspace.path().display().to_string()),
                     global_config_path: None,
                     use_global: None,
-                    hide_dock_icon_when_window_hidden: None,
-                    auto_stop_tunnels_on_quit: None,
-                    hide_tracked_runtime_bar: None,
+                    show_dock_icon_when_window_hidden: None,
+                    confirm_running_tunnels_on_quit: None,
+                    show_tracked_runtime_bar: None,
                 },
             )
             .expect("select workspace");
@@ -7495,9 +7585,9 @@ show_tracked_runtime_bar = true
                 workspace_path: Some(workspace_path.clone()),
                 global_config_path: None,
                 use_global: None,
-                hide_dock_icon_when_window_hidden: None,
-                auto_stop_tunnels_on_quit: None,
-                hide_tracked_runtime_bar: None,
+                show_dock_icon_when_window_hidden: None,
+                confirm_running_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("select workspace");
@@ -7509,9 +7599,9 @@ show_tracked_runtime_bar = true
                 workspace_path: Some(workspace_path),
                 global_config_path: None,
                 use_global: None,
-                hide_dock_icon_when_window_hidden: None,
-                auto_stop_tunnels_on_quit: None,
-                hide_tracked_runtime_bar: None,
+                show_dock_icon_when_window_hidden: None,
+                confirm_running_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("apply unchanged workspace");
@@ -7539,9 +7629,9 @@ show_tracked_runtime_bar = true
                 workspace_path: Some(first_path.clone()),
                 global_config_path: None,
                 use_global: None,
-                hide_dock_icon_when_window_hidden: None,
-                auto_stop_tunnels_on_quit: None,
-                hide_tracked_runtime_bar: None,
+                show_dock_icon_when_window_hidden: None,
+                confirm_running_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("select first workspace");
@@ -7553,9 +7643,9 @@ show_tracked_runtime_bar = true
                 workspace_path: Some(second_path),
                 global_config_path: None,
                 use_global: None,
-                hide_dock_icon_when_window_hidden: None,
-                auto_stop_tunnels_on_quit: None,
-                hide_tracked_runtime_bar: None,
+                show_dock_icon_when_window_hidden: None,
+                confirm_running_tunnels_on_quit: None,
+                show_tracked_runtime_bar: None,
             },
         )
         .expect("select second workspace");
@@ -8795,12 +8885,12 @@ show_tracked_runtime_bar = true
         );
     }
 
-    /// 終了時自動停止設定が起動中トンネルの扱いを切り替えることを検証する
+    /// 終了時確認設定が起動中トンネルの扱いを切り替えることを検証する
     #[test]
-    fn quit_running_tunnels_action_reflects_auto_stop_preference() {
+    fn quit_running_tunnels_action_reflects_confirmation_preference() {
         let prompt_preferences = AppPreferences::default();
         let auto_stop_preferences = AppPreferences {
-            auto_stop_tunnels_on_quit: true,
+            confirm_running_tunnels_on_quit: false,
             ..AppPreferences::default()
         };
 

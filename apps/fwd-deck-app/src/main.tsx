@@ -130,23 +130,23 @@ interface WorkspaceSelection {
   workspaceStatePath: string;
   globalStateExists: boolean;
   workspaceStateExists: boolean;
-  hideDockIconWhenWindowHidden: boolean;
-  autoStopTunnelsOnQuit: boolean;
-  hideTrackedRuntimeBar: boolean;
+  showDockIconWhenWindowHidden: boolean;
+  confirmRunningTunnelsOnQuit: boolean;
+  showTrackedRuntimeBar: boolean;
 }
 
 interface WorkspaceSelectionInput {
   workspacePath: string;
   globalConfigPath: string;
   useGlobal: boolean;
-  hideDockIconWhenWindowHidden: boolean;
-  autoStopTunnelsOnQuit: boolean;
-  hideTrackedRuntimeBar: boolean;
+  showDockIconWhenWindowHidden: boolean;
+  confirmRunningTunnelsOnQuit: boolean;
+  showTrackedRuntimeBar: boolean;
 }
 
 type ApplicationSettingsDefaults = Pick<
   WorkspaceSelection,
-  "hideDockIconWhenWindowHidden" | "autoStopTunnelsOnQuit" | "hideTrackedRuntimeBar"
+  "showDockIconWhenWindowHidden" | "confirmRunningTunnelsOnQuit" | "showTrackedRuntimeBar"
 >;
 
 interface OperationTarget {
@@ -456,9 +456,9 @@ interface VisibleTunnelSelectionSummary {
 }
 
 const defaultApplicationSettings: ApplicationSettingsDefaults = {
-  hideDockIconWhenWindowHidden: false,
-  autoStopTunnelsOnQuit: false,
-  hideTrackedRuntimeBar: false,
+  showDockIconWhenWindowHidden: true,
+  confirmRunningTunnelsOnQuit: true,
+  showTrackedRuntimeBar: true,
 };
 
 const initialPaths: WorkspaceSelection = {
@@ -2832,7 +2832,7 @@ const DashboardView = memo(function DashboardView({
   const [isTrackedPanelCollapsed, setIsTrackedPanelCollapsed] = useState<boolean>(true);
   const hasTrackedRuntime = (dashboard?.trackedTunnels.length ?? 0) > 0;
   const shouldShowTrackedPanel =
-    !(dashboard?.paths.hideTrackedRuntimeBar ?? false) && hasTrackedRuntime;
+    (dashboard?.paths.showTrackedRuntimeBar ?? true) && hasTrackedRuntime;
   const hasSelection = selectedCount > 0;
   const shouldShowSelectionActionBar = hasSelection || filteredTunnels.length > 0;
   const [selectionBarRef, selectionBarHeight] = useMeasuredElementHeight<HTMLDivElement>(
@@ -3587,12 +3587,12 @@ function PathPanel({
         <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
           <Switch
             size="sm"
-            isSelected={paths.hideDockIconWhenWindowHidden}
-            onChange={(selected) => onChange("hideDockIconWhenWindowHidden", selected)}
+            isSelected={paths.showDockIconWhenWindowHidden}
+            onChange={(selected) => onChange("showDockIconWhenWindowHidden", selected)}
             className="w-full justify-between"
           >
             <Switch.Content>
-              <span className="text-sm font-semibold">Hide Dock icon while window is hidden</span>
+              <span className="text-sm font-semibold">Show Dock icon while window is hidden</span>
             </Switch.Content>
             <Switch.Control>
               <Switch.Thumb />
@@ -3602,12 +3602,14 @@ function PathPanel({
         <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
           <Switch
             size="sm"
-            isSelected={paths.autoStopTunnelsOnQuit}
-            onChange={(selected) => onChange("autoStopTunnelsOnQuit", selected)}
+            isSelected={paths.confirmRunningTunnelsOnQuit}
+            onChange={(selected) => onChange("confirmRunningTunnelsOnQuit", selected)}
             className="w-full justify-between"
           >
             <Switch.Content>
-              <span className="text-sm font-semibold">Auto-stop tunnels on quit</span>
+              <span className="text-sm font-semibold">
+                Confirm before quitting with running tunnels
+              </span>
             </Switch.Content>
             <Switch.Control>
               <Switch.Thumb />
@@ -3617,12 +3619,12 @@ function PathPanel({
         <div className="rounded-lg border border-border bg-muted/35 px-3 py-2">
           <Switch
             size="sm"
-            isSelected={paths.hideTrackedRuntimeBar}
-            onChange={(selected) => onChange("hideTrackedRuntimeBar", selected)}
+            isSelected={paths.showTrackedRuntimeBar}
+            onChange={(selected) => onChange("showTrackedRuntimeBar", selected)}
             className="w-full justify-between"
           >
             <Switch.Content>
-              <span className="text-sm font-semibold">Hide Tracked runtime bar</span>
+              <span className="text-sm font-semibold">Show Tracked runtime bar</span>
             </Switch.Content>
             <Switch.Control>
               <Switch.Thumb />
@@ -7051,9 +7053,9 @@ function workspaceSelectionEquals(left: WorkspaceSelection, right: WorkspaceSele
     left.workspaceStatePath === right.workspaceStatePath &&
     left.globalStateExists === right.globalStateExists &&
     left.workspaceStateExists === right.workspaceStateExists &&
-    left.hideDockIconWhenWindowHidden === right.hideDockIconWhenWindowHidden &&
-    left.autoStopTunnelsOnQuit === right.autoStopTunnelsOnQuit &&
-    left.hideTrackedRuntimeBar === right.hideTrackedRuntimeBar
+    left.showDockIconWhenWindowHidden === right.showDockIconWhenWindowHidden &&
+    left.confirmRunningTunnelsOnQuit === right.confirmRunningTunnelsOnQuit &&
+    left.showTrackedRuntimeBar === right.showTrackedRuntimeBar
   );
 }
 
@@ -8025,9 +8027,9 @@ function normalizeWorkspaceSelection(paths: WorkspaceSelection): WorkspaceSelect
     workspacePath: paths.workspacePath.trim(),
     globalConfigPath: paths.globalConfigPath.trim(),
     useGlobal: paths.useGlobal,
-    hideDockIconWhenWindowHidden: paths.hideDockIconWhenWindowHidden,
-    autoStopTunnelsOnQuit: paths.autoStopTunnelsOnQuit,
-    hideTrackedRuntimeBar: paths.hideTrackedRuntimeBar,
+    showDockIconWhenWindowHidden: paths.showDockIconWhenWindowHidden,
+    confirmRunningTunnelsOnQuit: paths.confirmRunningTunnelsOnQuit,
+    showTrackedRuntimeBar: paths.showTrackedRuntimeBar,
   };
 }
 

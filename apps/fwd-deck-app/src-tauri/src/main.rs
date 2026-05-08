@@ -23,10 +23,10 @@ use fwd_deck_core::{
     default_local_config_path, default_state_file_path, format_path_for_display,
     load_effective_config, normalize_runtime_source_path, parse_ssh_command,
     remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel, start_tunnel,
-    start_tunnels_with_progress, stop_tunnel,
-    stop_tunnels_with_progress as stop_tunnels_with_progress_core, tag_is_valid, tunnel_runtime_id,
-    tunnel_runtime_id_from_normalized_source_path, tunnel_statuses,
-    tunnel_statuses_for_state_files, update_tunnel_in_config_file, validate_config,
+    start_tunnels_with_progress, stop_tunnels_with_progress as stop_tunnels_with_progress_core,
+    tag_is_valid, tunnel_runtime_id, tunnel_runtime_id_from_normalized_source_path,
+    tunnel_statuses, tunnel_statuses_for_state_files, update_tunnel_in_config_file,
+    validate_config,
 };
 #[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
@@ -2259,6 +2259,8 @@ fn tray_tunnel_menu_items_matching<F>(
 where
     F: Fn(&ResolvedTunnelConfig, &str) -> bool,
 {
+    let global_can_start = validation_is_valid_for_source(validation, ConfigSourceKind::Global);
+    let local_can_start = validation_is_valid_for_source(validation, ConfigSourceKind::Local);
     let mut runtime_id_cache = RuntimeIdCache::default();
     let mut items = config
         .tunnels
@@ -2271,7 +2273,10 @@ where
             }
 
             let status = status_lookup.for_resolved_tunnel(resolved, &runtime_id);
-            let can_start = validation_is_valid_for_source(validation, resolved.source.kind);
+            let can_start = match resolved.source.kind {
+                ConfigSourceKind::Global => global_can_start,
+                ConfigSourceKind::Local => local_can_start,
+            };
             let sort_key = tray_tunnel_sort_key(resolved, &runtime_id);
             let item = tray_tunnel_menu_item(
                 menu_id_prefix,
@@ -2714,6 +2719,13 @@ struct QuitStopFailure {
     message: String,
 }
 
+/// runtime 停止処理の失敗を表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeStopFailure {
+    id: String,
+    message: String,
+}
+
 /// 終了時に扱うトンネルを状態別に保持する
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct QuitTunnelTargets {
@@ -3128,16 +3140,17 @@ fn persist_quit_confirmation_preference(
 
 /// 終了前に対象トンネルを停止または stale 削除する
 fn stop_quit_tunnel_targets(targets: &[QuitTunnelTarget]) -> Result<(), QuitStopFailure> {
-    for target in targets {
-        if let Err(error) = stop_tunnel_for_app(&target.runtime_id, &target.state_path) {
-            return Err(QuitStopFailure {
-                id: target.display_id(),
-                message: error.to_string(),
-            });
-        }
-    }
-
-    Ok(())
+    stop_runtime_targets_in_state_file_batches(
+        targets,
+        |target| target.runtime_id.as_str(),
+        |target| target.state_path.as_path(),
+        QuitTunnelTarget::display_id,
+    )
+    .map(|_| ())
+    .map_err(|failure| QuitStopFailure {
+        id: failure.id,
+        message: failure.message,
+    })
 }
 
 /// 停止失敗時の表示メッセージを生成する
@@ -5170,16 +5183,71 @@ fn collect_workspace_switch_stop_targets_from_state(
 
 /// 旧ワークスペース切り替え対象を停止する
 fn stop_workspace_switch_targets(targets: &[WorkspaceSwitchStopTarget]) -> Result<usize, AppError> {
-    for target in targets {
-        stop_tunnel_for_app(&target.runtime_id, &target.state_path).map_err(|error| {
-            AppError::WorkspaceSwitchStop {
-                id: target.display_id(),
-                message: error.to_string(),
+    stop_runtime_targets_in_state_file_batches(
+        targets,
+        |target| target.runtime_id.as_str(),
+        |target| target.state_path.as_path(),
+        WorkspaceSwitchStopTarget::display_id,
+    )
+    .map_err(|failure| AppError::WorkspaceSwitchStop {
+        id: failure.id,
+        message: failure.message,
+    })
+}
+
+/// 同一 state file の停止対象を一括処理する
+fn stop_runtime_targets_in_state_file_batches<T, RuntimeId, StatePath, DisplayId>(
+    targets: &[T],
+    runtime_id_for_target: RuntimeId,
+    state_path_for_target: StatePath,
+    display_id_for_target: DisplayId,
+) -> Result<usize, RuntimeStopFailure>
+where
+    RuntimeId: Fn(&T) -> &str,
+    StatePath: Fn(&T) -> &Path,
+    DisplayId: Fn(&T) -> String,
+{
+    let mut stopped_count = 0;
+    let mut start_index = 0;
+
+    while start_index < targets.len() {
+        let state_path = state_path_for_target(&targets[start_index]).to_path_buf();
+        let mut end_index = start_index + 1;
+
+        while end_index < targets.len()
+            && state_path_for_target(&targets[end_index]) == state_path.as_path()
+        {
+            end_index += 1;
+        }
+
+        let batch = &targets[start_index..end_index];
+        let runtime_ids = batch
+            .iter()
+            .map(|target| runtime_id_for_target(target).to_owned())
+            .collect::<Vec<_>>();
+
+        match stop_tunnels_with_progress_core(&runtime_ids, &state_path, |_index, _result| {}) {
+            Ok(results) => {
+                for (target, result) in batch.iter().zip(results) {
+                    stop_tunnel_result_for_app(result).map_err(|error| RuntimeStopFailure {
+                        id: display_id_for_target(target),
+                        message: error.to_string(),
+                    })?;
+                    stopped_count += 1;
+                }
             }
-        })?;
+            Err(error) => {
+                return Err(RuntimeStopFailure {
+                    id: display_id_for_target(&targets[start_index]),
+                    message: AppError::Runtime(error).to_string(),
+                });
+            }
+        }
+
+        start_index = end_index;
     }
 
-    Ok(targets.len())
+    Ok(stopped_count)
 }
 
 /// 設定ファイル種別に対応する runtime scope を取得する
@@ -6838,8 +6906,9 @@ fn current_unix_seconds_for_app() -> u64 {
 }
 
 /// アプリの停止操作としてトンネルを停止する
+#[cfg(test)]
 fn stop_tunnel_for_app(id: &str, state_path: &Path) -> Result<Option<String>, AppError> {
-    stop_tunnel_result_for_app(stop_tunnel(id, state_path))
+    stop_tunnel_result_for_app(fwd_deck_core::stop_tunnel(id, state_path))
 }
 
 /// 単体停止結果をアプリ表示用メッセージへ変換する
@@ -9127,6 +9196,53 @@ hide_tracked_runtime_bar = true
         };
 
         stop_quit_tunnel_targets(&[target]).expect("remove stale state");
+        let state = read_state_file(&state_path).expect("read state");
+
+        assert!(state.tunnels.is_empty());
+    }
+
+    /// 同一 state file の stale state を一括停止でまとめて削除できることを検証する
+    #[test]
+    fn stop_quit_tunnel_targets_removes_multiple_stale_states_from_same_file() {
+        let temp_dir = TempDir::new().expect("create state directory");
+        let state_path = temp_dir.path().join("state.toml");
+        let config_path = temp_dir.path().join("fwd-deck.toml");
+        write_state_file(
+            &state_path,
+            &state_file(vec![
+                tunnel_state_with_port(
+                    "db",
+                    ConfigSourceKind::Global,
+                    config_path.clone(),
+                    u32::MAX,
+                    15432,
+                ),
+                tunnel_state_with_port(
+                    "cache",
+                    ConfigSourceKind::Global,
+                    config_path.clone(),
+                    u32::MAX,
+                    16379,
+                ),
+            ]),
+        )
+        .expect("write state");
+        let targets = ["db", "cache"]
+            .into_iter()
+            .map(|id| QuitTunnelTarget {
+                id: id.to_owned(),
+                runtime_id: fwd_deck_core::tunnel_runtime_id(
+                    ConfigSourceKind::Global,
+                    &config_path,
+                    id,
+                ),
+                runtime_scope: RuntimeScope::Global,
+                state_path: state_path.clone(),
+                process_state: ProcessState::Stale,
+            })
+            .collect::<Vec<_>>();
+
+        stop_quit_tunnel_targets(&targets).expect("remove stale states");
         let state = read_state_file(&state_path).expect("read state");
 
         assert!(state.tunnels.is_empty());

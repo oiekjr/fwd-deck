@@ -17,12 +17,13 @@ use std::{
 
 use fwd_deck_core::{
     ConfigEditError, ConfigLoadError, ConfigPaths, ConfigSourceKind, EffectiveConfig, ProcessState,
-    ResolvedTimeoutConfig, ResolvedTunnelConfig, StartedTunnel, StoppedTunnel, TimeoutConfig,
-    TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport,
-    add_tunnel_to_config_file, default_global_config_path, default_local_config_path,
-    default_state_file_path, format_path_for_display, load_effective_config,
-    normalize_runtime_source_path, remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel,
-    start_tunnel, start_tunnels_with_progress, stop_tunnel,
+    ResolvedTimeoutConfig, ResolvedTunnelConfig, SshImportWarning, StartedTunnel, StoppedTunnel,
+    TimeoutConfig, TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport,
+    add_tunnel_to_config_file, add_tunnels_to_config_file, default_global_config_path,
+    default_local_config_path, default_state_file_path, format_path_for_display,
+    load_effective_config, normalize_runtime_source_path, parse_ssh_command,
+    remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel, start_tunnel,
+    start_tunnels_with_progress, stop_tunnel,
     stop_tunnels_with_progress as stop_tunnels_with_progress_core, tag_is_valid, tunnel_runtime_id,
     tunnel_runtime_id_from_normalized_source_path, tunnel_statuses,
     tunnel_statuses_for_state_files, update_tunnel_in_config_file, validate_config,
@@ -131,6 +132,8 @@ fn main() -> ExitCode {
             start_tunnels,
             stop_tunnels,
             add_tunnel_entry,
+            add_tunnel_entries,
+            parse_ssh_import_command,
             duplicate_tunnel_entry,
             update_tunnel_entry,
             remove_tunnel_entry,
@@ -3220,6 +3223,8 @@ struct TunnelInput {
     ssh_host: String,
     ssh_port: Option<u16>,
     identity_file: Option<String>,
+    #[serde(default)]
+    timeouts: Option<TunnelTimeoutInput>,
 }
 
 impl TunnelInput {
@@ -3237,9 +3242,75 @@ impl TunnelInput {
             ssh_host: trimmed_required(self.ssh_host),
             ssh_port: self.ssh_port,
             identity_file: trimmed_identity_file(self.identity_file),
-            timeouts: TimeoutConfig::default(),
+            timeouts: self
+                .timeouts
+                .map(TunnelTimeoutInput::into_timeout_config)
+                .unwrap_or_default(),
         }
     }
+}
+
+/// 設定追加入力から受け取るタイムアウト上書きを表現する
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TunnelTimeoutInput {
+    connect_timeout_seconds: Option<u32>,
+    server_alive_interval_seconds: Option<u32>,
+    server_alive_count_max: Option<u32>,
+    start_grace_milliseconds: Option<u64>,
+}
+
+impl TunnelTimeoutInput {
+    /// 入力値を中核機能のタイムアウト設定へ変換する
+    fn into_timeout_config(self) -> TimeoutConfig {
+        TimeoutConfig {
+            connect_timeout_seconds: self.connect_timeout_seconds,
+            server_alive_interval_seconds: self.server_alive_interval_seconds,
+            server_alive_count_max: self.server_alive_count_max,
+            start_grace_milliseconds: self.start_grace_milliseconds,
+        }
+    }
+}
+
+/// SSHコマンド取り込みプレビューを表現する
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SshImportPreview {
+    forwards: Vec<SshImportForwardPreview>,
+    ssh_user: String,
+    ssh_host: String,
+    ssh_port: Option<u16>,
+    identity_file: Option<String>,
+    timeouts: SshImportTimeoutPreview,
+    warnings: Vec<SshImportWarningView>,
+}
+
+/// SSHコマンド取り込みプレビューのローカルフォワードを表現する
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SshImportForwardPreview {
+    local_host: String,
+    local_port: u16,
+    remote_host: String,
+    remote_port: u16,
+}
+
+/// SSHコマンド取り込みプレビューのタイムアウト設定を表現する
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SshImportTimeoutPreview {
+    connect_timeout_seconds: Option<u32>,
+    server_alive_interval_seconds: Option<u32>,
+    server_alive_count_max: Option<u32>,
+    start_grace_milliseconds: Option<u64>,
+}
+
+/// SSHコマンド取り込み時の警告を表現する
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SshImportWarningView {
+    option: String,
+    message: String,
 }
 
 /// 複製フォームから受け取る差し替え対象のトンネル入力を表現する
@@ -3434,6 +3505,26 @@ fn add_tunnel_entry(
     let _ = rebuild_tray_menu(&app);
 
     command_result(result)
+}
+
+/// 設定ファイルへ複数トンネルを追加する
+#[tauri::command]
+fn add_tunnel_entries(
+    app: tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    scope: ConfigScopeInput,
+    tunnels: Vec<TunnelInput>,
+) -> Result<DashboardState, String> {
+    let result = add_tunnel_entries_inner(&app, paths, scope, tunnels);
+    let _ = rebuild_tray_menu(&app);
+
+    command_result(result)
+}
+
+/// SSHコマンドを解析して取り込みプレビューを返す
+#[tauri::command]
+fn parse_ssh_import_command(command: String) -> Result<SshImportPreview, String> {
+    command_result(parse_ssh_import_command_inner(&command))
 }
 
 /// 既存トンネルを複製して設定ファイルへ追加する
@@ -3652,6 +3743,79 @@ fn add_tunnel_entry_inner(
     let path = config_path_for_scope(&runtime_paths, kind)?;
     add_tunnel_to_config_file(&path, kind, tunnel)?;
     load_dashboard_inner(app, paths)
+}
+
+/// 複数トンネル追加処理を実行する
+fn add_tunnel_entries_inner(
+    app: &tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    scope: ConfigScopeInput,
+    tunnels: Vec<TunnelInput>,
+) -> Result<DashboardState, AppError> {
+    if tunnels.is_empty() {
+        return Err(AppError::InvalidInput(
+            "追加するトンネルが選択されていません".to_owned(),
+        ));
+    }
+
+    let runtime_paths = resolve_runtime_paths(app, paths.clone())?;
+    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let tunnels = tunnels
+        .into_iter()
+        .map(TunnelInput::into_tunnel_config)
+        .collect::<Vec<_>>();
+    let kind = ConfigSourceKind::from(scope);
+
+    validate_new_tunnels(&config, kind, &tunnels)?;
+    let path = config_path_for_scope(&runtime_paths, kind)?;
+    add_tunnels_to_config_file(&path, kind, tunnels)?;
+    load_dashboard_inner(app, paths)
+}
+
+/// SSHコマンド取り込みプレビューを生成する
+fn parse_ssh_import_command_inner(command: &str) -> Result<SshImportPreview, AppError> {
+    let import =
+        parse_ssh_command(command).map_err(|error| AppError::InvalidInput(error.to_string()))?;
+    let forwards = import
+        .forwards
+        .into_iter()
+        .map(|forward| SshImportForwardPreview {
+            local_host: forward.local_host,
+            local_port: forward.local_port,
+            remote_host: forward.remote_host,
+            remote_port: forward.remote_port,
+        })
+        .collect();
+    let warnings = import
+        .warnings
+        .into_iter()
+        .map(SshImportWarningView::from)
+        .collect();
+
+    Ok(SshImportPreview {
+        forwards,
+        ssh_user: import.ssh_user,
+        ssh_host: import.ssh_host,
+        ssh_port: import.ssh_port,
+        identity_file: import.identity_file,
+        timeouts: SshImportTimeoutPreview {
+            connect_timeout_seconds: import.timeouts.connect_timeout_seconds,
+            server_alive_interval_seconds: import.timeouts.server_alive_interval_seconds,
+            server_alive_count_max: import.timeouts.server_alive_count_max,
+            start_grace_milliseconds: import.timeouts.start_grace_milliseconds,
+        },
+        warnings,
+    })
+}
+
+impl From<SshImportWarning> for SshImportWarningView {
+    /// 中核機能の警告を表示用へ変換する
+    fn from(warning: SshImportWarning) -> Self {
+        Self {
+            option: warning.option,
+            message: warning.message,
+        }
+    }
 }
 
 /// 複製元トンネルをもとに設定追加処理を実行する
@@ -5095,6 +5259,36 @@ fn validate_new_tunnel(
             "local_port は既存トンネルと重複しています: {} ({})",
             tunnel.local_port, existing.tunnel.name
         )));
+    }
+
+    Ok(())
+}
+
+/// 追加対象の複数トンネルに意味的な不備がないことを検証する
+fn validate_new_tunnels(
+    config: &EffectiveConfig,
+    kind: ConfigSourceKind,
+    tunnels: &[TunnelConfig],
+) -> Result<(), AppError> {
+    let mut names = HashSet::new();
+    let mut local_ports = HashMap::<u16, String>::new();
+
+    for tunnel in tunnels {
+        validate_new_tunnel(config, kind, tunnel)?;
+
+        if !names.insert(tunnel.name.clone()) {
+            return Err(AppError::InvalidInput(format!(
+                "追加候補内で name が重複しています: {}",
+                tunnel.name
+            )));
+        }
+
+        if let Some(existing_name) = local_ports.insert(tunnel.local_port, tunnel.name.clone()) {
+            return Err(AppError::InvalidInput(format!(
+                "追加候補内で local_port が重複しています: {} ({existing_name})",
+                tunnel.local_port
+            )));
+        }
     }
 
     Ok(())

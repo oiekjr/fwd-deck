@@ -16,6 +16,7 @@
 - Git で共有できるポートフォワーディング設定ファイル
 - CLI と macOSアプリからの起動、停止、状態確認
 - stale なトンネルの復旧と監視
+- 既存の SSHコマンドからのトンネル設定取り込み
 - JSON出力、shell completion、設定検証、実行環境診断
 
 ## Install
@@ -44,8 +45,10 @@ cp fwd-deck.example.toml fwd-deck.toml
 macOSアプリを初めて起動した場合は、global設定が未作成なら `~/.config/fwd-deck/config.toml` に同じ example 設定を自動作成します。
 
 `fwd-deck.toml` を自分の SSH接続先に合わせて編集し、設定と実行環境を確認します。
+既存の SSHコマンドを使う場合は、`config import-ssh` で `-L` を設定ファイルへ取り込めます。
 
 ```sh
+fwd-deck config import-ssh --scope local --name-prefix db -- ssh -N -L 15432:dev-db.example.com:5432 -L 15433:prod-db.example.com:5432 ec2-user@bastion.example.com
 fwd-deck validate
 fwd-deck doctor
 ```

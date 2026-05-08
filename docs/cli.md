@@ -249,6 +249,9 @@ global を対象にする場合は `--scope global` を指定します。
 fwd-deck config add
 fwd-deck config add --scope local
 fwd-deck config add --scope global
+fwd-deck config import-ssh --scope local --name dev-db -- ssh -N -L 15432:db.example.com:5432 ec2-user@bastion.example.com
+fwd-deck config import-ssh --scope local --name-prefix imc -- ssh -N -L 15432:db.example.com:5432 -L 15433:db2.example.com:5432 ec2-user@bastion.example.com
+fwd-deck config import-ssh --scope global --command 'ssh -N -L 15432:db.example.com:5432 ec2-user@bastion.example.com'
 fwd-deck config edit dev-db
 fwd-deck config edit dev-db --scope local
 fwd-deck config edit dev-db --scope global
@@ -265,6 +268,24 @@ fwd-deck config remove --scope global
 `config edit` は既存値を初期値として表示し、空入力は既存値維持として扱います。  
 同じ `name` が global設定と local設定の両方に存在する場合、対話実行時は編集対象を選択します。  
 非対話実行時は `--scope` を指定します。
+
+`config import-ssh` は SSHコマンドを解析し、`-L` ごとに1件の `[[tunnels]]` を追加します。
+`--command TEXT` でコマンド文字列を渡すか、`--` 以降に `ssh` コマンド引数を渡します。
+`ssh` コマンド名は含めても省略しても構いません。
+複数の `-L` がある場合は複数トンネルとして追加します。
+
+`--name NAME` は `-L` が1つの場合だけ指定できます。
+複数の `-L` には `--name-prefix PREFIX` を指定すると、`PREFIX-1`, `PREFIX-2` のように連番名を生成します。
+`--name` も `--name-prefix` も省略した場合は、`tunnel-<uuid8>` 形式の名前を自動生成します。
+
+取り込み候補には既定で `imported` タグを付与します。
+付与しない場合は `--no-import-tag` を指定します。
+追加タグは `--tag TAG` を複数回指定できます。
+
+解析対象は `-L`, `-i`, `-p`, `-l`, `user@host`, `-o ConnectTimeout`, `-o ServerAliveInterval`, `-o ServerAliveCountMax` です。
+`-N`, `-v`, `-o ExitOnForwardFailure` は設定として保持する必要がないため無視します。
+その他の保持できないSSHオプションは warning として表示し、取り込み自体は継続します。
+Unix socket転送、`-R`, `-D`、壊れた `-L`、SSHユーザー不足、転送指定なしはエラーです。
 
 `config add` はタイムアウト設定を入力しないため、新規作成時の既定値から変更する場合は TOML を直接編集します。  
 `config edit` もタイムアウト設定を変更しないため、必要な場合は TOML を直接編集します。

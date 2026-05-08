@@ -14,15 +14,17 @@ use std::{
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use fwd_deck_core::{
-    ConfigEditError, ConfigPaths, ConfigSourceKind, DEFAULT_LOCAL_HOST, EffectiveConfig,
-    ProcessState, ResolvedTimeoutConfig, ResolvedTunnelConfig, StartedTunnel, StoppedTunnel,
-    TimeoutConfig, TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, TunnelState,
-    ValidationReport, add_tunnel_to_config_file, build_ssh_command_args,
+    ConfigEditError, ConfigPaths, ConfigSourceKind, DEFAULT_IMPORT_TAG, DEFAULT_LOCAL_HOST,
+    EffectiveConfig, ProcessState, ResolvedTimeoutConfig, ResolvedTunnelConfig, SshImport,
+    SshImportError, SshImportWarning, StartedTunnel, StoppedTunnel, TimeoutConfig, TunnelConfig,
+    TunnelRuntimeError, TunnelRuntimeStatus, TunnelState, ValidationReport,
+    add_tunnel_to_config_file, add_tunnels_to_config_file, build_ssh_command_args,
     default_global_config_path, default_local_config_path, default_state_file_path,
-    filter_tunnels_by_tags, format_path_for_display, load_effective_config, normalize_tag,
-    read_config_file, remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel, start_tunnel,
-    start_tunnels, stop_tunnels as stop_tunnels_core, tag_is_valid, tunnel_statuses,
-    update_tunnel_in_config_file, validate_config,
+    filter_tunnels_by_tags, format_path_for_display, generate_import_tunnel_name,
+    load_effective_config, normalize_tag, parse_ssh_args, parse_ssh_command, read_config_file,
+    remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel, start_tunnel, start_tunnels,
+    stop_tunnels as stop_tunnels_core, tag_is_valid, tunnel_statuses, update_tunnel_in_config_file,
+    validate_config,
 };
 use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
 use serde::Serialize;
@@ -177,6 +179,7 @@ const STOP_AFTER_HELP: &str = "\
 const CONFIG_AFTER_HELP: &str = "\
 例:
   fwd-deck config add
+  fwd-deck config import-ssh --scope local -- ssh -N -L 15432:db.example.com:5432 ec2-user@bastion.example.com
   fwd-deck config edit dev-db
   fwd-deck config remove --scope local
 
@@ -191,6 +194,16 @@ const CONFIG_ADD_AFTER_HELP: &str = "\
   補足:
   --scope を省略すると、編集する local または global 設定を対話選択します。
   local は ./fwd-deck.toml、global は ~/.config/fwd-deck/config.toml を対象にします。";
+const CONFIG_IMPORT_SSH_AFTER_HELP: &str = "\
+例:
+  fwd-deck config import-ssh --scope local --name-prefix imc -- ssh -N -L 15432:db.example.com:5432 ec2-user@bastion.example.com
+  fwd-deck config import-ssh --scope global --command 'ssh -N -L 15432:db.example.com:5432 ec2-user@bastion.example.com'
+  fwd-deck config import-ssh --scope local --no-import-tag --tag dev -- ssh -N -L 15432:db.example.com:5432 ec2-user@bastion.example.com
+
+補足:
+  複数の -L は複数トンネルとして追加します。
+  name 未指定時は tunnel-<uuid8> 形式で自動生成します。
+  既定で imported タグを付与し、--no-import-tag で無効化できます。";
 const CONFIG_EDIT_AFTER_HELP: &str = "\
 例:
   fwd-deck config edit dev-db
@@ -389,6 +402,32 @@ enum ConfigCommand {
         scope: Option<ConfigScopeArg>,
     },
     #[command(
+        about = "SSHコマンドを解析して設定ファイルへトンネルを追加する",
+        after_help = CONFIG_IMPORT_SSH_AFTER_HELP
+    )]
+    ImportSsh {
+        #[arg(long, value_enum, help = "編集する設定スコープ")]
+        scope: Option<ConfigScopeArg>,
+        #[arg(long, value_name = "TEXT", help = "解析するSSHコマンド文字列")]
+        command: Option<String>,
+        #[arg(long, value_name = "NAME", help = "追加するトンネル名")]
+        name: Option<String>,
+        #[arg(
+            long,
+            value_name = "PREFIX",
+            help = "複数トンネル名を PREFIX-1 形式で生成する"
+        )]
+        name_prefix: Option<String>,
+        #[arg(long, value_name = "TEXT", help = "追加する説明")]
+        description: Option<String>,
+        #[arg(long = "tag", value_name = "TAG", help = "追加するタグ")]
+        tags: Vec<String>,
+        #[arg(long, help = "既定の imported タグを付与しない")]
+        no_import_tag: bool,
+        #[arg(last = true, value_name = "SSH_ARGS", help = "解析するSSHコマンド引数")]
+        ssh_args: Vec<String>,
+    },
+    #[command(
         about = "設定ファイルからトンネルを削除する",
         after_help = CONFIG_REMOVE_AFTER_HELP
     )]
@@ -445,6 +484,30 @@ enum CliError {
         "複数の設定ファイルに同じトンネル名が存在します: {id}。非対話実行では --scope を指定してください"
     )]
     AmbiguousConfigEdit { id: String },
+    #[error("--command または -- 以降のSSHコマンド引数を指定してください")]
+    MissingSshImportCommand,
+    #[error("--command と -- 以降のSSHコマンド引数は同時に指定できません")]
+    ConflictingSshImportCommandInputs,
+    #[error("--name と --name-prefix は同時に指定できません")]
+    ConflictingSshImportNameOptions,
+    #[error(
+        "--name は -L が1つの場合だけ指定できます。複数の -L には --name-prefix を使用してください"
+    )]
+    ImportNameWithMultipleForwards,
+    #[error("取り込みトンネル名は空にできません")]
+    EmptyImportName,
+    #[error("取り込み候補内でトンネル名が重複しています: {name}")]
+    ImportDuplicateName { name: String },
+    #[error("local_port は既存トンネルと重複しています: {local_port} ({existing_name})")]
+    ImportLocalPortConflict {
+        local_port: u16,
+        existing_name: String,
+    },
+    #[error("取り込み候補内で local_port が重複しています: {local_port} ({existing_name})")]
+    ImportDuplicateLocalPort {
+        local_port: u16,
+        existing_name: String,
+    },
     #[error("Workspace ディレクトリが見つかりません: {}", format_path_for_display(.path))]
     WorkspaceNotFound { path: PathBuf },
     #[error("Workspace パスがディレクトリではありません: {}", format_path_for_display(.path))]
@@ -468,6 +531,8 @@ enum CliError {
     Config(#[from] fwd_deck_core::ConfigLoadError),
     #[error(transparent)]
     ConfigEdit(#[from] ConfigEditError),
+    #[error(transparent)]
+    SshImport(#[from] SshImportError),
     #[error(transparent)]
     Runtime(#[from] TunnelRuntimeError),
     #[error(transparent)]
@@ -822,6 +887,28 @@ fn app_launch_error_indicates_missing_app(stderr: &str) -> bool {
 fn config_command(paths: &ConfigPaths, command: ConfigCommand) -> Result<ExitCode, CliError> {
     match command {
         ConfigCommand::Add { scope } => config_add_command(paths, scope),
+        ConfigCommand::ImportSsh {
+            scope,
+            command,
+            name,
+            name_prefix,
+            description,
+            tags,
+            no_import_tag,
+            ssh_args,
+        } => config_import_ssh_command(
+            paths,
+            ConfigImportSshOptions {
+                scope,
+                command,
+                name,
+                name_prefix,
+                description,
+                tags,
+                no_import_tag,
+                ssh_args,
+            },
+        ),
         ConfigCommand::Remove { scope } => config_remove_command(paths, scope),
         ConfigCommand::Edit { id, scope } => config_edit_command(paths, &id, scope),
     }
@@ -851,6 +938,209 @@ fn config_add_command(
     );
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// SSHコマンド取り込みの入力値を表現する
+#[derive(Debug, Clone)]
+struct ConfigImportSshOptions {
+    scope: Option<ConfigScopeArg>,
+    command: Option<String>,
+    name: Option<String>,
+    name_prefix: Option<String>,
+    description: Option<String>,
+    tags: Vec<String>,
+    no_import_tag: bool,
+    ssh_args: Vec<String>,
+}
+
+/// SSHコマンドを解析して設定ファイルへトンネルを追加する
+fn config_import_ssh_command(
+    paths: &ConfigPaths,
+    options: ConfigImportSshOptions,
+) -> Result<ExitCode, CliError> {
+    let scope = resolve_config_scope(paths, options.scope)?;
+    let path = config_path_for_scope(paths, scope)?;
+    let config = load_effective_config(paths)?;
+    let import = resolve_ssh_import(&options)?;
+    let tags = import_tags(&options.tags, options.no_import_tag)?;
+    let description = trimmed_optional(options.description);
+    let names = import_tunnel_names(
+        &config,
+        scope,
+        import.forwards.len(),
+        options.name.as_deref(),
+        options.name_prefix.as_deref(),
+    )?;
+    let tunnels = import
+        .forwards
+        .iter()
+        .zip(names)
+        .map(|(forward, name)| {
+            import.tunnel_config(forward, name, description.clone(), tags.clone())
+        })
+        .collect::<Vec<_>>();
+
+    validate_import_tunnels(&config, scope, &tunnels)?;
+    add_tunnels_to_config_file(&path, scope, tunnels)?;
+    print_ssh_import_warnings(&import.warnings);
+    println!(
+        "{}",
+        green(
+            &format!(
+                "Imported {} tunnel(s) to {} configuration: {}",
+                import.forwards.len(),
+                scope,
+                format_path_for_display(&path)
+            ),
+            OutputStream::Stdout
+        )
+    );
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// CLI入力からSSHコマンド取り込み結果を解決する
+fn resolve_ssh_import(options: &ConfigImportSshOptions) -> Result<SshImport, CliError> {
+    match (&options.command, options.ssh_args.is_empty()) {
+        (Some(_), false) => Err(CliError::ConflictingSshImportCommandInputs),
+        (Some(command), true) => Ok(parse_ssh_command(command)?),
+        (None, false) => Ok(parse_ssh_args(&options.ssh_args)?),
+        (None, true) => Err(CliError::MissingSshImportCommand),
+    }
+}
+
+/// 取り込みトンネルへ付与するタグを解決する
+fn import_tags(tags: &[String], no_import_tag: bool) -> Result<Vec<String>, CliError> {
+    let mut resolved = Vec::new();
+
+    if !no_import_tag {
+        resolved.push(DEFAULT_IMPORT_TAG.to_owned());
+    }
+
+    for tag in normalize_cli_tags(tags)? {
+        if !resolved.contains(&tag) {
+            resolved.push(tag);
+        }
+    }
+
+    Ok(resolved)
+}
+
+/// 取り込みトンネルの名前一覧を生成する
+fn import_tunnel_names(
+    config: &EffectiveConfig,
+    scope: ConfigSourceKind,
+    count: usize,
+    name: Option<&str>,
+    name_prefix: Option<&str>,
+) -> Result<Vec<String>, CliError> {
+    if name.is_some() && name_prefix.is_some() {
+        return Err(CliError::ConflictingSshImportNameOptions);
+    }
+
+    if let Some(name) = name {
+        if count != 1 {
+            return Err(CliError::ImportNameWithMultipleForwards);
+        }
+
+        let name = trimmed_required(name);
+        if name.is_empty() {
+            return Err(CliError::EmptyImportName);
+        }
+
+        return Ok(vec![name]);
+    }
+
+    if let Some(prefix) = name_prefix {
+        let prefix = trimmed_required(prefix);
+        if prefix.is_empty() {
+            return Err(CliError::EmptyImportName);
+        }
+
+        return Ok((1..=count)
+            .map(|index| format!("{prefix}-{index}"))
+            .collect());
+    }
+
+    Ok(generate_unique_import_names(config, scope, count))
+}
+
+/// 既存設定と衝突しない自動生成名を作る
+fn generate_unique_import_names(
+    config: &EffectiveConfig,
+    scope: ConfigSourceKind,
+    count: usize,
+) -> Vec<String> {
+    let mut used_names = config
+        .tunnels
+        .iter()
+        .filter(|resolved| resolved.source.kind == scope)
+        .map(|resolved| resolved.tunnel.name.clone())
+        .collect::<HashSet<_>>();
+    let mut names = Vec::with_capacity(count);
+
+    while names.len() < count {
+        let name = generate_import_tunnel_name();
+        if used_names.insert(name.clone()) {
+            names.push(name);
+        }
+    }
+
+    names
+}
+
+/// 取り込み候補が既存設定や候補同士と衝突しないことを検証する
+fn validate_import_tunnels(
+    config: &EffectiveConfig,
+    scope: ConfigSourceKind,
+    tunnels: &[TunnelConfig],
+) -> Result<(), CliError> {
+    let mut names = HashSet::new();
+    let mut local_ports = HashMap::<u16, String>::new();
+
+    for tunnel in tunnels {
+        if !names.insert(tunnel.name.clone()) {
+            return Err(CliError::ImportDuplicateName {
+                name: tunnel.name.clone(),
+            });
+        }
+
+        if let Some(conflict) = find_tunnel_id_conflict(config, scope, &tunnel.name) {
+            return Err(ConfigEditError::DuplicateName {
+                path: conflict.source.path.clone(),
+                name: tunnel.name.clone(),
+            }
+            .into());
+        }
+
+        if let Some(conflict) =
+            find_local_port_conflict(config, scope, &tunnel.name, tunnel.local_port)
+        {
+            return Err(CliError::ImportLocalPortConflict {
+                local_port: tunnel.local_port,
+                existing_name: conflict.tunnel.name.clone(),
+            });
+        }
+
+        if let Some(existing_name) = local_ports.insert(tunnel.local_port, tunnel.name.clone()) {
+            return Err(CliError::ImportDuplicateLocalPort {
+                local_port: tunnel.local_port,
+                existing_name,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// SSHコマンド解析で発生した警告を表示する
+fn print_ssh_import_warnings(warnings: &[SshImportWarning]) {
+    for warning in warnings {
+        eprintln!(
+            "{}",
+            yellow(&format!("警告: {warning}"), OutputStream::Stderr)
+        );
+    }
 }
 
 /// 設定ファイルからトンネルを削除する
@@ -2124,6 +2414,24 @@ fn display_invalid_tag(tag: &str) -> String {
     } else {
         tag.to_owned()
     }
+}
+
+/// 空白を取り除いた必須文字列を生成する
+fn trimmed_required(value: &str) -> String {
+    value.trim().to_owned()
+}
+
+/// 空白のみの値を未指定として扱う
+fn trimmed_optional(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    })
 }
 
 /// タグ指定に応じて統合済みトンネル設定を選択する

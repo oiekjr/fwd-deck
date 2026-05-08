@@ -79,6 +79,8 @@ type AppView = "dashboard" | "add";
 
 type TunnelDisplayMode = "card" | "slim";
 
+type AddTunnelMode = "manual" | "ssh-command";
+
 type HeroButtonVariant =
   | "danger"
   | "danger-soft"
@@ -105,6 +107,8 @@ type AppCommand =
   | "start_tunnels"
   | "stop_tunnels"
   | "add_tunnel_entry"
+  | "add_tunnel_entries"
+  | "parse_ssh_import_command"
   | "duplicate_tunnel_entry"
   | "update_tunnel_entry"
   | "remove_tunnel_entry"
@@ -283,11 +287,65 @@ interface TunnelInput {
   sshHost: string;
   sshPort: number | null;
   identityFile: string | null;
+  timeouts?: TunnelTimeoutInput;
+}
+
+interface TunnelTimeoutInput {
+  connectTimeoutSeconds: number | null;
+  serverAliveIntervalSeconds: number | null;
+  serverAliveCountMax: number | null;
+  startGraceMilliseconds: number | null;
+}
+
+interface SshImportFormState {
+  scope: ConfigScope;
+  command: string;
+  tags: string;
+  includeImportTag: boolean;
+}
+
+interface SshImportPreview {
+  forwards: SshImportForwardPreview[];
+  sshUser: string;
+  sshHost: string;
+  sshPort: number | null;
+  identityFile: string | null;
+  timeouts: TunnelTimeoutInput;
+  warnings: SshImportWarningView[];
+}
+
+interface SshImportForwardPreview {
+  localHost: string;
+  localPort: number;
+  remoteHost: string;
+  remotePort: number;
+}
+
+interface SshImportWarningView {
+  option: string;
+  message: string;
+}
+
+interface TunnelImportDraft {
+  id: string;
+  description: string;
+  tags: string;
+  localHost: string;
+  localPort: string;
+  remoteHost: string;
+  remotePort: string;
+  sshUser: string;
+  sshHost: string;
+  sshPort: string;
+  identityFile: string;
+  timeouts: TunnelTimeoutInput;
 }
 
 type DuplicateTunnelFormState = TunnelFormState;
 type DuplicateTunnelInput = TunnelInput;
 type DuplicateTunnelEditableField = keyof DuplicateTunnelFormState;
+type SshImportFormField = keyof SshImportFormState;
+type TunnelImportDraftEditableField = Exclude<keyof TunnelImportDraft, "timeouts">;
 
 type AppMessageKind = "success" | "error" | "info";
 type OperationToastKind = AppMessageKind | "warning";
@@ -431,6 +489,13 @@ const initialForm: TunnelFormState = {
   identityFile: "",
 };
 
+const initialSshImportForm: SshImportFormState = {
+  scope: "local",
+  command: "",
+  tags: "",
+  includeImportTag: true,
+};
+
 const initialDuplicateForm: DuplicateTunnelFormState = initialForm;
 const emptyTunnelViews: readonly TunnelView[] = [];
 const emptyTunnelSearchIndex: TunnelSearchIndex = new Map();
@@ -521,6 +586,10 @@ function App(): ReactElement {
   const [dashboard, setDashboard] = useState<DashboardState | null>(null);
   const [paths, setPaths] = useState<WorkspaceSelection>(initialPaths);
   const [form, setForm] = useState<TunnelFormState>(initialForm);
+  const [addTunnelMode, setAddTunnelMode] = useState<AddTunnelMode>("manual");
+  const [sshImportForm, setSshImportForm] = useState<SshImportFormState>(initialSshImportForm);
+  const [sshImportDrafts, setSshImportDrafts] = useState<TunnelImportDraft[]>([]);
+  const [sshImportWarnings, setSshImportWarnings] = useState<SshImportWarningView[]>([]);
   const [filters, setFilters] = useState<TunnelFilters>(initialFilters);
   const [queryInput, setQueryInput] = useState<string>(initialFilters.query);
   const [activeView, setActiveView] = useState<AppView>("dashboard");
@@ -535,6 +604,7 @@ function App(): ReactElement {
   const [duplicateForm, setDuplicateForm] =
     useState<DuplicateTunnelFormState>(initialDuplicateForm);
   const [formFeedback, setFormFeedback] = useState<AppMessage | null>(null);
+  const [sshImportFeedback, setSshImportFeedback] = useState<AppMessage | null>(null);
   const [editFormFeedback, setEditFormFeedback] = useState<AppMessage | null>(null);
   const [duplicateFormFeedback, setDuplicateFormFeedback] = useState<AppMessage | null>(null);
   const [message, setMessage] = useState<AppMessage | null>(null);
@@ -1193,6 +1263,95 @@ function App(): ReactElement {
   }
 
   /**
+   * SSHコマンドを解析して取り込み候補へ反映する
+   */
+  async function parseSshImportCommand(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+
+    setSshImportFeedback(null);
+    setSshImportWarnings([]);
+    setIsBusy(true);
+
+    try {
+      const preview = await invokeCommand<SshImportPreview>("parse_ssh_import_command", {
+        command: sshImportForm.command,
+      });
+      const drafts = buildImportDrafts(
+        preview,
+        sshImportForm,
+        dashboard?.tunnels ?? [],
+        sshImportForm.scope,
+      );
+
+      setSshImportDrafts(drafts);
+      setSshImportWarnings(preview.warnings);
+      setSshImportFeedback({
+        kind: "success",
+        text: `${drafts.length} 件のトンネル候補を解析しました`,
+      });
+    } catch (error) {
+      setSshImportDrafts([]);
+      setSshImportFeedback({ kind: "error", text: stringifyError(error) });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  /**
+   * SSHコマンド取り込み候補を設定ファイルへ追加する
+   */
+  async function submitImportedTunnels(): Promise<void> {
+    if (sshImportForm.scope === "local" && paths.workspacePath.trim().length === 0) {
+      setSshImportFeedback({
+        kind: "error",
+        text: "local 設定に追加するにはワークスペースを選択してください",
+      });
+      return;
+    }
+
+    if (sshImportDrafts.length === 0) {
+      setSshImportFeedback({ kind: "error", text: "追加するトンネル候補がありません" });
+      return;
+    }
+
+    let tunnels: TunnelInput[];
+    try {
+      tunnels = sshImportDrafts.map((draft) => importDraftToTunnelInput(draft, homePath));
+    } catch (error) {
+      setSshImportFeedback({ kind: "error", text: stringifyError(error) });
+      return;
+    }
+
+    setSshImportFeedback(null);
+    setIsBusy(true);
+
+    try {
+      const loaded = await invokeCommand<DashboardState>("add_tunnel_entries", {
+        paths: normalizeWorkspaceSelection(paths),
+        scope: sshImportForm.scope,
+        tunnels,
+      });
+
+      setDashboard((current) => reconcileDashboardState(current, loaded));
+      updateRuntimeNowForDashboard(loaded);
+      setPaths((current) => reconcileWorkspaceSelection(current, loaded.paths));
+      setSshImportForm({ ...initialSshImportForm, scope: sshImportForm.scope });
+      setSshImportDrafts([]);
+      setSshImportWarnings([]);
+      setSshImportFeedback(null);
+      showOperationToast({
+        kind: "success",
+        summary: `${tunnels.length} 件のトンネルを設定に追加しました`,
+      });
+      setActiveView("dashboard");
+    } catch (error) {
+      setSshImportFeedback({ kind: "error", text: stringifyError(error) });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  /**
    * 既存トンネルを複製して設定ファイルへ追加する
    */
   async function submitDuplicatedTunnel(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -1715,6 +1874,41 @@ function App(): ReactElement {
   }
 
   /**
+   * SSH取り込みフォームの変更を反映する
+   */
+  function updateSshImportForm(field: SshImportFormField, value: string | boolean): void {
+    setSshImportFeedback(null);
+    setSshImportForm((current) => {
+      if (field === "includeImportTag") {
+        return { ...current, includeImportTag: Boolean(value) };
+      }
+
+      return { ...current, [field]: String(value) };
+    });
+
+    if (field === "command") {
+      setSshImportDrafts([]);
+      setSshImportWarnings([]);
+    }
+  }
+
+  /**
+   * SSH取り込み候補の変更を反映する
+   */
+  function updateSshImportDraft(
+    index: number,
+    field: TunnelImportDraftEditableField,
+    value: string,
+  ): void {
+    setSshImportFeedback(null);
+    setSshImportDrafts((current) =>
+      current.map((draft, draftIndex) =>
+        draftIndex === index ? { ...draft, [field]: value } : draft,
+      ),
+    );
+  }
+
+  /**
    * 編集フォームの変更を反映する
    */
   function updateEditForm(field: keyof TunnelFormState, value: string): void {
@@ -1899,6 +2093,12 @@ function App(): ReactElement {
   const handleSubmitTunnel = useStableEvent((event: FormEvent<HTMLFormElement>): void => {
     void submitTunnel(event);
   });
+  const handleParseSshImportCommand = useStableEvent((event: FormEvent<HTMLFormElement>): void => {
+    void parseSshImportCommand(event);
+  });
+  const handleSubmitImportedTunnels = useStableEvent((): void => {
+    void submitImportedTunnels();
+  });
   const handleBrowseIdentityFile = useStableEvent((): void => {
     void browseIdentityFile();
   });
@@ -2031,12 +2231,22 @@ function App(): ReactElement {
             />
           ) : activeView === "add" ? (
             <AddTunnelView
+              mode={addTunnelMode}
               form={form}
               feedback={formFeedback}
+              sshImportForm={sshImportForm}
+              sshImportDrafts={sshImportDrafts}
+              sshImportWarnings={sshImportWarnings}
+              sshImportFeedback={sshImportFeedback}
               canUseLocal={paths.workspacePath.trim().length > 0}
               isBusy={isBusy}
+              onModeChange={setAddTunnelMode}
               onChange={updateForm}
               onSubmit={handleSubmitTunnel}
+              onSshImportFormChange={updateSshImportForm}
+              onSshImportDraftChange={updateSshImportDraft}
+              onParseSshImportCommand={handleParseSshImportCommand}
+              onSubmitImportedTunnels={handleSubmitImportedTunnels}
               onOpenSettings={handleOpenSettings}
               onBrowseIdentityFile={handleBrowseIdentityFile}
             />
@@ -2711,12 +2921,26 @@ const DashboardView = memo(function DashboardView({
 });
 
 interface AddTunnelViewProps {
+  mode: AddTunnelMode;
   form: TunnelFormState;
   feedback: AppMessage | null;
+  sshImportForm: SshImportFormState;
+  sshImportDrafts: TunnelImportDraft[];
+  sshImportWarnings: SshImportWarningView[];
+  sshImportFeedback: AppMessage | null;
   canUseLocal: boolean;
   isBusy: boolean;
+  onModeChange: (mode: AddTunnelMode) => void;
   onChange: (field: keyof TunnelFormState, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSshImportFormChange: (field: SshImportFormField, value: string | boolean) => void;
+  onSshImportDraftChange: (
+    index: number,
+    field: TunnelImportDraftEditableField,
+    value: string,
+  ) => void;
+  onParseSshImportCommand: (event: FormEvent<HTMLFormElement>) => void;
+  onSubmitImportedTunnels: () => void;
   onOpenSettings: () => void;
   onBrowseIdentityFile: () => void;
 }
@@ -2725,28 +2949,352 @@ interface AddTunnelViewProps {
  * トンネル追加専用の入力画面を表示する
  */
 function AddTunnelView({
+  mode,
   form,
   feedback,
+  sshImportForm,
+  sshImportDrafts,
+  sshImportWarnings,
+  sshImportFeedback,
   canUseLocal,
   isBusy,
+  onModeChange,
   onChange,
   onSubmit,
+  onSshImportFormChange,
+  onSshImportDraftChange,
+  onParseSshImportCommand,
+  onSubmitImportedTunnels,
   onOpenSettings,
   onBrowseIdentityFile,
 }: AddTunnelViewProps): ReactElement {
   return (
     <section className="mx-auto flex w-full max-w-6xl flex-col gap-3">
-      <TunnelForm
-        form={form}
-        feedback={feedback}
-        canUseLocal={canUseLocal}
-        isBusy={isBusy}
-        onChange={onChange}
-        onSubmit={onSubmit}
-        onOpenSettings={onOpenSettings}
-        onBrowseIdentityFile={onBrowseIdentityFile}
-      />
+      <div className="grid w-full grid-cols-2 gap-0.5 self-start rounded-lg border border-border bg-muted p-0.5 sm:w-80">
+        <HeroButton
+          type="button"
+          variant={mode === "manual" ? "primary" : "ghost"}
+          size="sm"
+          fullWidth
+          onPress={() => onModeChange("manual")}
+          className="justify-center"
+        >
+          <Pencil size={14} />
+          Manual
+        </HeroButton>
+        <HeroButton
+          type="button"
+          variant={mode === "ssh-command" ? "primary" : "ghost"}
+          size="sm"
+          fullWidth
+          onPress={() => onModeChange("ssh-command")}
+          className="justify-center"
+        >
+          <Terminal size={14} />
+          SSH command
+        </HeroButton>
+      </div>
+
+      {mode === "manual" ? (
+        <TunnelForm
+          form={form}
+          feedback={feedback}
+          canUseLocal={canUseLocal}
+          isBusy={isBusy}
+          onChange={onChange}
+          onSubmit={onSubmit}
+          onOpenSettings={onOpenSettings}
+          onBrowseIdentityFile={onBrowseIdentityFile}
+        />
+      ) : (
+        <SshImportForm
+          form={sshImportForm}
+          drafts={sshImportDrafts}
+          warnings={sshImportWarnings}
+          feedback={sshImportFeedback}
+          canUseLocal={canUseLocal}
+          isBusy={isBusy}
+          onFormChange={onSshImportFormChange}
+          onDraftChange={onSshImportDraftChange}
+          onParse={onParseSshImportCommand}
+          onSubmit={onSubmitImportedTunnels}
+          onOpenSettings={onOpenSettings}
+        />
+      )}
     </section>
+  );
+}
+
+interface SshImportFormProps {
+  form: SshImportFormState;
+  drafts: TunnelImportDraft[];
+  warnings: SshImportWarningView[];
+  feedback: AppMessage | null;
+  canUseLocal: boolean;
+  isBusy: boolean;
+  onFormChange: (field: SshImportFormField, value: string | boolean) => void;
+  onDraftChange: (index: number, field: TunnelImportDraftEditableField, value: string) => void;
+  onParse: (event: FormEvent<HTMLFormElement>) => void;
+  onSubmit: () => void;
+  onOpenSettings: () => void;
+}
+
+/**
+ * SSHコマンド取り込みフォームを表示する
+ */
+function SshImportForm({
+  form,
+  drafts,
+  warnings,
+  feedback,
+  canUseLocal,
+  isBusy,
+  onFormChange,
+  onDraftChange,
+  onParse,
+  onSubmit,
+  onOpenSettings,
+}: SshImportFormProps): ReactElement {
+  const localUnavailable = !canUseLocal;
+
+  return (
+    <form
+      className="overflow-hidden rounded-xl border border-border bg-card shadow-sm"
+      onSubmit={onParse}
+    >
+      <div className="flex flex-col gap-3 border-b border-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2">
+          <Terminal className="text-foreground/70" size={16} />
+          <h2 className="text-sm font-semibold">Import SSH command</h2>
+        </div>
+
+        <div className="grid w-full grid-cols-2 gap-0.5 rounded-lg border border-border bg-muted p-0.5 sm:w-72">
+          <HeroButton
+            type="button"
+            variant={form.scope === "local" ? "primary" : "ghost"}
+            size="sm"
+            fullWidth
+            onPress={() => onFormChange("scope", "local")}
+            isDisabled={localUnavailable}
+            className="justify-center"
+          >
+            Local
+          </HeroButton>
+          <HeroButton
+            type="button"
+            variant={form.scope === "global" ? "primary" : "ghost"}
+            size="sm"
+            fullWidth
+            onPress={() => onFormChange("scope", "global")}
+            className="justify-center"
+          >
+            Global
+          </HeroButton>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 bg-muted/25 p-4">
+        {localUnavailable && form.scope === "local" ? (
+          <AlertMessage kind="warning">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <span>local 設定に追加するには Settings でワークスペースを選択してください。</span>
+              <HeroButton
+                type="button"
+                variant="outline"
+                size="sm"
+                onPress={onOpenSettings}
+                isDisabled={isBusy}
+              >
+                <Settings2 size={13} />
+                Settings
+              </HeroButton>
+            </div>
+          </AlertMessage>
+        ) : null}
+
+        <FormFeedback feedback={feedback} />
+
+        <section className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_16rem]">
+          <TextAreaField
+            label="SSH command"
+            value={form.command}
+            onChange={(value) => onFormChange("command", value)}
+            placeholder="ssh -N -L 15432:db.example.com:5432 ec2-user@bastion.example.com"
+            required
+          />
+          <div className="flex flex-col gap-3 lg:pt-5">
+            <Checkbox
+              className="items-center gap-3 rounded-lg border border-border bg-card px-3 py-2.5"
+              isSelected={form.includeImportTag}
+              onChange={(checked) => onFormChange("includeImportTag", checked)}
+            >
+              <Checkbox.Control>
+                <Checkbox.Indicator />
+              </Checkbox.Control>
+              <Checkbox.Content className="min-w-0">
+                <span className="block text-xs font-semibold">Add imported tag</span>
+              </Checkbox.Content>
+            </Checkbox>
+            <TextField
+              label="Additional tags"
+              value={form.tags}
+              onChange={(value) => onFormChange("tags", value)}
+              placeholder="dev,project-a"
+            />
+          </div>
+        </section>
+
+        {warnings.length > 0 ? (
+          <AlertMessage kind="warning">
+            <div className="flex flex-col gap-1">
+              {warnings.map((warning, index) => (
+                <span key={`${warning.option}-${index}`}>
+                  {warning.option}: {warning.message}
+                </span>
+              ))}
+            </div>
+          </AlertMessage>
+        ) : null}
+
+        {drafts.length > 0 ? (
+          <section className="flex flex-col gap-3">
+            <h3 className="text-xs font-medium text-muted-foreground">Import preview</h3>
+            <div className="grid gap-3">
+              {drafts.map((draft, index) => (
+                <SshImportDraftEditor
+                  key={index}
+                  index={index}
+                  draft={draft}
+                  onChange={onDraftChange}
+                />
+              ))}
+            </div>
+          </section>
+        ) : null}
+      </div>
+
+      <div className="flex flex-col gap-2 border-t border-border px-4 py-3 sm:flex-row sm:justify-end">
+        <HeroButton type="submit" variant="outline" size="sm" isDisabled={isBusy}>
+          <Search size={15} />
+          Parse
+        </HeroButton>
+        <HeroButton
+          type="button"
+          variant="primary"
+          size="sm"
+          onPress={onSubmit}
+          isDisabled={isBusy || drafts.length === 0 || (localUnavailable && form.scope === "local")}
+        >
+          <CirclePlus size={16} />
+          Add all
+        </HeroButton>
+      </div>
+    </form>
+  );
+}
+
+interface SshImportDraftEditorProps {
+  index: number;
+  draft: TunnelImportDraft;
+  onChange: (index: number, field: TunnelImportDraftEditableField, value: string) => void;
+}
+
+/**
+ * SSHコマンド取り込み候補の編集欄を表示する
+ */
+function SshImportDraftEditor({ index, draft, onChange }: SshImportDraftEditorProps): ReactElement {
+  return (
+    <div className="rounded-lg border border-border bg-card p-3">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <span className="text-xs font-medium text-muted-foreground">Tunnel {index + 1}</span>
+        <Chip size="sm" variant="soft">
+          {draft.localPort || "local port"}
+        </Chip>
+      </div>
+      <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
+        <section className="flex flex-col gap-3">
+          <TextField
+            label="Name"
+            value={draft.id}
+            onChange={(value) => onChange(index, "id", value)}
+            required
+          />
+          <TextField
+            label="Description"
+            value={draft.description}
+            onChange={(value) => onChange(index, "description", value)}
+          />
+          <TextField
+            label="Tags"
+            value={draft.tags}
+            onChange={(value) => onChange(index, "tags", value)}
+            placeholder="imported,dev"
+          />
+        </section>
+
+        <section className="flex flex-col gap-3 border-t border-border pt-3 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-3">
+          <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+            <TextField
+              label="Local host"
+              value={draft.localHost}
+              onChange={(value) => onChange(index, "localHost", value)}
+              required
+            />
+            <TextField
+              label="Local port"
+              value={draft.localPort}
+              onChange={(value) => onChange(index, "localPort", value)}
+              inputMode="numeric"
+              required
+            />
+          </div>
+          <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+            <TextField
+              label="Remote host"
+              value={draft.remoteHost}
+              onChange={(value) => onChange(index, "remoteHost", value)}
+              required
+            />
+            <TextField
+              label="Remote port"
+              value={draft.remotePort}
+              onChange={(value) => onChange(index, "remotePort", value)}
+              inputMode="numeric"
+              required
+            />
+          </div>
+        </section>
+
+        <section className="flex flex-col gap-3 border-t border-border pt-3 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-3">
+          <TextField
+            label="SSH user"
+            value={draft.sshUser}
+            onChange={(value) => onChange(index, "sshUser", value)}
+            required
+          />
+          <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+            <TextField
+              label="SSH host"
+              value={draft.sshHost}
+              onChange={(value) => onChange(index, "sshHost", value)}
+              required
+            />
+            <TextField
+              label="SSH port"
+              value={draft.sshPort}
+              onChange={(value) => onChange(index, "sshPort", value)}
+              inputMode="numeric"
+            />
+          </div>
+          <TextField
+            label="Identity file"
+            value={draft.identityFile}
+            onChange={(value) => onChange(index, "identityFile", value)}
+            placeholder="~/.ssh/id_ed25519"
+          />
+        </section>
+      </div>
+    </div>
   );
 }
 
@@ -5677,6 +6225,38 @@ function TextField({
   );
 }
 
+interface TextAreaFieldProps {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  required?: boolean;
+}
+
+/**
+ * 複数行のラベル付き入力欄を表示する
+ */
+function TextAreaField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  required = false,
+}: TextAreaFieldProps): ReactElement {
+  return (
+    <HeroTextField className="w-full gap-1" isRequired={required} variant="secondary">
+      <HeroLabel className="text-xs font-semibold text-foreground/70">{label}</HeroLabel>
+      <textarea
+        className="min-h-32 w-full resize-y rounded-md border border-input bg-card px-3 py-2 font-mono text-sm shadow-sm transition-[border-color,box-shadow] placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50"
+        value={value}
+        onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onChange(event.target.value)}
+        placeholder={placeholder}
+        required={required}
+      />
+    </HeroTextField>
+  );
+}
+
 interface ConfirmRemoveModalProps {
   tunnel: TunnelView | null;
   isBusy: boolean;
@@ -7134,6 +7714,108 @@ function formToTunnelInput(form: TunnelFormState, homePath: string | null): Tunn
     sshPort: parsePort(form.sshPort, "SSH port", false),
     identityFile: optionalIdentityFileForConfig(form.identityFile, homePath),
   };
+}
+
+/**
+ * SSHコマンド解析結果を取り込み候補へ変換する
+ */
+function buildImportDrafts(
+  preview: SshImportPreview,
+  form: SshImportFormState,
+  tunnels: readonly TunnelView[],
+  scope: ConfigScope,
+): TunnelImportDraft[] {
+  const usedIds = new Set(
+    tunnels.filter((tunnel) => tunnel.source === scope).map((tunnel) => tunnel.id),
+  );
+  const tags = defaultImportTags(form).join(",");
+
+  return preview.forwards.map((forward) => {
+    const id = nextImportTunnelId(usedIds);
+    usedIds.add(id);
+
+    return {
+      id,
+      description: "",
+      tags,
+      localHost: forward.localHost,
+      localPort: forward.localPort.toString(),
+      remoteHost: forward.remoteHost,
+      remotePort: forward.remotePort.toString(),
+      sshUser: preview.sshUser,
+      sshHost: preview.sshHost,
+      sshPort: preview.sshPort?.toString() ?? "",
+      identityFile: preview.identityFile ?? "",
+      timeouts: preview.timeouts,
+    };
+  });
+}
+
+/**
+ * SSH取り込み候補を command 入力へ変換する
+ */
+function importDraftToTunnelInput(draft: TunnelImportDraft, homePath: string | null): TunnelInput {
+  return {
+    id: requireText(draft.id, "Name"),
+    description: optionalText(draft.description),
+    tags: parseTags(draft.tags),
+    localHost: requireText(draft.localHost, "Local host"),
+    localPort: parsePort(draft.localPort, "Local port", true),
+    remoteHost: requireText(draft.remoteHost, "Remote host"),
+    remotePort: parsePort(draft.remotePort, "Remote port", true),
+    sshUser: requireText(draft.sshUser, "SSH user"),
+    sshHost: requireText(draft.sshHost, "SSH host"),
+    sshPort: parsePort(draft.sshPort, "SSH port", false),
+    identityFile: optionalIdentityFileForConfig(draft.identityFile, homePath),
+    timeouts: draft.timeouts,
+  };
+}
+
+/**
+ * SSH取り込み候補の既定タグを生成する
+ */
+function defaultImportTags(form: SshImportFormState): string[] {
+  const tags = form.includeImportTag ? ["imported"] : [];
+
+  for (const tag of parseTags(form.tags)) {
+    if (!tags.includes(tag)) {
+      tags.push(tag);
+    }
+  }
+
+  return tags;
+}
+
+/**
+ * 同一スコープ内で未使用の取り込み名を生成する
+ */
+function nextImportTunnelId(usedIds: ReadonlySet<string>): string {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const id = generatedImportTunnelId();
+
+    if (!usedIds.has(id)) {
+      return id;
+    }
+  }
+
+  return `tunnel-${Date.now().toString(16).slice(-8)}`;
+}
+
+/**
+ * 取り込みトンネル用の短いランダム名を生成する
+ */
+function generatedImportTunnelId(): string {
+  const randomUuid = globalThis.crypto?.randomUUID?.().replaceAll("-", "");
+
+  if (randomUuid !== undefined) {
+    return `tunnel-${randomUuid.slice(0, 8)}`;
+  }
+
+  const random = Math.floor(Math.random() * 0xffffffff)
+    .toString(16)
+    .padStart(8, "0");
+
+  return `tunnel-${random}`;
 }
 
 /**

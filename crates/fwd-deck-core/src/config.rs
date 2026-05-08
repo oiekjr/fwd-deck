@@ -312,6 +312,15 @@ pub enum ConfigEditError {
     )]
     DuplicateName { path: PathBuf, name: String },
     #[error(
+        "Local port already exists in configuration file: {local_port} ({existing_name}, {})",
+        format_path_for_display(.path)
+    )]
+    DuplicateLocalPort {
+        path: PathBuf,
+        local_port: u16,
+        existing_name: String,
+    },
+    #[error(
         "Tunnel name was not found in configuration file: {name} ({})",
         format_path_for_display(.path)
     )]
@@ -500,6 +509,50 @@ pub fn add_tunnel_to_config_file(
     }
 
     file.tunnels.push(tunnel);
+    write_config_file(path, &file)?;
+
+    Ok(file)
+}
+
+/// 指定された設定ファイルへ複数トンネル設定をまとめて追加する
+pub fn add_tunnels_to_config_file(
+    path: &Path,
+    kind: ConfigSourceKind,
+    tunnels: Vec<TunnelConfig>,
+) -> Result<LoadedConfigFile, ConfigEditError> {
+    let mut file = read_config_file_for_edit(path, kind, true)?;
+    let tunnels = normalize_tunnels(tunnels);
+    let mut existing_names = HashMap::<String, ()>::new();
+    let mut existing_local_ports = HashMap::<u16, String>::new();
+
+    for existing in &file.tunnels {
+        existing_names.insert(existing.name.clone(), ());
+        existing_local_ports
+            .entry(existing.local_port)
+            .or_insert_with(|| existing.name.clone());
+    }
+
+    for tunnel in &tunnels {
+        if existing_names.contains_key(&tunnel.name) {
+            return Err(ConfigEditError::DuplicateName {
+                path: path.to_path_buf(),
+                name: tunnel.name.clone(),
+            });
+        }
+
+        if let Some(existing_name) = existing_local_ports.get(&tunnel.local_port) {
+            return Err(ConfigEditError::DuplicateLocalPort {
+                path: path.to_path_buf(),
+                local_port: tunnel.local_port,
+                existing_name: existing_name.clone(),
+            });
+        }
+
+        existing_names.insert(tunnel.name.clone(), ());
+        existing_local_ports.insert(tunnel.local_port, tunnel.name.clone());
+    }
+
+    file.tunnels.extend(tunnels);
     write_config_file(path, &file)?;
 
     Ok(file)
@@ -1459,6 +1512,51 @@ ssh_host = "bastion.example.com"
         let result = add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel("db", 25432));
 
         assert!(matches!(result, Err(ConfigEditError::DuplicateName { .. })));
+    }
+
+    /// 複数トンネルを1回の書き込みで追加できることを検証する
+    #[test]
+    fn add_tunnels_adds_multiple_entries_atomically() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+
+        add_tunnels_to_config_file(
+            &path,
+            ConfigSourceKind::Local,
+            vec![tunnel("db", 15432), tunnel("cache", 16379)],
+        )
+        .expect("add tunnels");
+        let loaded = read_config_file(&path, ConfigSourceKind::Local)
+            .expect("read configuration")
+            .expect("configuration file exists");
+
+        assert_eq!(loaded.tunnels.len(), 2);
+        assert_eq!(loaded.tunnels[0].name, "db");
+        assert_eq!(loaded.tunnels[1].name, "cache");
+    }
+
+    /// 複数追加時の local_port 重複は保存前に拒否されることを検証する
+    #[test]
+    fn add_tunnels_rejects_duplicate_local_port() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel("db", 15432))
+            .expect("add tunnel");
+
+        let result = add_tunnels_to_config_file(
+            &path,
+            ConfigSourceKind::Local,
+            vec![tunnel("cache", 15432)],
+        );
+        let loaded = read_config_file(&path, ConfigSourceKind::Local)
+            .expect("read configuration")
+            .expect("configuration file exists");
+
+        assert!(matches!(
+            result,
+            Err(ConfigEditError::DuplicateLocalPort { .. })
+        ));
+        assert_eq!(loaded.tunnels.len(), 1);
     }
 
     /// 指定 name のトンネルが設定ファイルから削除されることを検証する

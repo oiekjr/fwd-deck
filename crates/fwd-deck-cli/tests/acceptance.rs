@@ -412,6 +412,121 @@ fn config_add_help_displays_scope_selection_note() {
     );
 }
 
+/// config import-ssh が複数 -L を複数トンネルとして追加することを検証する
+#[test]
+fn config_import_ssh_adds_multiple_tunnels_from_ssh_args() {
+    let workspace = TestWorkspace::new();
+
+    let output = workspace.run([
+        "config",
+        "import-ssh",
+        "--scope",
+        "local",
+        "--name-prefix",
+        "imc",
+        "--",
+        "ssh",
+        "-v",
+        "-N",
+        "-L",
+        "localhost:45432:prod-db.example.com:5432",
+        "-L",
+        "localhost:45433:dev-db.example.com:5432",
+        "-o",
+        "ConnectTimeout=15",
+        "-o",
+        "TCPKeepAlive=yes",
+        "-i",
+        "/tmp/key.pem",
+        "-p",
+        "22",
+        "ec2-user@bastion.example.com",
+    ]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("Imported 2 tunnel(s)");
+    output.assert_stderr_contains("TCPKeepAlive");
+    let content = fs::read_to_string(workspace.config_path()).expect("read configuration");
+    assert!(content.contains("name = \"imc-1\""));
+    assert!(content.contains("name = \"imc-2\""));
+    assert!(content.contains("tags = [\"imported\"]"));
+    assert!(content.contains("local_port = 45432"));
+    assert!(content.contains("local_port = 45433"));
+    assert!(content.contains("remote_host = \"prod-db.example.com\""));
+    assert!(content.contains("identity_file = \"/tmp/key.pem\""));
+    assert!(content.contains("connect_timeout_seconds = 15"));
+}
+
+/// config import-ssh が --command と任意タグを反映することを検証する
+#[test]
+fn config_import_ssh_command_supports_no_import_tag_and_custom_tag() {
+    let workspace = TestWorkspace::new();
+
+    let output = workspace.run([
+        "config",
+        "import-ssh",
+        "--scope",
+        "local",
+        "--name",
+        "dev-db",
+        "--no-import-tag",
+        "--tag",
+        "dev",
+        "--command",
+        "ssh -N -L 15432:db.example.com:5432 -l ec2-user bastion.example.com",
+    ]);
+
+    assert!(output.status.success());
+    let content = fs::read_to_string(workspace.config_path()).expect("read configuration");
+    assert!(content.contains("name = \"dev-db\""));
+    assert!(content.contains("tags = [\"dev\"]"));
+    assert!(!content.contains("imported"));
+}
+
+/// config import-ssh が複数 -L と --name の組み合わせを拒否することを検証する
+#[test]
+fn config_import_ssh_rejects_name_for_multiple_forwards() {
+    let workspace = TestWorkspace::new();
+
+    let output = workspace.run([
+        "config",
+        "import-ssh",
+        "--scope",
+        "local",
+        "--name",
+        "db",
+        "--command",
+        "ssh -L 15432:db.example.com:5432 -L 15433:db2.example.com:5432 user@bastion",
+    ]);
+
+    assert!(!output.status.success());
+    output.assert_stderr_contains("--name は -L が1つの場合だけ指定できます");
+    assert!(!workspace.config_path().exists());
+}
+
+/// config import-ssh が既存 local_port との重複を拒否することを検証する
+#[test]
+fn config_import_ssh_rejects_existing_local_port_conflict() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(single_tunnel_config("existing-db", 15432).as_str());
+
+    let output = workspace.run([
+        "config",
+        "import-ssh",
+        "--scope",
+        "local",
+        "--name",
+        "imported-db",
+        "--command",
+        "ssh -L 15432:db.example.com:5432 user@bastion",
+    ]);
+
+    assert!(!output.status.success());
+    output.assert_stderr_contains("local_port は既存トンネルと重複しています");
+    let content = fs::read_to_string(workspace.config_path()).expect("read configuration");
+    assert!(!content.contains("imported-db"));
+}
+
 /// doctor が設定ファイルなしを失敗として診断することを検証する
 #[test]
 fn doctor_fails_when_configuration_is_missing() {
@@ -603,6 +718,11 @@ impl TestWorkspace {
     /// 一時ワークスペースのパスを取得する
     fn path(&self) -> &Path {
         self.temp_dir.path()
+    }
+
+    /// 設定ファイルのパスを取得する
+    fn config_path(&self) -> &Path {
+        &self.config_path
     }
 
     /// 設定ファイルのパスを CLI 引数用文字列として取得する

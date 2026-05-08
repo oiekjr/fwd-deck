@@ -1320,9 +1320,11 @@ version = "0.3.14"
 dependencies = [
  "libc",
  "serde",
+ "shlex",
  "tempfile",
  "thiserror 2.0.18",
  "toml 0.8.2",
+ "uuid",
 ]
 
 [[package]]

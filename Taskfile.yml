@@ -34,7 +34,7 @@ tasks:
   lint:
     desc: Clippy で警告をエラーとして検査する
     cmds:
-      - cargo clippy --workspace -- -D warnings
+      - cargo clippy --workspace --all-targets -- -D warnings
 
   check:
     desc: 整形、テスト、lint をまとめて実行する

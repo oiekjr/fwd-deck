@@ -108,6 +108,7 @@ const QUIT_DIALOG_TITLE: &str = "Fwd Deck を終了";
 const QUIT_DIALOG_STOP_LABEL: &str = "停止して終了";
 const QUIT_DIALOG_KEEP_LABEL: &str = "停止せず終了";
 const QUIT_DIALOG_CANCEL_LABEL: &str = "キャンセル";
+#[cfg(target_os = "macos")]
 const QUIT_DIALOG_SUPPRESSION_LABEL: &str = "次回から確認しない";
 const QUIT_ERROR_TITLE: &str = "ポートフォワーディングを停止できませんでした";
 const QUIT_PREFERENCE_ERROR_TITLE: &str = "終了時確認設定を保存できませんでした";
@@ -2977,6 +2978,7 @@ fn show_quit_confirmation_dialog(
 }
 
 /// 終了確認ダイアログの結果を保持する
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct QuitConfirmationDialogResult {
     action: QuitDialogAction,

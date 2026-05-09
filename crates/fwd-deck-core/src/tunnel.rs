@@ -14,7 +14,11 @@ use thiserror::Error;
 
 use crate::{
     ResolvedTimeoutConfig, ResolvedTunnelConfig, TunnelState, TunnelStateFile,
-    state::{StateFileError, read_state_file, runtime_id_for_resolved_tunnel, write_state_file},
+    state::{
+        StateFileError, normalize_runtime_source_path, read_state_file,
+        runtime_id_for_resolved_tunnel, tunnel_runtime_id_from_normalized_source_path,
+        write_state_file,
+    },
 };
 
 const STARTUP_LISTEN_CONFIRMATION_MILLISECONDS: u64 = 1_000;
@@ -209,11 +213,13 @@ where
         .collect::<Vec<_>>();
     let mut pending_jobs = Vec::new();
     let existing_state_probe = RuntimeStatusProbe::from_states(&state_file.tunnels);
+    let existing_states = index_tunnel_states_by_runtime_id(&state_file);
+    let mut runtime_id_cache = RuntimeIdCache::default();
 
     for (index, resolved) in resolved_tunnels.iter().enumerate() {
-        let runtime_id = runtime_id_for_resolved_tunnel(resolved);
+        let runtime_id = runtime_id_cache.runtime_id_for_resolved_tunnel(resolved);
 
-        if let Some(existing) = state_file.get(&runtime_id)
+        if let Some(existing) = existing_states.get(runtime_id.as_str())
             && existing_state_probe.process_state_for(existing) == ProcessState::Running
         {
             let result = Err(TunnelRuntimeError::AlreadyRunning {
@@ -350,13 +356,14 @@ where
     let mut state_file = read_state_file(state_path)?;
     let probe = RuntimeStatusProbe::from_states(&state_file.tunnels);
     let mut results = Vec::with_capacity(runtime_ids.len());
-    let mut removal_counts = HashMap::<String, usize>::new();
+    let mut removal_counts = HashMap::<&str, usize>::new();
 
     {
         let indexed_states = index_tunnel_states_by_runtime_id(&state_file);
-        let mut removed_runtime_ids = HashSet::<String>::new();
+        let mut removed_runtime_ids = HashSet::<&str>::new();
 
         for (index, runtime_id) in runtime_ids.iter().enumerate() {
+            let runtime_id = runtime_id.as_str();
             let result = stop_tunnel_from_indexed_state_file(
                 &indexed_states,
                 &removed_runtime_ids,
@@ -365,8 +372,8 @@ where
             );
 
             if result.is_ok() {
-                removed_runtime_ids.insert(runtime_id.clone());
-                *removal_counts.entry(runtime_id.clone()).or_default() += 1;
+                removed_runtime_ids.insert(runtime_id);
+                *removal_counts.entry(runtime_id).or_default() += 1;
             }
 
             on_result(index, &result);
@@ -423,7 +430,7 @@ fn index_tunnel_states_by_runtime_id(state_file: &TunnelStateFile) -> HashMap<&s
 /// 索引済み状態ファイルから指定トンネルを停止対象として解決する
 fn stop_tunnel_from_indexed_state_file(
     states: &HashMap<&str, &TunnelState>,
-    removed_runtime_ids: &HashSet<String>,
+    removed_runtime_ids: &HashSet<&str>,
     probe: &RuntimeStatusProbe,
     runtime_id: &str,
 ) -> Result<StoppedTunnel, TunnelRuntimeError> {
@@ -453,10 +460,10 @@ fn stop_tunnel_from_indexed_state_file(
 /// 停止済み runtime ID に対応する状態だけを状態ファイルから削除する
 fn remove_tunnel_states_by_runtime_id_counts(
     state_file: &mut TunnelStateFile,
-    removal_counts: &mut HashMap<String, usize>,
+    removal_counts: &mut HashMap<&str, usize>,
 ) {
     state_file.tunnels.retain(|state| {
-        let Some(count) = removal_counts.get_mut(&state.runtime_id) else {
+        let Some(count) = removal_counts.get_mut(state.runtime_id.as_str()) else {
             return true;
         };
 
@@ -467,6 +474,31 @@ fn remove_tunnel_states_by_runtime_id_counts(
         *count -= 1;
         false
     });
+}
+
+/// 設定ファイルパスの正規化結果を再利用して runtime ID を生成する
+#[derive(Debug, Default)]
+struct RuntimeIdCache {
+    normalized_source_paths: HashMap<PathBuf, PathBuf>,
+}
+
+impl RuntimeIdCache {
+    /// 解決済みトンネル設定から runtime ID を生成する
+    fn runtime_id_for_resolved_tunnel(&mut self, resolved: &ResolvedTunnelConfig) -> String {
+        tunnel_runtime_id_from_normalized_source_path(
+            resolved.source.kind,
+            self.normalized_source_path(&resolved.source.path),
+            &resolved.tunnel.name,
+        )
+    }
+
+    /// 設定ファイルパスの正規化結果を取得する
+    fn normalized_source_path(&mut self, source_path: &Path) -> &Path {
+        self.normalized_source_paths
+            .entry(source_path.to_path_buf())
+            .or_insert_with(|| normalize_runtime_source_path(source_path))
+            .as_path()
+    }
 }
 
 /// トンネル状態から実行状態を判定する
@@ -484,24 +516,21 @@ struct RuntimeStatusProbe {
 impl RuntimeStatusProbe {
     /// 状態一覧からプロセス状態の検査結果を初期化する
     fn from_states<'a>(states: impl IntoIterator<Item = &'a TunnelState>) -> Self {
-        let states = states.into_iter().collect::<Vec<_>>();
-        let pid_is_running = states
-            .iter()
-            .map(|state| state.pid)
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .map(|pid| (pid, process_is_running(pid)))
-            .collect::<HashMap<_, _>>();
-        let running_pids = states
-            .iter()
-            .map(|state| state.pid)
-            .filter(|pid| pid_is_running.get(pid).copied().unwrap_or(false))
-            .collect::<HashSet<_>>();
-        let local_ports = states
-            .iter()
-            .filter(|state| running_pids.contains(&state.pid))
-            .map(|state| state.local_port)
-            .collect::<HashSet<_>>();
+        let mut pid_is_running = HashMap::new();
+        let mut running_pids = HashSet::new();
+        let mut local_ports = HashSet::new();
+
+        for state in states {
+            let is_running = pid_is_running
+                .entry(state.pid)
+                .or_insert_with(|| process_is_running(state.pid));
+
+            if *is_running {
+                running_pids.insert(state.pid);
+                local_ports.insert(state.local_port);
+            }
+        }
+
         let local_port_processes =
             find_local_port_processes_by_ports_for_pids(&local_ports, &running_pids);
 

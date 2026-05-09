@@ -7316,9 +7316,25 @@ function hasCompleteFilterSelection<Value extends string>(
   selectedValues: readonly Value[],
   allValues: ReadonlyArray<Value>,
 ): boolean {
-  const selected = new Set(selectedValues);
+  return (
+    uniqueValueCount(selectedValues) === allValues.length &&
+    allValues.every((value) => selectedValues.includes(value))
+  );
+}
 
-  return selected.size === allValues.length && allValues.every((value) => selected.has(value));
+/**
+ * 配列内の一意な値の件数を取得する
+ */
+function uniqueValueCount<Value extends string>(values: readonly Value[]): number {
+  let count = 0;
+
+  values.forEach((value, index) => {
+    if (values.indexOf(value) === index) {
+      count += 1;
+    }
+  });
+
+  return count;
 }
 
 /**
@@ -7338,10 +7354,8 @@ function filterSelectionLabels<Value extends string>(
   selectedValues: readonly Value[],
   options: ReadonlyArray<{ value: Value; label: string }>,
 ): string {
-  const selected = new Set(selectedValues);
-
   return options
-    .filter((option) => selected.has(option.value))
+    .filter((option) => selectedValues.includes(option.value))
     .map((option) => option.label)
     .join(", ");
 }

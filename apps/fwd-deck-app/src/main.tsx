@@ -3175,7 +3175,7 @@ function SshImportForm({
           <AlertMessage kind="warning">
             <div className="flex flex-col gap-1">
               {warnings.map((warning, index) => (
-                <span key={`${warning.option}-${index}`}>
+                <span className="[overflow-wrap:anywhere]" key={`${warning.option}-${index}`}>
                   {warning.option}: {warning.message}
                 </span>
               ))}
@@ -4033,8 +4033,10 @@ interface IssueRowProps {
 function IssueRow({ issue, kind }: IssueRowProps): ReactElement {
   return (
     <AlertMessage kind={kind}>
-      {issue.tunnelName ? `${issue.tunnelName}: ` : ""}
-      {issue.message}
+      <span className="[overflow-wrap:anywhere]">
+        {issue.tunnelName ? `${issue.tunnelName}: ` : ""}
+        {issue.message}
+      </span>
     </AlertMessage>
   );
 }
@@ -5338,7 +5340,7 @@ const TunnelCard = memo(function TunnelCard({
           </div>
         </div>
 
-        <p className="min-h-10 text-sm leading-5 text-foreground/60">
+        <p className="min-h-10 text-sm leading-5 text-foreground/60 [overflow-wrap:anywhere]">
           <HighlightedText text={tunnel.description ?? "No description"} query={highlightQuery} />
         </p>
 
@@ -5554,8 +5556,10 @@ function TagList({ tags, query }: TagListProps): ReactElement {
   return (
     <div className="flex min-h-6 flex-wrap items-center gap-1">
       {tags.map((tag) => (
-        <Chip color="accent" key={tag} size="sm" variant="soft">
-          <HighlightedText text={tag} query={query} />
+        <Chip className="min-w-0" color="accent" key={tag} size="sm" variant="soft" title={tag}>
+          <span className="block min-w-0 truncate">
+            <HighlightedText text={tag} query={query} />
+          </span>
         </Chip>
       ))}
     </div>
@@ -5607,9 +5611,9 @@ interface EndpointNodeProps {
 function EndpointNode({ icon, label, value, query = "" }: EndpointNodeProps): ReactElement {
   return (
     <div className="min-w-0 rounded-lg border border-border bg-card px-2.5 py-2">
-      <div className="flex items-center gap-2 text-xs font-semibold text-foreground/55">
-        <span>{icon}</span>
-        <span>{label}</span>
+      <div className="flex min-w-0 items-center gap-2 text-xs font-semibold text-foreground/55">
+        <span className="shrink-0">{icon}</span>
+        <span className="min-w-0 truncate">{label}</span>
       </div>
       <div className="mt-1 truncate font-mono text-xs text-foreground/90" title={value}>
         <HighlightedText text={value} query={query} />
@@ -5752,8 +5756,10 @@ function TrackedPanel({
 
                       return (
                         <Table.Row id={tracked.runtimeKey} key={tracked.runtimeKey}>
-                          <Table.Cell className="font-bold">
-                            <div>{tracked.id}</div>
+                          <Table.Cell className="max-w-64 font-bold">
+                            <div className="truncate" title={tracked.id}>
+                              {tracked.id}
+                            </div>
                             <div className="text-[0.65rem] font-normal text-foreground/50">
                               {tracked.runtimeScope}
                             </div>
@@ -6042,9 +6048,11 @@ interface TunnelDraftSummaryProps {
  * 追加フォームの入力内容を接続経路として要約する
  */
 function TunnelDraftSummary({ form }: TunnelDraftSummaryProps): ReactElement {
+  const tunnelName = form.id.trim() || "Untitled tunnel";
+
   return (
     <section className="rounded-lg border border-border bg-card p-3 xl:col-span-3">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(22rem,34rem)] lg:items-center">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs font-medium text-muted-foreground">Draft route</span>
@@ -6052,11 +6060,11 @@ function TunnelDraftSummary({ form }: TunnelDraftSummaryProps): ReactElement {
               {form.scope}
             </Chip>
           </div>
-          <h3 className="mt-1 truncate text-sm font-semibold">
-            {form.id.trim() || "Untitled tunnel"}
+          <h3 className="mt-1 truncate text-sm font-semibold" title={tunnelName}>
+            {tunnelName}
           </h3>
         </div>
-        <div className="grid min-w-0 flex-1 gap-2 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-center">
+        <div className="grid min-w-0 gap-2 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-center">
           <EndpointNode
             icon={<Monitor size={15} />}
             label="Local"
@@ -6795,8 +6803,8 @@ function ConfirmRemoveModal({
               <h3 className="text-base font-semibold">Remove tunnel</h3>
             </div>
             <div className="px-5 py-4">
-              <p className="text-sm leading-6 text-foreground/70">
-                {tunnel.id} を {tunnel.source}{" "}
+              <p className="text-sm leading-6 text-foreground/70 [overflow-wrap:anywhere]">
+                <span className="font-semibold">{tunnel.id}</span> を {tunnel.source}{" "}
                 設定から削除します。この操作は設定ファイルを書き換えます。
               </p>
             </div>

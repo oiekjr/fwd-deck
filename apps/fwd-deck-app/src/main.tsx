@@ -34,9 +34,10 @@ import {
   KeyRound,
   LayoutGrid,
   Link2,
+  ListChecks,
   ListFilter,
+  ListX,
   Loader2,
-  Minus,
   Monitor,
   Pencil,
   Play,
@@ -4548,8 +4549,8 @@ function SelectionActionBar({
                 onPress={onSelectVisible}
                 isDisabled={isBusy || visibleCount === 0 || selectedVisibleCount === visibleCount}
               >
-                <CheckCircle2 size={16} />
-                Select all visible
+                <ListChecks size={16} />
+                Select visible
               </HeroButton>
               <HeroButton
                 type="button"
@@ -4559,7 +4560,7 @@ function SelectionActionBar({
                 onPress={onDeselectVisible}
                 isDisabled={isBusy || selectedVisibleCount === 0}
               >
-                <Minus size={16} />
+                <ListX size={16} />
                 Deselect visible
               </HeroButton>
               <HeroButton

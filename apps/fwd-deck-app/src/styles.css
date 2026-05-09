@@ -89,6 +89,18 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
+  /* ネイティブアプリに近い見た目へ寄せるため、スクロール操作は維持したままスクロールバーの描画のみ抑止する。 */
+  * {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  *::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+
   button,
   input {
     font: inherit;

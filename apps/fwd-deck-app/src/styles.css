@@ -121,8 +121,8 @@
     --tunnel-slim-status-column-width: 5.5rem;
     --tunnel-slim-local-column-width: 9.25rem;
     --tunnel-slim-auto-recover-column-width: 6.25rem;
-    --tunnel-slim-actions-column-width: 14.75rem;
-    --tunnel-slim-min-remote-column-width: 9.5rem;
+    --tunnel-slim-actions-column-width: 14rem;
+    --tunnel-slim-min-remote-column-width: 8.75rem;
     --tunnel-slim-fixed-column-width: calc(
       var(--tunnel-slim-select-column-width) + var(--tunnel-slim-name-column-width) +
         var(--tunnel-slim-status-column-width) + var(--tunnel-slim-local-column-width) +

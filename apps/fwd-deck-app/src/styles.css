@@ -131,7 +131,7 @@
     --tunnel-slim-header-background: color-mix(in oklab, var(--muted) 45%, var(--card));
     --tunnel-slim-row-background: var(--card);
     --tunnel-slim-hover-background: color-mix(in oklab, var(--muted) 40%, var(--card));
-    --tunnel-slim-selected-background: color-mix(in oklab, var(--primary) 5%, var(--card));
+    --tunnel-slim-selected-background: color-mix(in oklab, var(--primary) 4%, var(--card));
     min-width: calc(
       var(--tunnel-slim-fixed-column-width) + var(--tunnel-slim-min-remote-column-width)
     );
@@ -229,6 +229,17 @@
     background: var(--tunnel-slim-selected-background);
   }
 
+  .tunnel-slim-table-row[data-selected="true"] > .tunnel-slim-sticky-select::before {
+    position: absolute;
+    inset-block: 0.625rem;
+    inset-inline-start: 0;
+    width: 0.1875rem;
+    border-radius: 9999px;
+    background: var(--primary);
+    content: "";
+    pointer-events: none;
+  }
+
   .tunnel-slim-sticky-cell {
     position: sticky;
     z-index: 1;
@@ -254,6 +265,21 @@
   .tunnel-slim-sticky-status {
     left: calc(var(--tunnel-slim-select-column-width) + var(--tunnel-slim-name-column-width));
     box-shadow: inset -1px 0 0 var(--border);
+  }
+
+  .tunnel-card-selection {
+    position: relative;
+  }
+
+  .tunnel-card-selection[data-selected="true"]::before {
+    position: absolute;
+    inset-block: 0.75rem;
+    inset-inline-start: 0.5rem;
+    width: 0.1875rem;
+    border-radius: 9999px;
+    background: var(--primary);
+    content: "";
+    pointer-events: none;
   }
 
   .operation-toast {

@@ -5307,9 +5307,10 @@ const TunnelCard = memo(function TunnelCard({
   return (
     <Card
       variant="secondary"
-      className={`flex h-full flex-col border-l-4 transition ${statusBorderClassName} ${
-        checked ? "bg-primary/5" : "bg-card"
+      className={`tunnel-card-selection flex h-full flex-col border-l-4 transition ${statusBorderClassName} ${
+        checked ? "bg-primary/[0.04]" : "bg-card"
       }`}
+      data-selected={checked ? "true" : undefined}
     >
       <div className="flex h-full flex-col gap-3 p-4">
         <div className="flex items-start justify-between gap-3">

@@ -117,11 +117,99 @@
 @layer components {
   .tunnel-slim-table {
     --tunnel-slim-select-column-width: 3rem;
-    --tunnel-slim-name-column-width: 10rem;
+    --tunnel-slim-name-column-width: 12rem;
+    --tunnel-slim-status-column-width: 5.5rem;
+    --tunnel-slim-local-column-width: 9.25rem;
+    --tunnel-slim-auto-recover-column-width: 6.25rem;
+    --tunnel-slim-actions-column-width: 14.75rem;
+    --tunnel-slim-min-remote-column-width: 9.5rem;
+    --tunnel-slim-fixed-column-width: calc(
+      var(--tunnel-slim-select-column-width) + var(--tunnel-slim-name-column-width) +
+        var(--tunnel-slim-status-column-width) + var(--tunnel-slim-local-column-width) +
+        var(--tunnel-slim-auto-recover-column-width) + var(--tunnel-slim-actions-column-width)
+    );
     --tunnel-slim-header-background: color-mix(in oklab, var(--muted) 45%, var(--card));
     --tunnel-slim-row-background: var(--card);
     --tunnel-slim-hover-background: color-mix(in oklab, var(--muted) 40%, var(--card));
     --tunnel-slim-selected-background: color-mix(in oklab, var(--primary) 5%, var(--card));
+    min-width: calc(
+      var(--tunnel-slim-fixed-column-width) + var(--tunnel-slim-min-remote-column-width)
+    );
+  }
+
+  @media (min-width: 72rem) {
+    .tunnel-slim-table {
+      --tunnel-slim-actions-column-width: 18.75rem;
+    }
+  }
+
+  .tunnel-slim-select-column {
+    width: var(--tunnel-slim-select-column-width);
+  }
+
+  .tunnel-slim-name-column {
+    width: var(--tunnel-slim-name-column-width);
+    max-width: var(--tunnel-slim-name-column-width);
+  }
+
+  .tunnel-slim-identity {
+    position: relative;
+    min-width: 0;
+    outline: none;
+  }
+
+  .tunnel-slim-identity-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tunnel-slim-identity-reveal {
+    position: absolute;
+    z-index: 5;
+    inset-block-start: -0.25rem;
+    inset-inline-start: -0.375rem;
+    display: none;
+    max-width: min(42rem, calc(100vw - 5rem));
+    padding: 0.25rem 0.375rem;
+    border-radius: 0.375rem;
+    background: var(--popover);
+    box-shadow:
+      inset 0 0 0 1px var(--border),
+      0 10px 24px rgb(15 23 42 / 0.08),
+      0 1px 4px rgb(15 23 42 / 0.06);
+    color: var(--popover-foreground);
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  .tunnel-slim-identity:hover .tunnel-slim-identity-reveal {
+    display: block;
+  }
+
+  .tunnel-slim-status-column {
+    width: var(--tunnel-slim-status-column-width);
+  }
+
+  .tunnel-slim-local-column {
+    width: var(--tunnel-slim-local-column-width);
+  }
+
+  .tunnel-slim-remote-column {
+    width: calc(100% - var(--tunnel-slim-fixed-column-width));
+  }
+
+  .tunnel-slim-auto-recover-column {
+    width: var(--tunnel-slim-auto-recover-column-width);
+  }
+
+  .tunnel-slim-actions-column {
+    width: var(--tunnel-slim-actions-column-width);
+  }
+
+  .tunnel-slim-table thead th,
+  .tunnel-slim-table tbody td {
+    padding-inline: 0.5rem;
   }
 
   .tunnel-slim-table thead th {
@@ -156,6 +244,11 @@
 
   .tunnel-slim-sticky-name {
     left: var(--tunnel-slim-select-column-width);
+  }
+
+  .tunnel-slim-sticky-name:hover,
+  .tunnel-slim-sticky-name:focus-within {
+    z-index: 3;
   }
 
   .tunnel-slim-sticky-status {

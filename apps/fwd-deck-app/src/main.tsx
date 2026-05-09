@@ -2596,6 +2596,7 @@ interface IconButtonProps {
   label: string;
   variant?: HeroButtonVariant;
   size?: HeroButtonSize;
+  className?: string;
   disabled?: boolean;
   children: ReactNode;
   onPress: () => void;
@@ -2608,6 +2609,7 @@ function IconButton({
   label,
   variant = "ghost",
   size = "sm",
+  className,
   disabled = false,
   children,
   onPress,
@@ -2619,6 +2621,7 @@ function IconButton({
         variant={variant}
         size={size}
         isIconOnly
+        className={className}
         onPress={onPress}
         isDisabled={disabled}
         aria-label={label}
@@ -2634,6 +2637,7 @@ function IconButton({
 
 interface FavoriteButtonProps {
   isFavorite: boolean;
+  className?: string;
   disabled: boolean;
   onPress: () => void;
 }
@@ -2641,12 +2645,23 @@ interface FavoriteButtonProps {
 /**
  * お気に入り状態を切り替えるアイコンボタンを表示する
  */
-function FavoriteButton({ isFavorite, disabled, onPress }: FavoriteButtonProps): ReactElement {
+function FavoriteButton({
+  isFavorite,
+  className,
+  disabled,
+  onPress,
+}: FavoriteButtonProps): ReactElement {
   const label = isFavorite ? "お気に入りから解除" : "お気に入りに追加";
   const iconClassName = isFavorite ? "fill-current text-warning" : "fill-transparent";
 
   return (
-    <IconButton label={label} variant="ghost" onPress={onPress} disabled={disabled}>
+    <IconButton
+      label={label}
+      variant="ghost"
+      className={className}
+      onPress={onPress}
+      disabled={disabled}
+    >
       <Star className={iconClassName} size={14} />
     </IconButton>
   );
@@ -4465,97 +4480,112 @@ function SelectionActionBar({
   }
 
   const hiddenSelectedCount = selectedCount - selectedVisibleCount;
+  const selectedCountLabel = formatSelectionActionCount(selectedCount);
+  const visibleCountLabel = formatSelectionActionCount(visibleCount);
+  const selectedVisibleCountLabel = formatSelectionActionCount(selectedVisibleCount);
+  const hiddenSelectedCountLabel = formatSelectionActionCount(hiddenSelectedCount);
   const selectedInViewLabel =
     selectedCount === 0
-      ? `${visibleCount} visible results`
-      : `${selectedVisibleCount} in current view`;
+      ? `${visibleCountLabel} visible results`
+      : `${selectedVisibleCountLabel} in current view`;
 
   return (
     <section className="pointer-events-none relative z-10 min-h-0" aria-live="polite">
       <div
         ref={panelRef}
-        className="pointer-events-auto mx-auto flex max-h-[min(16rem,100%)] w-full max-w-[96rem] flex-col gap-2 overflow-auto rounded-xl border border-border bg-card/95 px-3 py-2 shadow-2xl backdrop-blur xl:flex-row xl:items-center xl:justify-between"
+        className="pointer-events-auto mx-auto flex max-h-[min(16rem,100%)] w-full max-w-[96rem] flex-col gap-2 overflow-auto rounded-xl border border-border bg-card/95 px-3 py-2 shadow-2xl backdrop-blur min-[84rem]:flex-row min-[84rem]:items-center min-[84rem]:justify-between"
       >
         <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <CheckCircle2 className="text-foreground/70" size={16} />
-            <h2 className="text-sm leading-6 font-bold">Bulk actions</h2>
-            <Chip color="accent" size="sm" variant="primary">
-              {selectedCount} total selected
+          <div className="flex flex-wrap items-center gap-2 min-[84rem]:flex-nowrap">
+            <CheckCircle2 className="shrink-0 text-foreground/70" size={16} />
+            <h2 className="text-sm leading-6 font-bold whitespace-nowrap">Bulk actions</h2>
+            <Chip className="whitespace-nowrap" color="accent" size="sm" variant="primary">
+              {selectedCountLabel} total selected
             </Chip>
-            <Chip size="sm" variant="secondary">
+            <Chip className="whitespace-nowrap" size="sm" variant="secondary">
               {selectedInViewLabel}
             </Chip>
             {hiddenSelectedCount > 0 ? (
-              <Chip color="warning" size="sm" variant="soft">
-                {hiddenSelectedCount} hidden by filters included
+              <Chip className="whitespace-nowrap" color="warning" size="sm" variant="soft">
+                {hiddenSelectedCountLabel} hidden by filters included
               </Chip>
             ) : null}
           </div>
         </div>
 
-        <div className="flex flex-col gap-2 xl:flex-row xl:items-center xl:justify-end">
+        <div className="flex flex-col gap-2 min-[84rem]:flex-row min-[84rem]:items-center min-[84rem]:justify-end">
           <SelectionOperationProgress progress={operationProgress} />
 
-          <div className="grid grid-cols-2 gap-2 xl:grid-cols-[repeat(2,max-content)]">
-            <HeroButton
-              type="button"
-              variant="primary"
-              size="sm"
-              onPress={onStart}
-              isDisabled={isBusy || selectedCount === 0}
-            >
-              <Play size={16} />
-              Start selected
-            </HeroButton>
-            <HeroButton
-              type="button"
-              variant="danger"
-              size="sm"
-              onPress={onStop}
-              isDisabled={isBusy || selectedCount === 0}
-            >
-              <CircleStop size={16} />
-              Stop selected
-            </HeroButton>
-          </div>
-
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 xl:grid-cols-[repeat(3,max-content)]">
-            <HeroButton
-              type="button"
-              variant="outline"
-              size="sm"
-              onPress={onSelectVisible}
-              isDisabled={isBusy || visibleCount === 0 || selectedVisibleCount === visibleCount}
-            >
-              <CheckCircle2 size={16} />
-              Select all visible
-            </HeroButton>
-            <HeroButton
-              type="button"
-              variant="outline"
-              size="sm"
-              onPress={onDeselectVisible}
-              isDisabled={isBusy || selectedVisibleCount === 0}
-            >
-              <Minus size={16} />
-              Deselect visible
-            </HeroButton>
-            <HeroButton
-              type="button"
-              variant="outline"
-              size="sm"
-              onPress={onClear}
-              isDisabled={isBusy || selectedCount === 0}
-            >
-              <X size={16} />
-              Clear all
-            </HeroButton>
+          <div className="w-full max-w-full overflow-x-auto min-[84rem]:w-auto">
+            <div className="grid min-w-max grid-cols-[repeat(5,minmax(max-content,1fr))] items-center gap-2 min-[84rem]:grid-cols-[repeat(5,max-content)]">
+              <HeroButton
+                type="button"
+                variant="primary"
+                size="sm"
+                fullWidth
+                onPress={onStart}
+                isDisabled={isBusy || selectedCount === 0}
+              >
+                <Play size={16} />
+                Start selected
+              </HeroButton>
+              <HeroButton
+                type="button"
+                variant="danger"
+                size="sm"
+                fullWidth
+                onPress={onStop}
+                isDisabled={isBusy || selectedCount === 0}
+              >
+                <CircleStop size={16} />
+                Stop selected
+              </HeroButton>
+              <HeroButton
+                type="button"
+                variant="outline"
+                size="sm"
+                fullWidth
+                onPress={onSelectVisible}
+                isDisabled={isBusy || visibleCount === 0 || selectedVisibleCount === visibleCount}
+              >
+                <CheckCircle2 size={16} />
+                Select all visible
+              </HeroButton>
+              <HeroButton
+                type="button"
+                variant="outline"
+                size="sm"
+                fullWidth
+                onPress={onDeselectVisible}
+                isDisabled={isBusy || selectedVisibleCount === 0}
+              >
+                <Minus size={16} />
+                Deselect visible
+              </HeroButton>
+              <HeroButton
+                type="button"
+                variant="outline"
+                size="sm"
+                fullWidth
+                onPress={onClear}
+                isDisabled={isBusy || selectedCount === 0}
+              >
+                <X size={16} />
+                Clear all
+              </HeroButton>
+            </div>
           </div>
         </div>
       </div>
     </section>
   );
+}
+
+/**
+ * Selection バー内の件数表示を安定した幅へ丸める
+ */
+function formatSelectionActionCount(count: number): string {
+  return count > 99 ? "99+" : String(count);
 }
 
 /**
@@ -4613,7 +4643,7 @@ function SelectionOperationProgress({
   const label = operationProgressLabel(progress);
 
   return (
-    <div className="min-w-0 rounded-lg border border-border bg-muted/50 px-3 py-2 xl:w-64">
+    <div className="min-w-0 rounded-lg border border-border bg-muted/50 px-3 py-2 min-[84rem]:w-64">
       <div className="flex min-w-0 items-center gap-2">
         <Loader2 className="shrink-0 animate-spin text-primary" size={16} />
         <span className="truncate text-xs font-semibold text-foreground">{label}</span>
@@ -4951,23 +4981,18 @@ function TunnelSlimList({
     <section className="min-w-0 overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       <Table variant="secondary">
         <Table.ScrollContainer>
-          <Table.Content
-            aria-label="Configured tunnels"
-            className="tunnel-slim-table min-w-[85rem] table-fixed"
-          >
+          <Table.Content aria-label="Configured tunnels" className="tunnel-slim-table table-fixed">
             <colgroup>
-              <col className="w-12" />
-              <col className="w-40" />
-              <col className="w-[5.5rem]" />
-              <col className="w-[10.5rem]" />
-              <col className="w-48" />
-              <col className="w-52" />
-              <col className="w-[5.5rem]" />
-              <col className="w-[4.5rem]" />
-              <col className="w-[20.5rem]" />
+              <col className="tunnel-slim-select-column" />
+              <col className="tunnel-slim-name-column" />
+              <col className="tunnel-slim-status-column" />
+              <col className="tunnel-slim-local-column" />
+              <col className="tunnel-slim-remote-column" />
+              <col className="tunnel-slim-auto-recover-column" />
+              <col className="tunnel-slim-actions-column" />
             </colgroup>
             <Table.Header>
-              <Table.Column className="tunnel-slim-sticky-cell tunnel-slim-sticky-select w-12">
+              <Table.Column className="tunnel-slim-sticky-cell tunnel-slim-sticky-select tunnel-slim-select-column">
                 <SelectionCheckbox
                   label={headerSelectionLabel}
                   isSelected={isAllVisibleSelected}
@@ -4977,20 +5002,22 @@ function TunnelSlimList({
                 />
               </Table.Column>
               <Table.Column
-                className="tunnel-slim-sticky-cell tunnel-slim-sticky-name w-40"
+                className="tunnel-slim-sticky-cell tunnel-slim-sticky-name tunnel-slim-name-column"
                 isRowHeader
               >
-                Name
+                Identity
               </Table.Column>
-              <Table.Column className="tunnel-slim-sticky-cell tunnel-slim-sticky-status w-[5.5rem]">
+              <Table.Column className="tunnel-slim-sticky-cell tunnel-slim-sticky-status tunnel-slim-status-column">
                 Status
               </Table.Column>
-              <Table.Column className="w-[10.5rem]">Local</Table.Column>
-              <Table.Column className="w-48">Remote</Table.Column>
-              <Table.Column className="w-52">SSH</Table.Column>
-              <Table.Column className="w-[5.5rem]">Source</Table.Column>
-              <Table.Column className="w-[4.5rem]">Watch</Table.Column>
-              <Table.Column className="w-[20.5rem] pr-3 text-right">Actions</Table.Column>
+              <Table.Column className="tunnel-slim-local-column">Local</Table.Column>
+              <Table.Column>Remote</Table.Column>
+              <Table.Column className="tunnel-slim-auto-recover-column px-1 text-center whitespace-nowrap">
+                Auto recover
+              </Table.Column>
+              <Table.Column className="tunnel-slim-actions-column px-2 text-right">
+                Actions
+              </Table.Column>
             </Table.Header>
             <Table.Body>
               {tunnels.map((tunnel) => (
@@ -5079,37 +5106,27 @@ const TunnelSlimRow = memo(function TunnelSlimRow({
           onChange={() => onToggle(tunnel.runtimeId)}
         />
       </Table.Cell>
-      <Table.Cell className="tunnel-slim-sticky-cell tunnel-slim-sticky-name max-w-56">
-        <div className="truncate text-sm font-bold" title={tunnel.id}>
-          <HighlightedText text={tunnel.id} query={highlightQuery} />
-        </div>
+      <Table.Cell className="tunnel-slim-sticky-cell tunnel-slim-sticky-name tunnel-slim-name-column">
+        <TunnelSlimIdentity id={tunnel.id} source={tunnel.source} query={highlightQuery} />
       </Table.Cell>
-      <Table.Cell className="tunnel-slim-sticky-cell tunnel-slim-sticky-status w-[5.5rem]">
+      <Table.Cell className="tunnel-slim-sticky-cell tunnel-slim-sticky-status tunnel-slim-status-column">
         <StatusBadge
           status={status}
           title={runtimeInfo ? `${runtimeInfo.value} (${runtimeInfo.title})` : undefined}
           ariaLabel={runtimeInfo?.ariaLabel}
         />
       </Table.Cell>
-      <Table.Cell className="max-w-44 truncate font-mono text-xs">
+      <Table.Cell className="tunnel-slim-local-column truncate font-mono text-xs">
         <span title={tunnel.local}>
           <HighlightedText text={tunnel.local} query={highlightQuery} />
         </span>
       </Table.Cell>
-      <Table.Cell className="max-w-44 truncate font-mono text-xs">
+      <Table.Cell className="truncate font-mono text-xs">
         <span title={tunnel.remote}>
           <HighlightedText text={tunnel.remote} query={highlightQuery} />
         </span>
       </Table.Cell>
-      <Table.Cell className="max-w-52 truncate font-mono text-xs">
-        <span title={tunnel.ssh}>
-          <HighlightedText text={tunnel.ssh} query={highlightQuery} />
-        </span>
-      </Table.Cell>
-      <Table.Cell className="font-semibold text-foreground/70">
-        <HighlightedText text={tunnel.source} query={highlightQuery} />
-      </Table.Cell>
-      <Table.Cell>
+      <Table.Cell className="tunnel-slim-auto-recover-column">
         <AutoRecoverSwitch
           tunnel={tunnel}
           isUpdating={isAutoRecoverUpdating}
@@ -5118,36 +5135,38 @@ const TunnelSlimRow = memo(function TunnelSlimRow({
           compact
         />
       </Table.Cell>
-      <Table.Cell className="w-[20.5rem] pr-3">
-        <div className="flex min-w-max items-center justify-end gap-1">
+      <Table.Cell className="tunnel-slim-actions-column px-2">
+        <div className="flex min-w-0 items-center justify-start gap-2">
           <FavoriteButton
             isFavorite={tunnel.isFavorite}
+            className="size-7"
             onPress={() => onToggleFavorite(tunnel)}
             disabled={isBusy || isFavoriteUpdating}
           />
-          <HeroButton
-            type="button"
+          <IconButton
+            label={`${tunnel.id} を開始`}
             variant={running ? "ghost" : "primary"}
-            size="sm"
+            className="h-7 w-7 gap-1.5 min-[72rem]:w-auto min-[72rem]:px-2"
             onPress={() => onStart(tunnel.runtimeId)}
-            isDisabled={isBusy || running}
+            disabled={isBusy || running}
           >
             <Play size={13} />
-            Start
-          </HeroButton>
-          <HeroButton
-            type="button"
+            <span className="hidden min-[72rem]:inline">Start</span>
+          </IconButton>
+          <IconButton
+            label={`${tunnel.id} を停止`}
             variant={running ? "danger" : "outline"}
-            size="sm"
+            className="h-7 w-7 gap-1.5 min-[72rem]:w-auto min-[72rem]:px-2"
             onPress={() => onStop(tunnel.runtimeId)}
-            isDisabled={isBusy || tunnel.status === null}
+            disabled={isBusy || tunnel.status === null}
           >
             <CircleStop size={13} />
-            Stop
-          </HeroButton>
+            <span className="hidden min-[72rem]:inline">Stop</span>
+          </IconButton>
           <IconButton
             label="設定を編集"
             variant="ghost"
+            className="size-7"
             onPress={() => onEdit(tunnel)}
             disabled={isBusy}
           >
@@ -5156,6 +5175,7 @@ const TunnelSlimRow = memo(function TunnelSlimRow({
           <IconButton
             label="設定を複製"
             variant="ghost"
+            className="size-7"
             onPress={() => onDuplicate(tunnel)}
             disabled={isBusy}
           >
@@ -5164,6 +5184,7 @@ const TunnelSlimRow = memo(function TunnelSlimRow({
           <IconButton
             label="設定から削除"
             variant="danger-soft"
+            className="size-7"
             onPress={() => onRemove(tunnel)}
             disabled={isBusy}
           >
@@ -5174,6 +5195,33 @@ const TunnelSlimRow = memo(function TunnelSlimRow({
     </Table.Row>
   );
 }, areTunnelSlimRowPropsEqual);
+
+interface TunnelSlimIdentityProps {
+  id: string;
+  source: ConfigScope;
+  query: string;
+}
+
+/**
+ * スリム一覧内の識別名をホバー時に全文確認できる形で表示する
+ */
+function TunnelSlimIdentity({ id, source, query }: TunnelSlimIdentityProps): ReactElement {
+  return (
+    <div className="tunnel-slim-identity">
+      <div className="tunnel-slim-identity-name text-sm leading-5 font-bold">
+        <HighlightedText text={id} query={query} />
+      </div>
+      <div aria-hidden className="tunnel-slim-identity-reveal text-sm leading-5 font-bold">
+        <HighlightedText text={id} query={query} />
+      </div>
+      <div className="mt-1">
+        <span className="inline-flex h-4 max-w-full items-center truncate rounded-sm bg-muted px-1.5 text-[10px] leading-4 font-semibold text-foreground/55">
+          <HighlightedText text={source} query={query} />
+        </span>
+      </div>
+    </div>
+  );
+}
 
 interface EmptyStateProps {
   title: string;

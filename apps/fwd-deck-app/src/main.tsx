@@ -2178,8 +2178,8 @@ function App(): ReactElement {
   });
 
   return (
-    <main className="min-h-screen bg-muted/45 text-foreground">
-      <div className="flex min-h-screen flex-col">
+    <main className="min-h-screen overflow-x-hidden bg-muted/45 text-foreground">
+      <div className="flex min-h-screen min-w-0 flex-col">
         <AppHeader
           stats={stats}
           paths={paths}
@@ -2193,7 +2193,7 @@ function App(): ReactElement {
           onRefresh={handleRefreshDashboard}
         />
 
-        <div className="mx-auto flex w-full max-w-[96rem] flex-1 flex-col gap-3 px-3 py-3 sm:px-4 lg:px-5">
+        <div className="mx-auto flex min-w-0 w-full max-w-[96rem] flex-1 flex-col gap-3 px-3 py-3 sm:px-4 lg:px-5">
           <MessagePanel message={message} />
 
           {activeView === "dashboard" ? (
@@ -2367,7 +2367,7 @@ const AppHeader = memo(function AppHeader({
 }: AppHeaderProps): ReactElement {
   return (
     <header className="sticky top-0 z-30 border-b border-border bg-card/90 backdrop-blur supports-[backdrop-filter]:bg-card/80">
-      <div className="mx-auto grid w-full max-w-[96rem] gap-2 px-3 py-2 sm:px-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center lg:px-5">
+      <div className="mx-auto grid min-w-0 w-full max-w-[96rem] gap-2 px-3 py-2 sm:px-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center lg:px-5">
         <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-center">
           <div className="flex min-w-0 items-center gap-2">
             <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
@@ -2390,7 +2390,7 @@ const AppHeader = memo(function AppHeader({
           />
         </div>
 
-        <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-center md:justify-end">
+        <div className="flex min-w-0 flex-col gap-2 md:flex-row md:flex-wrap md:items-center md:justify-end">
           <nav className="grid w-full grid-cols-2 gap-0.5 rounded-lg border border-border bg-muted p-0.5 md:w-72">
             <HeroButton
               type="button"
@@ -2416,7 +2416,7 @@ const AppHeader = memo(function AppHeader({
             </HeroButton>
           </nav>
 
-          <div className="grid grid-cols-[repeat(3,minmax(0,1fr))_auto_auto] gap-1 md:flex md:items-center">
+          <div className="grid min-w-0 grid-cols-[repeat(3,minmax(0,1fr))_auto_auto] gap-1 md:flex md:flex-wrap md:items-center md:justify-end">
             <StatusMetric label="Configured" value={stats.configured} icon={<Gauge size={15} />} />
             <StatusMetric
               label="Running"
@@ -4067,7 +4067,7 @@ const TunnelOperationsPanel = memo(function TunnelOperationsPanel({
   );
 
   return (
-    <section className="rounded-xl border border-border bg-card shadow-sm">
+    <section className="min-w-0 overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       <div className="flex min-w-0 flex-col gap-3">
         <div className="flex flex-col gap-2 border-b border-border px-3 py-2.5 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0">
@@ -4230,9 +4230,9 @@ const TunnelOperationsPanel = memo(function TunnelOperationsPanel({
                     size="sm"
                     onPress={() => onToggleTag(tag)}
                     aria-pressed={selected}
-                    className="min-h-7 rounded-full px-3"
+                    className="min-h-7 max-w-full rounded-full px-3"
                   >
-                    {tag}
+                    <span className="truncate">{tag}</span>
                   </HeroButton>
                 );
               })}
@@ -4858,7 +4858,7 @@ const TunnelDeck = memo(function TunnelDeck({
   }
 
   return (
-    <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+    <section className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-2">
       {tunnels.map((tunnel) => (
         <TunnelCard
           key={tunnel.runtimeId}
@@ -4948,7 +4948,7 @@ function TunnelSlimList({
   }
 
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+    <section className="min-w-0 overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       <Table variant="secondary">
         <Table.ScrollContainer>
           <Table.Content

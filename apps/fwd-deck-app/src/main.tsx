@@ -37,11 +37,13 @@ import {
   ListFilter,
   Loader2,
   Minus,
+  Monitor,
   Pencil,
   Play,
   RefreshCw,
   RotateCcw,
   Rows3,
+  Save,
   Search,
   Server,
   Settings2,
@@ -3418,7 +3420,7 @@ function SettingsModal({
                 onPress={onApply}
                 isDisabled={isBusy}
               >
-                {isBusy ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+                {isBusy ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />}
                 Apply changes
               </HeroButton>
             </div>
@@ -3648,7 +3650,7 @@ function PathPanel({
               aria-pressed={paths.runningTunnelsOnQuitDefaultAction === "keep"}
               isDisabled={isBusy}
             >
-              <Unlink size={14} />
+              <Activity size={14} />
               Keep running
             </HeroButton>
           </div>
@@ -5524,14 +5526,14 @@ function EndpointList({ tunnel, query }: EndpointListProps): ReactElement {
     <div className="rounded-lg border border-border bg-muted/35 p-2.5">
       <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] xl:items-center">
         <EndpointNode
-          icon={<Server size={15} />}
+          icon={<Monitor size={15} />}
           label="Local"
           value={tunnel.local}
           query={query}
         />
         <RouteConnector />
         <EndpointNode
-          icon={<ArrowRight size={15} />}
+          icon={<Server size={15} />}
           label="Remote"
           value={tunnel.remote}
           query={query}
@@ -6007,13 +6009,13 @@ function TunnelDraftSummary({ form }: TunnelDraftSummaryProps): ReactElement {
         </div>
         <div className="grid min-w-0 flex-1 gap-2 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-center">
           <EndpointNode
-            icon={<Server size={15} />}
+            icon={<Monitor size={15} />}
             label="Local"
             value={formatDraftEndpoint(form.localHost, form.localPort, "local host:port")}
           />
           <RouteConnector horizontalAt="lg" />
           <EndpointNode
-            icon={<ArrowRight size={15} />}
+            icon={<Server size={15} />}
             label="Remote"
             value={formatDraftEndpoint(form.remoteHost, form.remotePort, "remote host:port")}
           />
@@ -6066,13 +6068,13 @@ function DuplicateTunnelDraftSummary({ form }: DuplicateTunnelDraftSummaryProps)
     <section className="rounded-lg border border-border bg-card p-3 xl:col-span-3">
       <div className="grid min-w-0 gap-2 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-center">
         <EndpointNode
-          icon={<Server size={15} />}
+          icon={<Monitor size={15} />}
           label="Local"
           value={formatDraftEndpoint(form.localHost, form.localPort, "local host:port")}
         />
         <RouteConnector horizontalAt="lg" />
         <EndpointNode
-          icon={<ArrowRight size={15} />}
+          icon={<Server size={15} />}
           label="Remote"
           value={formatDraftEndpoint(form.remoteHost, form.remotePort, "remote host:port")}
         />

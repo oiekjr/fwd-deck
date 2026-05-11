@@ -31,6 +31,7 @@ use serde::Serialize;
 use thiserror::Error;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+const DEFAULT_START_PARALLELISM: usize = 4;
 const DEFAULT_WATCH_INTERVAL_SECONDS: u64 = 5;
 const LIST_ID_MIN_WIDTH: usize = 24;
 const LIST_LOCAL_MIN_WIDTH: usize = 24;
@@ -142,7 +143,7 @@ const START_AFTER_HELP: &str = "\
 補足:
   NAME を省略すると対話選択を表示します。
   --all、NAME、--tag は同時に指定できません。
-  --parallel は複数トンネルの開始処理を指定件数まで並列実行します。
+  --parallel は複数トンネルの開始処理を指定件数まで並列実行します。省略時は4件です。
   --dry-run は SSH を起動せず、状態ファイルも更新しません。";
 const RECOVER_AFTER_HELP: &str = "\
 例:
@@ -334,7 +335,7 @@ enum Command {
         all: bool,
         #[arg(
             long,
-            default_value_t = 1,
+            default_value_t = DEFAULT_START_PARALLELISM,
             help = "複数トンネルの開始処理を指定件数まで並列実行する"
         )]
         parallel: usize,

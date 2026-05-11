@@ -536,6 +536,9 @@ const millisecondsPerSecond = 1_000;
 const secondsPerMinute = 60;
 const secondsPerHour = secondsPerMinute * 60;
 const secondsPerDay = secondsPerHour * 24;
+const runtimeAgeMinuteKeyOffset = 1_000_000;
+const runtimeAgeHourKeyOffset = 2_000_000;
+const runtimeAgeDayKeyOffset = 3_000_000;
 
 const initialOperationToastState: OperationToastState = {
   queue: [],
@@ -6989,8 +6992,8 @@ function runtimeSummaryOutputEquals(
   }
 
   return (
-    formatRuntimeAge(previous.startedAtUnixSeconds, previousNowUnixSeconds) ===
-    formatRuntimeAge(next.startedAtUnixSeconds, nextNowUnixSeconds)
+    runtimeAgeLabelKey(previous.startedAtUnixSeconds, previousNowUnixSeconds) ===
+    runtimeAgeLabelKey(next.startedAtUnixSeconds, nextNowUnixSeconds)
   );
 }
 
@@ -7516,8 +7519,8 @@ function runtimeAgeLabelChanged(
   nextNowUnixSeconds: number,
 ): boolean {
   return (
-    formatRuntimeAge(status.startedAtUnixSeconds, previousNowUnixSeconds) !==
-    formatRuntimeAge(status.startedAtUnixSeconds, nextNowUnixSeconds)
+    runtimeAgeLabelKey(status.startedAtUnixSeconds, previousNowUnixSeconds) !==
+    runtimeAgeLabelKey(status.startedAtUnixSeconds, nextNowUnixSeconds)
   );
 }
 
@@ -7533,6 +7536,36 @@ function runtimeDisplayInfo(status: RuntimeStatusView, nowUnixSeconds: number): 
     title: `Started at ${startedAt}`,
     ariaLabel: `Runtime pid ${status.pid}, started ${age} (${startedAt})`,
   };
+}
+
+/**
+ * Unix 秒の起動時刻から経過表示の比較キーを生成する
+ */
+function runtimeAgeLabelKey(startedAtUnixSeconds: number, nowUnixSeconds: number): number {
+  if (
+    !Number.isFinite(startedAtUnixSeconds) ||
+    startedAtUnixSeconds <= 0 ||
+    !Number.isFinite(nowUnixSeconds) ||
+    nowUnixSeconds <= 0
+  ) {
+    return 0;
+  }
+
+  const elapsedSeconds = Math.max(0, Math.floor(nowUnixSeconds - startedAtUnixSeconds));
+
+  if (elapsedSeconds < secondsPerMinute) {
+    return 0;
+  }
+
+  if (elapsedSeconds < secondsPerHour) {
+    return runtimeAgeMinuteKeyOffset + Math.floor(elapsedSeconds / secondsPerMinute);
+  }
+
+  if (elapsedSeconds < secondsPerDay) {
+    return runtimeAgeHourKeyOffset + Math.floor(elapsedSeconds / secondsPerHour);
+  }
+
+  return runtimeAgeDayKeyOffset + Math.floor(elapsedSeconds / secondsPerDay);
 }
 
 /**

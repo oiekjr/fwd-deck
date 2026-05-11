@@ -5492,6 +5492,26 @@ impl<'a> RuntimeStatusLookup<'a> {
     }
 }
 
+/// Path の表示用文字列を生成済み結果から再利用する
+#[derive(Debug, Default)]
+struct DisplayPathCache {
+    values: HashMap<PathBuf, String>,
+}
+
+impl DisplayPathCache {
+    /// Path の表示用文字列をキャッシュして取得する
+    fn display_path(&mut self, path: &Path) -> String {
+        if let Some(value) = self.values.get(path) {
+            return value.clone();
+        }
+
+        let value = display_path(path);
+        self.values.insert(path.to_path_buf(), value.clone());
+
+        value
+    }
+}
+
 /// ダッシュボード状態へ変換する
 fn build_dashboard_state(
     runtime_paths: RuntimePaths,
@@ -5511,6 +5531,7 @@ fn build_dashboard_state(
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
+    let mut display_path_cache = DisplayPathCache::default();
     let status_lookup = RuntimeStatusLookup::new(&statuses);
     let mut runtime_id_cache = RuntimeIdCache::default();
     let mut tunnels = config
@@ -5524,6 +5545,7 @@ fn build_dashboard_state(
                 favorite_runtime_ids.contains(runtime_id.as_str()),
                 auto_recover_runtime_ids.contains(runtime_id.as_str()),
                 status_lookup.for_resolved_tunnel(resolved, &runtime_id),
+                &mut display_path_cache,
             )
         })
         .collect::<Vec<_>>();
@@ -5549,13 +5571,13 @@ fn build_dashboard_state(
     });
     let tracked_tunnels = tracked_statuses
         .into_iter()
-        .map(tracked_tunnel_view)
+        .map(|status| tracked_tunnel_view(status, &mut display_path_cache))
         .collect::<Vec<_>>();
 
     DashboardState {
-        paths: path_view(&runtime_paths),
+        paths: path_view_with_cache(&runtime_paths, &mut display_path_cache),
         has_config: config.has_sources(),
-        validation: validation_view(validation),
+        validation: validation_view(validation, &mut display_path_cache),
         tunnels,
         tracked_tunnels,
     }
@@ -5718,35 +5740,42 @@ fn runtime_process_state_sort_rank(process_state: ProcessState) -> u8 {
 
 /// 解決済みパスを表示用へ変換する
 fn path_view(paths: &RuntimePaths) -> PathView {
+    let mut display_path_cache = DisplayPathCache::default();
+
+    path_view_with_cache(paths, &mut display_path_cache)
+}
+
+/// 解決済みパスをキャッシュ済み表示パスで表示用へ変換する
+fn path_view_with_cache(paths: &RuntimePaths, display_paths: &mut DisplayPathCache) -> PathView {
     PathView {
         workspace_path: paths
             .preferences
             .active_workspace_path
             .as_deref()
-            .map(display_path)
+            .map(|path| display_paths.display_path(path))
             .unwrap_or_default(),
         workspace_history: paths
             .preferences
             .workspace_history
             .iter()
-            .map(|path| display_path(path))
+            .map(|path| display_paths.display_path(path))
             .collect(),
         local_config_path: paths
             .local_config_path
             .as_deref()
-            .map(display_path)
+            .map(|path| display_paths.display_path(path))
             .unwrap_or_default(),
         global_config_path: paths
             .global_config_display_path
             .as_deref()
-            .map(display_path)
+            .map(|path| display_paths.display_path(path))
             .unwrap_or_default(),
         use_global: paths.preferences.use_global,
-        global_state_path: display_path(&paths.global_state_path),
+        global_state_path: display_paths.display_path(&paths.global_state_path),
         workspace_state_path: paths
             .workspace_state_path
             .as_deref()
-            .map(display_path)
+            .map(|path| display_paths.display_path(path))
             .unwrap_or_default(),
         global_state_exists: paths.global_state_path.exists(),
         workspace_state_exists: paths
@@ -5763,7 +5792,10 @@ fn path_view(paths: &RuntimePaths) -> PathView {
 }
 
 /// 設定検証結果を表示用へ変換する
-fn validation_view(report: ValidationReport) -> ValidationView {
+fn validation_view(
+    report: ValidationReport,
+    display_paths: &mut DisplayPathCache,
+) -> ValidationView {
     ValidationView {
         is_valid: report.is_valid(),
         errors: report
@@ -5771,7 +5803,7 @@ fn validation_view(report: ValidationReport) -> ValidationView {
             .into_iter()
             .map(|issue| ValidationIssueView {
                 source: issue.source.kind.to_string(),
-                path: display_path(&issue.source.path),
+                path: display_paths.display_path(&issue.source.path),
                 tunnel_name: issue.tunnel_name,
                 message: issue.message,
             })
@@ -5781,7 +5813,7 @@ fn validation_view(report: ValidationReport) -> ValidationView {
             .into_iter()
             .map(|issue| ValidationIssueView {
                 source: issue.source.kind.to_string(),
-                path: display_path(&issue.source.path),
+                path: display_paths.display_path(&issue.source.path),
                 tunnel_name: issue.tunnel_name,
                 message: issue.message,
             })
@@ -5796,6 +5828,7 @@ fn tunnel_view(
     is_favorite: bool,
     auto_recover_enabled: bool,
     status: Option<&ScopedRuntimeStatus>,
+    display_paths: &mut DisplayPathCache,
 ) -> TunnelView {
     let tunnel = &resolved.tunnel;
 
@@ -5818,14 +5851,17 @@ fn tunnel_view(
         ssh: format_ssh_endpoint(tunnel),
         identity_file: tunnel.identity_file.clone(),
         source: resolved.source.kind.to_string(),
-        source_path: display_path(&resolved.source.path),
+        source_path: display_paths.display_path(&resolved.source.path),
         timeouts: timeout_view(resolved.timeouts),
-        status: status.map(runtime_status_view),
+        status: status.map(|status| runtime_status_view(status, display_paths)),
     }
 }
 
 /// 追跡中トンネルを表示用へ変換する
-fn tracked_tunnel_view(status: &ScopedRuntimeStatus) -> TrackedTunnelView {
+fn tracked_tunnel_view(
+    status: &ScopedRuntimeStatus,
+    display_paths: &mut DisplayPathCache,
+) -> TrackedTunnelView {
     let runtime_key = runtime_status_key(status.runtime_scope, &status.status.state.runtime_id);
 
     TrackedTunnelView {
@@ -5836,12 +5872,15 @@ fn tracked_tunnel_view(status: &ScopedRuntimeStatus) -> TrackedTunnelView {
         local: format_state_local_endpoint(&status.status),
         remote: format_state_remote_endpoint(&status.status),
         ssh: format_state_ssh_endpoint(&status.status),
-        status: runtime_status_view(status),
+        status: runtime_status_view(status, display_paths),
     }
 }
 
 /// runtime 状態を表示用へ変換する
-fn runtime_status_view(status: &ScopedRuntimeStatus) -> RuntimeStatusView {
+fn runtime_status_view(
+    status: &ScopedRuntimeStatus,
+    display_paths: &mut DisplayPathCache,
+) -> RuntimeStatusView {
     RuntimeStatusView {
         runtime_id: status.status.state.runtime_id.clone(),
         runtime_scope: status.runtime_scope,
@@ -5852,7 +5891,7 @@ fn runtime_status_view(status: &ScopedRuntimeStatus) -> RuntimeStatusView {
             ProcessState::Stale => "stale".to_owned(),
         },
         source: status.status.state.source_kind.to_string(),
-        source_path: display_path(&status.status.state.source_path),
+        source_path: display_paths.display_path(&status.status.state.source_path),
         started_at_unix_seconds: status.status.state.started_at_unix_seconds,
     }
 }

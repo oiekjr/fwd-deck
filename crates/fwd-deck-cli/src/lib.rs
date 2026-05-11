@@ -16,13 +16,14 @@ use clap_complete::Shell;
 use fwd_deck_core::{
     ConfigEditError, ConfigPaths, ConfigSourceKind, DEFAULT_IMPORT_TAG, DEFAULT_LOCAL_HOST,
     EffectiveConfig, ProcessState, ResolvedTimeoutConfig, ResolvedTunnelConfig, SshImport,
-    SshImportError, SshImportWarning, StartedTunnel, StoppedTunnel, TimeoutConfig, TunnelConfig,
-    TunnelRuntimeError, TunnelRuntimeStatus, TunnelState, ValidationReport,
-    add_tunnel_to_config_file, add_tunnels_to_config_file, build_ssh_command_args,
-    default_global_config_path, default_local_config_path, default_state_file_path,
-    filter_tunnels_by_tags, format_path_for_display, generate_import_tunnel_name,
-    load_effective_config, normalize_tag, parse_ssh_args, parse_ssh_command, read_config_file,
-    remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel, start_tunnel, start_tunnels,
+    SshImportError, SshImportWarning, StartTunnelOptions, StartedTunnel, StoppedTunnel,
+    TimeoutConfig, TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, TunnelState,
+    ValidationReport, add_tunnel_to_config_file, add_tunnels_to_config_file,
+    build_ssh_command_args, default_global_config_path, default_local_config_path,
+    default_state_file_path, filter_tunnels_by_tags, format_path_for_display,
+    generate_import_tunnel_name, load_effective_config, normalize_tag, parse_ssh_args,
+    parse_ssh_command, read_config_file, remove_tunnel_from_config_file,
+    runtime_id_for_resolved_tunnel, start_tunnel_with_options, start_tunnels_with_options,
     stop_tunnels as stop_tunnels_core, tag_is_valid, tunnel_statuses, update_tunnel_in_config_file,
     validate_config,
 };
@@ -137,6 +138,7 @@ const START_AFTER_HELP: &str = "\
   fwd-deck start --all
   fwd-deck start --all --parallel 4
   fwd-deck start --tag dev --tag project-a
+  fwd-deck start --all --scope local --no-detach
   fwd-deck start dev-db --dry-run
   fwd-deck --json start dev-db --dry-run
 
@@ -144,6 +146,8 @@ const START_AFTER_HELP: &str = "\
   NAME を省略すると対話選択を表示します。
   --all、NAME、--tag は同時に指定できません。
   --parallel は複数トンネルの開始処理を指定件数まで並列実行します。省略時は4件です。
+  既定では SSH を呼び出し元の端末プロセスグループから切り離します。
+  --no-detach は SSH を呼び出し元と同じプロセスグループで起動します。
   --dry-run は SSH を起動せず、状態ファイルも更新しません。";
 const RECOVER_AFTER_HELP: &str = "\
 例:
@@ -158,7 +162,8 @@ const WATCH_AFTER_HELP: &str = "\
   fwd-deck watch dev-db --interval-seconds 5
 
 補足:
-  状態ファイル上の追跡中トンネルを監視し、stale になった場合に現在の設定で再起動します。";
+  状態ファイル上の追跡中トンネルを監視し、stale になった場合に現在の設定で再起動します。
+  復旧した SSH は呼び出し元の端末プロセスグループから切り離します。";
 const STATUS_AFTER_HELP: &str = "\
 例:
   fwd-deck status
@@ -341,6 +346,11 @@ enum Command {
         parallel: usize,
         #[arg(long, help = "SSH を起動せずに実行予定だけを表示する")]
         dry_run: bool,
+        #[arg(
+            long,
+            help = "SSH を呼び出し元の端末プロセスグループから切り離さずに起動する"
+        )]
+        no_detach: bool,
         #[arg(long, value_enum, help = "対象スコープ")]
         scope: Option<ConfigScopeArg>,
     },
@@ -579,6 +589,7 @@ fn run() -> Result<ExitCode, CliError> {
             all,
             parallel,
             dry_run,
+            no_detach,
             scope,
         } => {
             let config = load_config(&cli)?;
@@ -592,6 +603,7 @@ fn run() -> Result<ExitCode, CliError> {
                     all: *all,
                     parallel: *parallel,
                     dry_run: *dry_run,
+                    detach: !*no_detach,
                     scope: *scope,
                     json: cli.json,
                 },
@@ -1702,6 +1714,7 @@ fn start_command(
         all,
         parallel,
         dry_run,
+        detach,
         scope,
         json,
     } = options;
@@ -1788,9 +1801,9 @@ fn start_command(
 
     if dry_run {
         if json {
-            print_json(&StartDryRunJson::from_tunnels(&tunnels, state_path))?;
+            print_json(&StartDryRunJson::from_tunnels(&tunnels, state_path, detach))?;
         } else {
-            print_start_dry_run(&tunnels, state_path);
+            print_start_dry_run(&tunnels, state_path, detach);
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -1802,7 +1815,12 @@ fn start_command(
     let mut failed = false;
     let resolved_tunnels = tunnels.into_iter().cloned().collect::<Vec<_>>();
 
-    for result in start_tunnels(&resolved_tunnels, state_path, parallel)? {
+    for result in start_tunnels_with_options(
+        &resolved_tunnels,
+        state_path,
+        parallel,
+        StartTunnelOptions { detach },
+    )? {
         match result {
             Ok(started) => print_started_tunnel(&started),
             Err(error) => {
@@ -1823,6 +1841,7 @@ struct StartCommandOptions {
     all: bool,
     parallel: usize,
     dry_run: bool,
+    detach: bool,
     scope: Option<ConfigScopeArg>,
     json: bool,
 }
@@ -1916,7 +1935,7 @@ fn recover_command(
             continue;
         };
 
-        match start_tunnel(tunnel, state_path) {
+        match start_tunnel_with_options(tunnel, state_path, StartTunnelOptions { detach: true }) {
             Ok(started) => print_started_tunnel(&started),
             Err(error) => {
                 failed = true;
@@ -3286,7 +3305,7 @@ fn recover_watch_stale_tunnels(
             continue;
         };
 
-        match start_tunnel(tunnel, state_path) {
+        match start_tunnel_with_options(tunnel, state_path, StartTunnelOptions { detach: true }) {
             Ok(started) => print_started_tunnel(&started),
             Err(error) => {
                 eprintln!("{}", red(&error.to_string(), OutputStream::Stderr));
@@ -3364,9 +3383,10 @@ fn shell_quote(value: &str) -> String {
 }
 
 /// start の dry-run 結果を表示する
-fn print_start_dry_run(tunnels: &[&ResolvedTunnelConfig], state_path: &Path) {
+fn print_start_dry_run(tunnels: &[&ResolvedTunnelConfig], state_path: &Path, detach: bool) {
     println!("Dry run: no ssh process will be started and state file will not be written.");
     println!("State file: {}", format_path_for_display(state_path));
+    println!("Detach: {}", if detach { "enabled" } else { "disabled" });
 
     for tunnel in tunnels {
         print_start_dry_run_tunnel(tunnel);
@@ -3795,15 +3815,17 @@ impl TimeoutJson {
 #[serde(rename_all = "camelCase")]
 struct StartDryRunJson {
     dry_run: bool,
+    detach: bool,
     state_file: String,
     tunnels: Vec<StartDryRunTunnelJson>,
 }
 
 impl StartDryRunJson {
     /// 開始予定トンネルから JSON 出力を生成する
-    fn from_tunnels(tunnels: &[&ResolvedTunnelConfig], state_path: &Path) -> Self {
+    fn from_tunnels(tunnels: &[&ResolvedTunnelConfig], state_path: &Path, detach: bool) -> Self {
         Self {
             dry_run: true,
+            detach,
             state_file: state_path.display().to_string(),
             tunnels: tunnels
                 .iter()

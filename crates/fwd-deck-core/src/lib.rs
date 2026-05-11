@@ -28,7 +28,8 @@ pub use state::{
     tunnel_runtime_id_from_normalized_source_path,
 };
 pub use tunnel::{
-    ProcessState, StartedTunnel, StoppedTunnel, TunnelRuntimeError, TunnelRuntimeStatus,
-    build_ssh_command_args, start_tunnel, start_tunnels, start_tunnels_with_progress, stop_tunnel,
+    ProcessState, StartTunnelOptions, StartedTunnel, StoppedTunnel, TunnelRuntimeError,
+    TunnelRuntimeStatus, build_ssh_command_args, start_tunnel, start_tunnel_with_options,
+    start_tunnels, start_tunnels_with_options, start_tunnels_with_progress, stop_tunnel,
     stop_tunnels, stop_tunnels_with_progress, tunnel_statuses, tunnel_statuses_for_state_files,
 };

@@ -173,6 +173,7 @@ fwd-deck start dev-db
 fwd-deck start --all
 fwd-deck start --all --parallel 4
 fwd-deck start --tag dev --tag project-a
+fwd-deck start --all --scope local --no-detach
 fwd-deck start dev-db --dry-run
 fwd-deck start dev-db --scope global --dry-run
 fwd-deck --json start dev-db --dry-run
@@ -183,6 +184,9 @@ NAME を指定しない場合は対話選択を表示します。
 `--all` は設定済みのすべてのトンネルを開始します。  
 `--tag` は、指定したタグをすべて持つトンネルだけを開始します。  
 `--parallel` は複数トンネルの開始処理を指定件数まで並列実行します。省略時は4件です。  
+既定では、起動した SSH プロセスを呼び出し元の端末プロセスグループから切り離します。  
+go-task などから `fwd-deck start` を実行した後に後続コマンドを `Ctrl-C` で終了しても、起動済みトンネルは `status` / `stop` で管理できます。  
+`--no-detach` は、SSH プロセスを呼び出し元と同じプロセスグループで起動します。  
 `--all`、NAME、`--tag` は同時に指定できません。  
 `--dry-run` は SSH を起動せず、状態ファイルも更新せずに実行予定だけを表示します。
 
@@ -222,7 +226,9 @@ fwd-deck watch dev-db --scope global --interval-seconds 5
 
 追跡中のトンネルを監視し、stale状態になった場合に現在の設定で再起動します。  
 NAME を省略した場合は、状態ファイル上の追跡中トンネルを監視します。  
-`--interval-seconds` は監視間隔を秒単位で指定します。
+`--interval-seconds` は監視間隔を秒単位で指定します。  
+`watch` 自体は前面プロセスとして動作し、`Ctrl-C` で終了できます。  
+`watch` が復旧した SSH プロセスは呼び出し元の端末プロセスグループから切り離され、`status` / `stop` で管理できます。
 
 ### `stop`
 

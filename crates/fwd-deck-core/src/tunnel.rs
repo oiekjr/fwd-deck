@@ -10,6 +10,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 use thiserror::Error;
 
 use crate::{
@@ -35,6 +38,12 @@ pub enum ProcessState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartedTunnel {
     pub state: TunnelState,
+}
+
+/// トンネル開始時のプロセス起動条件を表現する
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StartTunnelOptions {
+    pub detach: bool,
 }
 
 /// 停止処理で扱ったトンネルを表現する
@@ -163,6 +172,15 @@ pub fn start_tunnel(
     resolved: &ResolvedTunnelConfig,
     state_path: &Path,
 ) -> Result<StartedTunnel, TunnelRuntimeError> {
+    start_tunnel_with_options(resolved, state_path, StartTunnelOptions::default())
+}
+
+/// トンネルを指定オプションで開始して状態ファイルへ保存する
+pub fn start_tunnel_with_options(
+    resolved: &ResolvedTunnelConfig,
+    state_path: &Path,
+    options: StartTunnelOptions,
+) -> Result<StartedTunnel, TunnelRuntimeError> {
     let mut state_file = read_state_file(state_path)?;
     let runtime_id = runtime_id_for_resolved_tunnel(resolved);
 
@@ -176,7 +194,7 @@ pub fn start_tunnel(
         });
     }
 
-    let started = start_tunnel_without_state_write(resolved)?;
+    let started = start_tunnel_without_state_write(resolved, options)?;
     state_file.upsert(started.state.clone());
     write_state_file(state_path, &state_file)?;
 
@@ -189,10 +207,26 @@ pub fn start_tunnels(
     state_path: &Path,
     parallelism: usize,
 ) -> Result<Vec<Result<StartedTunnel, TunnelRuntimeError>>, TunnelRuntimeError> {
-    start_tunnels_with_progress(
+    start_tunnels_with_options(
         resolved_tunnels,
         state_path,
         parallelism,
+        StartTunnelOptions::default(),
+    )
+}
+
+/// 複数トンネルを指定オプションで状態ファイル単位で開始する
+pub fn start_tunnels_with_options(
+    resolved_tunnels: &[ResolvedTunnelConfig],
+    state_path: &Path,
+    parallelism: usize,
+    options: StartTunnelOptions,
+) -> Result<Vec<Result<StartedTunnel, TunnelRuntimeError>>, TunnelRuntimeError> {
+    start_tunnels_with_options_and_progress(
+        resolved_tunnels,
+        state_path,
+        parallelism,
+        options,
         |_index, _result| {},
     )
 }
@@ -202,6 +236,26 @@ pub fn start_tunnels_with_progress<F>(
     resolved_tunnels: &[ResolvedTunnelConfig],
     state_path: &Path,
     parallelism: usize,
+    on_result: F,
+) -> Result<Vec<Result<StartedTunnel, TunnelRuntimeError>>, TunnelRuntimeError>
+where
+    F: FnMut(usize, &Result<StartedTunnel, TunnelRuntimeError>),
+{
+    start_tunnels_with_options_and_progress(
+        resolved_tunnels,
+        state_path,
+        parallelism,
+        StartTunnelOptions::default(),
+        on_result,
+    )
+}
+
+/// 複数トンネルを指定オプションで開始し、各結果確定時に通知する
+pub fn start_tunnels_with_options_and_progress<F>(
+    resolved_tunnels: &[ResolvedTunnelConfig],
+    state_path: &Path,
+    parallelism: usize,
+    options: StartTunnelOptions,
     mut on_result: F,
 ) -> Result<Vec<Result<StartedTunnel, TunnelRuntimeError>>, TunnelRuntimeError>
 where
@@ -244,7 +298,7 @@ where
             .iter()
             .map(|job| {
                 let resolved = job.resolved.clone();
-                thread::spawn(move || start_tunnel_without_state_write(&resolved))
+                thread::spawn(move || start_tunnel_without_state_write(&resolved, options))
             })
             .collect::<Vec<_>>();
 
@@ -645,10 +699,11 @@ fn startup_probe_interval() -> Duration {
 /// 状態ファイル更新を呼び出し元へ委ねて SSH プロセスを開始する
 fn start_tunnel_without_state_write(
     resolved: &ResolvedTunnelConfig,
+    options: StartTunnelOptions,
 ) -> Result<StartedTunnel, TunnelRuntimeError> {
     ensure_local_endpoint_available(resolved)?;
 
-    let mut child = spawn_ssh_tunnel(resolved)?;
+    let mut child = spawn_ssh_tunnel_with_options(resolved, options)?;
     wait_for_tunnel_readiness(&mut child, resolved)?;
 
     let started_at_unix_seconds = current_unix_seconds();
@@ -702,20 +757,63 @@ struct StartTunnelJob {
     resolved: ResolvedTunnelConfig,
 }
 
-/// SSH 子プロセスを起動する
-fn spawn_ssh_tunnel(
+/// SSH 子プロセスを指定オプションで起動する
+fn spawn_ssh_tunnel_with_options(
     resolved: &ResolvedTunnelConfig,
+    options: StartTunnelOptions,
 ) -> Result<std::process::Child, TunnelRuntimeError> {
-    Command::new("ssh")
+    let mut command = Command::new("ssh");
+    command
         .args(build_ssh_args(resolved))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|source| TunnelRuntimeError::Spawn {
-            name: resolved.tunnel.name.clone(),
-            source,
-        })
+        .stderr(Stdio::null());
+
+    apply_start_options_to_command(&mut command, options, &resolved.tunnel.name)?;
+
+    command.spawn().map_err(|source| TunnelRuntimeError::Spawn {
+        name: resolved.tunnel.name.clone(),
+        source,
+    })
+}
+
+/// 起動オプションを子プロセスコマンドへ適用する
+fn apply_start_options_to_command(
+    command: &mut Command,
+    options: StartTunnelOptions,
+    name: &str,
+) -> Result<(), TunnelRuntimeError> {
+    apply_detach_to_command(command, options.detach).map_err(|source| TunnelRuntimeError::Spawn {
+        name: name.to_owned(),
+        source,
+    })
+}
+
+/// Unix では子プロセスを新しいセッションへ切り離す
+#[cfg(unix)]
+fn apply_detach_to_command(command: &mut Command, detach: bool) -> io::Result<()> {
+    if !detach {
+        return Ok(());
+    }
+
+    // SAFETY: fork 後かつ exec 前に setsid を呼び、子プロセスのセッションだけを変更する
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+
+            Ok(())
+        });
+    }
+
+    Ok(())
+}
+
+/// 非 Unix では detach 指定を既存の通常起動として扱う
+#[cfg(not(unix))]
+fn apply_detach_to_command(_command: &mut Command, _detach: bool) -> io::Result<()> {
+    Ok(())
 }
 
 /// ローカル側エンドポイントを利用できるかを検証する
@@ -1034,7 +1132,11 @@ fn expand_home_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::TcpListener, path::PathBuf, process};
+    use std::{
+        net::TcpListener,
+        path::PathBuf,
+        process::{self, Command, Stdio},
+    };
 
     use crate::{ConfigSource, ConfigSourceKind, TimeoutConfig, TunnelConfig, TunnelStateFile};
     use tempfile::TempDir;
@@ -1108,6 +1210,52 @@ mod tests {
             startup_readiness_wait_period(long_grace),
             Duration::from_millis(1_500)
         );
+    }
+
+    /// 起動オプションの既定値が既存の非 detach 起動を維持することを検証する
+    #[test]
+    fn start_tunnel_options_default_keeps_child_attached() {
+        let options = StartTunnelOptions::default();
+
+        assert!(!options.detach);
+    }
+
+    /// detach 指定が子プロセスを親と別のセッションへ移すことを検証する
+    #[cfg(unix)]
+    #[test]
+    fn apply_start_options_detaches_child_process_group() {
+        // SAFETY: signal を送らず、呼び出し元プロセスのセッション情報だけを参照する
+        let parent_sid = unsafe { libc::getsid(0) };
+        // SAFETY: signal を送らず、呼び出し元プロセスのプロセスグループだけを参照する
+        let parent_pgid = unsafe { libc::getpgrp() };
+        let mut command = Command::new("sleep");
+        command
+            .arg("5")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        apply_start_options_to_command(&mut command, StartTunnelOptions { detach: true }, "sleep")
+            .expect("apply detach option");
+
+        let mut child = command.spawn().expect("spawn sleep process");
+        let child_pid = libc::pid_t::try_from(child.id()).expect("child pid fits pid_t");
+        // SAFETY: signal を送らず、テスト子プロセスのセッション情報だけを参照する
+        let child_sid = unsafe { libc::getsid(child_pid) };
+        // SAFETY: signal を送らず、テスト子プロセスのプロセスグループだけを参照する
+        let child_pgid = unsafe { libc::getpgid(child_pid) };
+
+        // SAFETY: テストで起動した子プロセスへ終了シグナルを送信するだけで、メモリ安全性へ影響しない
+        unsafe {
+            libc::kill(child_pid, libc::SIGTERM);
+        }
+        child.wait().expect("wait sleep process");
+
+        assert_ne!(child_sid, -1);
+        assert_ne!(child_pgid, -1);
+        assert_ne!(child_sid, parent_sid);
+        assert_ne!(child_pgid, parent_pgid);
+        assert_eq!(child_sid, child_pid);
+        assert_eq!(child_pgid, child_pid);
     }
 
     /// 一括開始が起動済みトンネルを起動処理なしで報告することを検証する

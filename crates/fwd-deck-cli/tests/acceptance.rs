@@ -184,6 +184,31 @@ fn start_dry_run_prints_plan_without_writing_state() {
 
     assert!(output.status.success());
     output.assert_stdout_contains("Dry run: no ssh process will be started");
+    output.assert_stdout_contains("Detach: enabled");
+    output.assert_stdout_contains("Would start tunnel: dev-db");
+    output.assert_stdout_contains("Would start tunnel: prod-cache");
+    assert!(!workspace.state_path().exists());
+}
+
+/// start --dry-run --no-detach が非 detach 起動予定を表示することを検証する
+#[test]
+fn start_dry_run_no_detach_prints_attached_plan() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(valid_config());
+
+    let output = workspace.run([
+        "--state",
+        workspace.state_path_str(),
+        "start",
+        "--all",
+        "--scope",
+        "local",
+        "--dry-run",
+        "--no-detach",
+    ]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("Detach: disabled");
     output.assert_stdout_contains("Would start tunnel: dev-db");
     output.assert_stdout_contains("Would start tunnel: prod-cache");
     assert!(!workspace.state_path().exists());
@@ -207,6 +232,7 @@ fn start_dry_run_json_outputs_plan_without_writing_state() {
     assert!(output.status.success());
     let json = output.stdout_json();
     assert_eq!(json["dryRun"], true);
+    assert_eq!(json["detach"], true);
     assert_eq!(json["tunnels"][0]["tunnel"]["name"], "dev-db");
     assert!(
         json["tunnels"][0]["command"]
@@ -214,6 +240,29 @@ fn start_dry_run_json_outputs_plan_without_writing_state() {
             .expect("command is string")
             .starts_with("ssh ")
     );
+    assert!(!workspace.state_path().exists());
+}
+
+/// start --dry-run --json --no-detach が非 detach 指定を JSON で表示することを検証する
+#[test]
+fn start_dry_run_json_outputs_no_detach_plan() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(valid_config());
+
+    let output = workspace.run([
+        "--state",
+        workspace.state_path_str(),
+        "--json",
+        "start",
+        "dev-db",
+        "--dry-run",
+        "--no-detach",
+    ]);
+
+    assert!(output.status.success());
+    let json = output.stdout_json();
+    assert_eq!(json["dryRun"], true);
+    assert_eq!(json["detach"], false);
     assert!(!workspace.state_path().exists());
 }
 
@@ -380,6 +429,12 @@ fn start_help_displays_selection_constraints_and_dry_run_note() {
     assert!(output.status.success());
     output.assert_stdout_contains("NAME を省略すると対話選択を表示します。");
     output.assert_stdout_contains("--all、NAME、--tag は同時に指定できません。");
+    output.assert_stdout_contains(
+        "既定では SSH を呼び出し元の端末プロセスグループから切り離します。",
+    );
+    output.assert_stdout_contains(
+        "--no-detach は SSH を呼び出し元と同じプロセスグループで起動します。",
+    );
     output.assert_stdout_contains("--dry-run は SSH を起動せず、状態ファイルも更新しません。");
 }
 

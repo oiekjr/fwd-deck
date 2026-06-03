@@ -1823,6 +1823,9 @@ fn start_command(
     )? {
         match result {
             Ok(started) => print_started_tunnel(&started),
+            Err(TunnelRuntimeError::AlreadyRunning { name, pid, .. }) => {
+                print_already_running_tunnel(&name, pid);
+            }
             Err(error) => {
                 failed = true;
                 eprintln!("{}", red(&error.to_string(), OutputStream::Stderr));
@@ -1907,16 +1910,7 @@ fn recover_command(
         };
 
         if status.process_state == ProcessState::Running {
-            println!(
-                "{}",
-                green(
-                    &format!(
-                        "Tunnel is already running: {} (pid: {})",
-                        status.state.name, status.state.pid
-                    ),
-                    OutputStream::Stdout
-                )
-            );
+            print_already_running_tunnel(&status.state.name, status.state.pid);
             continue;
         }
 
@@ -3479,6 +3473,17 @@ fn print_started_tunnel(started: &StartedTunnel) {
                 started.state.local_host,
                 started.state.local_port
             ),
+            OutputStream::Stdout
+        )
+    );
+}
+
+/// 起動済みトンネルを成功扱いとして表示する
+fn print_already_running_tunnel(name: &str, pid: u32) {
+    println!(
+        "{}",
+        green(
+            &format!("Tunnel is already running: {name} (pid: {pid})"),
             OutputStream::Stdout
         )
     );

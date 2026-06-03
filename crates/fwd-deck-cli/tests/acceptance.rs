@@ -329,6 +329,46 @@ fn start_all_dry_run_sorts_tunnels_by_id() {
     ]);
 }
 
+/// start が起動済みの同一トンネルを成功扱いで報告することを検証する
+#[test]
+fn start_reports_already_running_tunnel_without_failure() {
+    let workspace = TestWorkspace::new();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+    let local_port = listener.local_addr().expect("read listener address").port();
+    workspace.write_config(&single_tunnel_config("dev-db", local_port));
+    workspace.write_state(&state_file(process::id(), local_port));
+
+    let output = workspace.run(["--state", workspace.state_path_str(), "start", "dev-db"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains(&format!(
+        "Tunnel is already running: dev-db (pid: {})",
+        process::id()
+    ));
+    assert!(
+        output.stderr.is_empty(),
+        "stderr should be empty\nstdout:\n{}\nstderr:\n{}",
+        output.stdout,
+        output.stderr
+    );
+}
+
+/// start が別プロセスによるローカルエンドポイント占有を失敗として扱うことを検証する
+#[test]
+fn start_fails_when_local_endpoint_is_used_by_untracked_process() {
+    let workspace = TestWorkspace::new();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+    let local_port = listener.local_addr().expect("read listener address").port();
+    workspace.write_config(&single_tunnel_config("dev-db", local_port));
+
+    let output = workspace.run(["--state", workspace.state_path_str(), "start", "dev-db"]);
+
+    assert!(!output.status.success());
+    output.assert_stderr_contains(&format!(
+        "Local endpoint is not available: dev-db (127.0.0.1:{local_port})"
+    ));
+}
+
 /// start が NAME と --tag の同時指定を失敗として扱うことを検証する
 #[test]
 fn start_fails_when_id_and_tag_are_combined() {

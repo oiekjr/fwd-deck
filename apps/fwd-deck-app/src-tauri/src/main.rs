@@ -966,7 +966,7 @@ fn execute_tray_tunnel_action(app: &tauri::AppHandle, action: TrayTunnelAction) 
     let operation_lock = app.state::<OperationLockState>();
     let result = with_operation_lock(&operation_lock, || run_tray_tunnel_action(app, action));
 
-    let _ = rebuild_tray_menu(app);
+    let _ = refresh_tray_menu_in_place_or_rebuild(app);
 
     match result {
         Ok(report) => emit_tray_operation_report(app, report),
@@ -3531,6 +3531,14 @@ struct OperationReport {
     failed: Vec<OperationFailureView>,
 }
 
+/// トンネル操作結果と更新後ダッシュボード状態を表現する
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperationCommandResult {
+    report: OperationReport,
+    dashboard: Option<DashboardState>,
+}
+
 /// 成功したトンネル操作を表現する
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -4052,11 +4060,11 @@ fn start_tunnels(
     paths: Option<WorkspaceSelection>,
     targets: Vec<OperationTargetInput>,
     operation_id: String,
-) -> Result<OperationReport, String> {
+) -> Result<OperationCommandResult, String> {
     let result = with_operation_lock(&operation_lock, || {
-        start_tunnels_inner(&app, paths, targets, &operation_id)
+        start_tunnels_with_dashboard_inner(&app, paths, targets, &operation_id)
     });
-    let _ = rebuild_tray_menu(&app);
+    let _ = refresh_tray_menu_in_place_or_rebuild(&app);
 
     command_result(result)
 }
@@ -4069,11 +4077,11 @@ fn stop_tunnels(
     paths: Option<WorkspaceSelection>,
     targets: Vec<OperationTargetInput>,
     operation_id: String,
-) -> Result<OperationReport, String> {
+) -> Result<OperationCommandResult, String> {
     let result = with_operation_lock(&operation_lock, || {
-        stop_tunnels_inner(&app, paths, targets, &operation_id)
+        stop_tunnels_with_dashboard_inner(&app, paths, targets, &operation_id)
     });
-    let _ = rebuild_tray_menu(&app);
+    let _ = refresh_tray_menu_in_place_or_rebuild(&app);
 
     command_result(result)
 }
@@ -4272,6 +4280,22 @@ fn load_dashboard_from_runtime_paths(
     ))
 }
 
+/// 読み込み済み設定と最新 runtime 状態からダッシュボード状態を組み立てる
+fn load_dashboard_from_runtime_paths_and_config(
+    runtime_paths: RuntimePaths,
+    config: EffectiveConfig,
+) -> Result<DashboardState, AppError> {
+    let validation = validate_config(&config);
+    let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
+
+    Ok(build_dashboard_state(
+        runtime_paths,
+        config,
+        statuses,
+        validation,
+    ))
+}
+
 /// ワークスペース切り替え処理を実行する
 fn switch_workspace_inner(
     app: &tauri::AppHandle,
@@ -4286,16 +4310,6 @@ fn switch_workspace_inner(
     })
 }
 
-/// トンネル開始処理を実行する
-fn start_tunnels_inner(
-    app: &tauri::AppHandle,
-    paths: Option<WorkspaceSelection>,
-    targets: Vec<OperationTargetInput>,
-    operation_id: &str,
-) -> Result<OperationReport, AppError> {
-    start_tunnels_inner_for_source(app, paths, targets, operation_id, None)
-}
-
 /// トンネル開始処理を任意の検証スコープで実行する
 fn start_tunnels_inner_for_source(
     app: &tauri::AppHandle,
@@ -4304,17 +4318,31 @@ fn start_tunnels_inner_for_source(
     operation_id: &str,
     validation_source_kind: Option<ConfigSourceKind>,
 ) -> Result<OperationReport, AppError> {
-    let runtime_paths = resolve_runtime_paths(app, paths)?;
-    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let (runtime_paths, config) = load_tunnel_operation_context(app, paths)?;
 
-    ensure_valid_config_for_source(&config, validation_source_kind)?;
-    let lookup = ConfiguredTunnelLookup::new(&config);
-    let mut progress = OperationProgressEmitter::new(app, operation_id, targets.len());
-    let report = run_start_tunnel_operations(&runtime_paths, &lookup, &targets, &mut progress)?;
-    let reset_runtime_ids = auto_recover_runtime_ids_for_operation_targets(&lookup, &targets);
-    reset_auto_recover_runtime_states(app, reset_runtime_ids);
+    run_start_tunnels_for_config(
+        app,
+        &runtime_paths,
+        &config,
+        targets,
+        operation_id,
+        validation_source_kind,
+    )
+}
 
-    Ok(report)
+/// トンネル開始結果と更新後ダッシュボード状態を取得する
+fn start_tunnels_with_dashboard_inner(
+    app: &tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    targets: Vec<OperationTargetInput>,
+    operation_id: &str,
+) -> Result<OperationCommandResult, AppError> {
+    let (runtime_paths, config) = load_tunnel_operation_context(app, paths)?;
+    let report =
+        run_start_tunnels_for_config(app, &runtime_paths, &config, targets, operation_id, None)?;
+    let dashboard = load_dashboard_from_runtime_paths_and_config(runtime_paths, config).ok();
+
+    Ok(OperationCommandResult { report, dashboard })
 }
 
 /// トンネル停止処理を実行する
@@ -4324,13 +4352,68 @@ fn stop_tunnels_inner(
     targets: Vec<OperationTargetInput>,
     operation_id: &str,
 ) -> Result<OperationReport, AppError> {
+    let (runtime_paths, config) = load_tunnel_operation_context(app, paths)?;
+
+    run_stop_tunnels_for_config(app, &runtime_paths, &config, targets, operation_id)
+}
+
+/// トンネル停止結果と更新後ダッシュボード状態を取得する
+fn stop_tunnels_with_dashboard_inner(
+    app: &tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    targets: Vec<OperationTargetInput>,
+    operation_id: &str,
+) -> Result<OperationCommandResult, AppError> {
+    let (runtime_paths, config) = load_tunnel_operation_context(app, paths)?;
+    let report = run_stop_tunnels_for_config(app, &runtime_paths, &config, targets, operation_id)?;
+    let dashboard = load_dashboard_from_runtime_paths_and_config(runtime_paths, config).ok();
+
+    Ok(OperationCommandResult { report, dashboard })
+}
+
+/// トンネル操作に必要なパスと設定を読み込む
+fn load_tunnel_operation_context(
+    app: &tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+) -> Result<(RuntimePaths, EffectiveConfig), AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
-    let lookup = ConfiguredTunnelLookup::new(&config);
+
+    Ok((runtime_paths, config))
+}
+
+/// 読み込み済み設定を使ってトンネル開始処理を実行する
+fn run_start_tunnels_for_config(
+    app: &tauri::AppHandle,
+    runtime_paths: &RuntimePaths,
+    config: &EffectiveConfig,
+    targets: Vec<OperationTargetInput>,
+    operation_id: &str,
+    validation_source_kind: Option<ConfigSourceKind>,
+) -> Result<OperationReport, AppError> {
+    ensure_valid_config_for_source(config, validation_source_kind)?;
+    let lookup = ConfiguredTunnelLookup::new(config);
+    let mut progress = OperationProgressEmitter::new(app, operation_id, targets.len());
+    let report = run_start_tunnel_operations(runtime_paths, &lookup, &targets, &mut progress)?;
+    let reset_runtime_ids = auto_recover_runtime_ids_for_operation_targets(&lookup, &targets);
+    reset_auto_recover_runtime_states(app, reset_runtime_ids);
+
+    Ok(report)
+}
+
+/// 読み込み済み設定を使ってトンネル停止処理を実行する
+fn run_stop_tunnels_for_config(
+    app: &tauri::AppHandle,
+    runtime_paths: &RuntimePaths,
+    config: &EffectiveConfig,
+    targets: Vec<OperationTargetInput>,
+    operation_id: &str,
+) -> Result<OperationReport, AppError> {
+    let lookup = ConfiguredTunnelLookup::new(config);
     let mut progress = OperationProgressEmitter::new(app, operation_id, targets.len());
 
     let (report, reset_runtime_ids) =
-        run_stop_tunnel_operations(&runtime_paths, &lookup, &targets, &mut progress)?;
+        run_stop_tunnel_operations(runtime_paths, &lookup, &targets, &mut progress)?;
     reset_auto_recover_runtime_states(app, reset_runtime_ids);
 
     Ok(report)

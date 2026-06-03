@@ -260,6 +260,11 @@ interface OperationReport {
   failed: OperationFailureView[];
 }
 
+interface OperationCommandResult {
+  report: OperationReport;
+  dashboard: DashboardState | null;
+}
+
 interface OperationSuccessView {
   id: string;
   message: string;
@@ -1201,18 +1206,20 @@ function App(): ReactElement {
     await waitForNextPaint();
 
     try {
-      const report = await invokeCommand<OperationReport>(command, {
+      const result = await invokeCommand<OperationCommandResult>(command, {
         paths: normalizeWorkspaceSelection(paths),
         targets,
         operationId,
       });
 
-      await refreshDashboard(paths, { silent: true });
-      if (options.clearSucceededSelections === true && report.succeeded.length > 0) {
+      if (result.dashboard !== null) {
+        applyLoadedDashboard(result.dashboard);
+      }
+      if (options.clearSucceededSelections === true && result.report.succeeded.length > 0) {
         setSelectedIds(new Set());
       }
 
-      const message = operationMessage(report);
+      const message = operationMessage(result.report);
       if (message === null) {
         dismissOperationToasts();
         return;

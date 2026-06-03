@@ -10,6 +10,7 @@ fwd-deck --config ./my-fwd-deck.toml list
 fwd-deck --global-config ~/.config/fwd-deck/work.toml list
 fwd-deck --no-global list
 fwd-deck --state /tmp/fwd-deck-state.toml status
+fwd-deck --version
 fwd-deck open ~/projects/my-service
 ```
 
@@ -20,6 +21,7 @@ fwd-deck open ~/projects/my-service
 | `--no-global` | グローバル設定ファイルを読み込みません。 |
 | `--state PATH` | 起動中トンネルの PID などを保存する実行状態ファイルのパスを指定します。 |
 | `--json` | 対応コマンドの出力を JSON として標準出力へ表示します。 |
+| `--version` | 現在バージョンを表示し、GitHub Releases の最新安定版が新しい場合だけ release URL と CLI更新コマンドも表示します。 |
 
 ## Configuration Files
 

@@ -160,6 +160,7 @@ fn main() -> ExitCode {
             set_tunnel_favorite,
             set_tunnel_auto_recover,
             remove_workspace_history_entry,
+            load_version_status,
             load_cli_integration,
             install_cli_integration,
             remove_cli_integration,
@@ -1228,6 +1229,12 @@ fn handle_tray_result(app: &tauri::AppHandle, result: Result<(), AppError>) {
 #[tauri::command]
 fn refresh_tray_menu(app: tauri::AppHandle) -> Result<(), String> {
     command_result(rebuild_tray_menu(&app))
+}
+
+/// GitHub Releases に基づくバージョン確認結果を取得する
+#[tauri::command]
+fn load_version_status() -> fwd_deck_cli::VersionStatus {
+    fwd_deck_cli::load_version_status()
 }
 
 /// CLI integration の現在状態を取得する

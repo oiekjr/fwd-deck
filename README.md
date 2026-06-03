@@ -53,6 +53,8 @@ fwd-deck --version
 brew list --cask --versions fwd-deck-app
 ```
 
+`fwd-deck --version` は GitHub Releases の最新安定版も短時間確認し、新しいバージョンが公開されている場合だけ release URL と CLI更新コマンドを表示します。
+
 ## Quick Start
 
 CLI で始める場合は、まずローカル設定ファイルを作成します。

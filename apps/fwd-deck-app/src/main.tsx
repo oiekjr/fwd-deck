@@ -120,6 +120,7 @@ type AppCommand =
   | "set_tunnel_favorite"
   | "set_tunnel_auto_recover"
   | "remove_workspace_history_entry"
+  | "load_version_status"
   | "load_cli_integration"
   | "install_cli_integration"
   | "remove_cli_integration"
@@ -187,6 +188,15 @@ interface CliIntegrationState {
   canRemove: boolean;
   manualInstallCommand: string | null;
   manualRemoveCommand: string | null;
+}
+
+interface VersionStatusView {
+  currentVersion: string;
+  latestVersion: string | null;
+  releaseUrl: string | null;
+  updateAvailable: boolean;
+  checked: boolean;
+  message: string;
 }
 
 interface ValidationView {
@@ -630,11 +640,13 @@ function App(): ReactElement {
   const [operationToastState, setOperationToastState] = useState<OperationToastState>(
     initialOperationToastState,
   );
+  const [versionStatus, setVersionStatus] = useState<VersionStatusView | null>(null);
   const [cliIntegration, setCliIntegration] = useState<CliIntegrationState | null>(null);
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
   const [runtimeNowUnixSeconds, setRuntimeNowUnixSeconds] = useState<number>(0);
   const [favoriteUpdatingIds, setFavoriteUpdatingIds] = useState<Set<string>>(new Set());
   const [autoRecoverUpdatingIds, setAutoRecoverUpdatingIds] = useState<Set<string>>(new Set());
+  const [isVersionStatusBusy, setIsVersionStatusBusy] = useState<boolean>(false);
   const [isCliIntegrationBusy, setIsCliIntegrationBusy] = useState<boolean>(false);
   const [isBusy, setIsBusy] = useState<boolean>(false);
   const [hasCompletedInitialLoad, setHasCompletedInitialLoad] = useState<boolean>(false);
@@ -717,6 +729,38 @@ function App(): ReactElement {
   }, []);
 
   /**
+   * GitHub Releases に基づくバージョン確認結果を読み込む
+   */
+  const loadVersionStatus = useCallback(
+    async (silent = false): Promise<VersionStatusView | null> => {
+      if (!isTauriRuntimeAvailable()) {
+        return null;
+      }
+
+      if (!silent) {
+        setIsVersionStatusBusy(true);
+      }
+
+      try {
+        const loaded = await invokeCommand<VersionStatusView>("load_version_status", {});
+        setVersionStatus(loaded);
+        return loaded;
+      } catch (error) {
+        if (!silent) {
+          showOperationToast({ kind: "error", summary: stringifyError(error) });
+        }
+
+        return null;
+      } finally {
+        if (!silent) {
+          setIsVersionStatusBusy(false);
+        }
+      }
+    },
+    [showOperationToast],
+  );
+
+  /**
    * CLI integration の状態を読み込む
    */
   const loadCliIntegration = useCallback(
@@ -787,6 +831,21 @@ function App(): ReactElement {
       try {
         await navigator.clipboard.writeText(command);
         showOperationToast({ kind: "success", summary: "CLIコマンドをコピーしました" });
+      } catch (error) {
+        showOperationToast({ kind: "error", summary: stringifyError(error) });
+      }
+    },
+    [showOperationToast],
+  );
+
+  /**
+   * release URL をクリップボードへコピーする
+   */
+  const copyReleaseUrl = useCallback(
+    async (releaseUrl: string): Promise<void> => {
+      try {
+        await navigator.clipboard.writeText(releaseUrl);
+        showOperationToast({ kind: "success", summary: "Release URL をコピーしました" });
       } catch (error) {
         showOperationToast({ kind: "error", summary: stringifyError(error) });
       }
@@ -924,6 +983,7 @@ function App(): ReactElement {
 
   const handleOpenSettingsEvent = useStableEvent((): void => {
     setSettingsDraft((current) => current ?? paths);
+    void loadVersionStatus(true);
     void loadCliIntegration(true);
   });
 
@@ -1000,6 +1060,7 @@ function App(): ReactElement {
     if (isSettingsKeyboardShortcut(event)) {
       event.preventDefault();
       setSettingsDraft((current) => current ?? paths);
+      void loadVersionStatus(true);
       void loadCliIntegration(true);
       return;
     }
@@ -1713,6 +1774,7 @@ function App(): ReactElement {
    */
   function openSettings(): void {
     setSettingsDraft((current) => current ?? paths);
+    void loadVersionStatus(true);
     void loadCliIntegration(true);
   }
 
@@ -2139,6 +2201,12 @@ function App(): ReactElement {
   const handleRemoveWorkspaceHistoryEntry = useStableEvent((workspacePath: string): void => {
     void removeWorkspaceHistoryEntry(workspacePath);
   });
+  const handleRefreshVersionStatus = useStableEvent((): void => {
+    void loadVersionStatus();
+  });
+  const handleCopyReleaseUrl = useStableEvent((releaseUrl: string): void => {
+    void copyReleaseUrl(releaseUrl);
+  });
   const handleRefreshCliIntegration = useStableEvent((): void => {
     void loadCliIntegration();
   });
@@ -2278,9 +2346,11 @@ function App(): ReactElement {
       <SettingsModal
         isOpen={settingsDraft !== null}
         paths={settingsDraft ?? paths}
+        versionStatus={versionStatus}
         cliIntegration={cliIntegration}
         homePath={homePath}
         isBusy={isBusy}
+        isVersionStatusBusy={isVersionStatusBusy}
         isCliIntegrationBusy={isCliIntegrationBusy}
         onCancel={closeSettings}
         onApply={handleApplySettings}
@@ -2290,6 +2360,8 @@ function App(): ReactElement {
         onResetApplicationSettings={handleResetApplicationSettings}
         onSelectWorkspace={selectWorkspaceFromHistory}
         onRemoveWorkspace={handleRemoveWorkspaceHistoryEntry}
+        onRefreshVersionStatus={handleRefreshVersionStatus}
+        onCopyReleaseUrl={handleCopyReleaseUrl}
         onRefreshCliIntegration={handleRefreshCliIntegration}
         onInstallCliIntegration={handleInstallCliIntegration}
         onRemoveCliIntegration={handleRemoveCliIntegration}
@@ -3338,9 +3410,11 @@ function SshImportDraftEditor({ index, draft, onChange }: SshImportDraftEditorPr
 interface SettingsModalProps {
   isOpen: boolean;
   paths: WorkspaceSelection;
+  versionStatus: VersionStatusView | null;
   cliIntegration: CliIntegrationState | null;
   homePath: string | null;
   isBusy: boolean;
+  isVersionStatusBusy: boolean;
   isCliIntegrationBusy: boolean;
   onChange: (field: keyof WorkspaceSelection, value: string | boolean) => void;
   onApply: () => void;
@@ -3350,6 +3424,8 @@ interface SettingsModalProps {
   onResetApplicationSettings: () => void;
   onSelectWorkspace: (workspacePath: string) => void;
   onRemoveWorkspace: (workspacePath: string) => void;
+  onRefreshVersionStatus: () => void;
+  onCopyReleaseUrl: (releaseUrl: string) => void;
   onRefreshCliIntegration: () => void;
   onInstallCliIntegration: () => void;
   onRemoveCliIntegration: () => void;
@@ -3362,9 +3438,11 @@ interface SettingsModalProps {
 function SettingsModal({
   isOpen,
   paths,
+  versionStatus,
   cliIntegration,
   homePath,
   isBusy,
+  isVersionStatusBusy,
   isCliIntegrationBusy,
   onChange,
   onApply,
@@ -3374,6 +3452,8 @@ function SettingsModal({
   onResetApplicationSettings,
   onSelectWorkspace,
   onRemoveWorkspace,
+  onRefreshVersionStatus,
+  onCopyReleaseUrl,
   onRefreshCliIntegration,
   onInstallCliIntegration,
   onRemoveCliIntegration,
@@ -3418,9 +3498,11 @@ function SettingsModal({
             <div className="max-h-[calc(100vh-13rem)] overflow-y-auto bg-muted/25 px-5 py-4">
               <PathPanel
                 paths={paths}
+                versionStatus={versionStatus}
                 cliIntegration={cliIntegration}
                 homePath={homePath}
                 isBusy={isBusy}
+                isVersionStatusBusy={isVersionStatusBusy}
                 isCliIntegrationBusy={isCliIntegrationBusy}
                 onChange={onChange}
                 onBrowseWorkspace={onBrowseWorkspace}
@@ -3428,6 +3510,8 @@ function SettingsModal({
                 onResetApplicationSettings={onResetApplicationSettings}
                 onSelectWorkspace={onSelectWorkspace}
                 onRemoveWorkspace={onRemoveWorkspace}
+                onRefreshVersionStatus={onRefreshVersionStatus}
+                onCopyReleaseUrl={onCopyReleaseUrl}
                 onRefreshCliIntegration={onRefreshCliIntegration}
                 onInstallCliIntegration={onInstallCliIntegration}
                 onRemoveCliIntegration={onRemoveCliIntegration}
@@ -3459,9 +3543,11 @@ function SettingsModal({
 
 interface PathPanelProps {
   paths: WorkspaceSelection;
+  versionStatus: VersionStatusView | null;
   cliIntegration: CliIntegrationState | null;
   homePath: string | null;
   isBusy: boolean;
+  isVersionStatusBusy: boolean;
   isCliIntegrationBusy: boolean;
   onChange: (field: keyof WorkspaceSelection, value: string | boolean) => void;
   onBrowseWorkspace: () => void;
@@ -3469,6 +3555,8 @@ interface PathPanelProps {
   onResetApplicationSettings: () => void;
   onSelectWorkspace: (workspacePath: string) => void;
   onRemoveWorkspace: (workspacePath: string) => void;
+  onRefreshVersionStatus: () => void;
+  onCopyReleaseUrl: (releaseUrl: string) => void;
   onRefreshCliIntegration: () => void;
   onInstallCliIntegration: () => void;
   onRemoveCliIntegration: () => void;
@@ -3480,9 +3568,11 @@ interface PathPanelProps {
  */
 function PathPanel({
   paths,
+  versionStatus,
   cliIntegration,
   homePath,
   isBusy,
+  isVersionStatusBusy,
   isCliIntegrationBusy,
   onChange,
   onBrowseWorkspace,
@@ -3490,6 +3580,8 @@ function PathPanel({
   onResetApplicationSettings,
   onSelectWorkspace,
   onRemoveWorkspace,
+  onRefreshVersionStatus,
+  onCopyReleaseUrl,
   onRefreshCliIntegration,
   onInstallCliIntegration,
   onRemoveCliIntegration,
@@ -3727,6 +3819,13 @@ function PathPanel({
           />
         </div>
       </Card>
+
+      <VersionStatusPanel
+        state={versionStatus}
+        isBusy={isBusy || isVersionStatusBusy}
+        onRefresh={onRefreshVersionStatus}
+        onCopyReleaseUrl={onCopyReleaseUrl}
+      />
     </div>
   );
 }
@@ -3745,6 +3844,117 @@ interface CliIntegrationCommandBoxProps {
   command: string;
   isBusy: boolean;
   onCopy: (command: string) => void;
+}
+
+interface VersionStatusPanelProps {
+  state: VersionStatusView | null;
+  isBusy: boolean;
+  onRefresh: () => void;
+  onCopyReleaseUrl: (releaseUrl: string) => void;
+}
+
+type VersionStatusChipColor = "default" | "success" | "warning";
+
+/**
+ * アプリの現在バージョンと更新確認結果を表示する
+ */
+function VersionStatusPanel({
+  state,
+  isBusy,
+  onRefresh,
+  onCopyReleaseUrl,
+}: VersionStatusPanelProps): ReactElement {
+  const statusLabel = versionStatusLabel(state);
+  const statusColor = versionStatusColor(state);
+  const message = state?.message ?? "バージョン情報を読み込んでいます";
+  const releaseUrl = state?.releaseUrl ?? null;
+
+  return (
+    <Card variant="secondary" className="flex flex-col gap-3 p-4 lg:col-span-2">
+      <div className="flex items-center gap-2">
+        <Gauge className="text-foreground/70" size={17} />
+        <h3 className="text-sm font-bold">Version</h3>
+      </div>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <Chip color={statusColor} size="sm" variant="soft">
+              {statusLabel}
+            </Chip>
+            <span className="font-mono text-sm text-foreground">
+              {state?.currentVersion ?? "Loading"}
+            </span>
+            {state?.latestVersion ? (
+              <span className="text-xs text-muted-foreground">Latest {state.latestVersion}</span>
+            ) : null}
+          </div>
+          <p className="mt-1 text-sm text-muted-foreground">{message}</p>
+          {releaseUrl ? (
+            <p className="mt-1 truncate font-mono text-xs text-foreground/55" title={releaseUrl}>
+              {releaseUrl}
+            </p>
+          ) : null}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <HeroButton
+            type="button"
+            variant="ghost"
+            size="sm"
+            onPress={onRefresh}
+            isDisabled={isBusy}
+          >
+            <RefreshCw size={15} />
+            Refresh
+          </HeroButton>
+          <HeroButton
+            type="button"
+            variant="ghost"
+            size="sm"
+            isIconOnly
+            onPress={() => {
+              if (releaseUrl !== null) {
+                onCopyReleaseUrl(releaseUrl);
+              }
+            }}
+            isDisabled={isBusy || releaseUrl === null}
+            aria-label="Release URL をコピー"
+          >
+            <Copy size={15} />
+          </HeroButton>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * バージョン確認状態の表示ラベルを取得する
+ */
+function versionStatusLabel(status: VersionStatusView | null): string {
+  if (status === null) {
+    return "Checking";
+  }
+
+  if (!status.checked) {
+    return "Unavailable";
+  }
+
+  return status.updateAvailable ? "Update available" : "Up to date";
+}
+
+/**
+ * バージョン確認状態の表示色を取得する
+ */
+function versionStatusColor(status: VersionStatusView | null): VersionStatusChipColor {
+  if (status === null) {
+    return "default";
+  }
+
+  if (!status.checked || status.updateAvailable) {
+    return "warning";
+  }
+
+  return "success";
 }
 
 /**

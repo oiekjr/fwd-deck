@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     env,
+    ffi::OsStr,
     fmt::{self, Display},
     fs,
     io::{self, IsTerminal},
@@ -11,7 +12,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap::{Arg, ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use fwd_deck_core::{
     ConfigEditError, ConfigPaths, ConfigSourceKind, DEFAULT_IMPORT_TAG, DEFAULT_LOCAL_HOST,
@@ -28,10 +29,16 @@ use fwd_deck_core::{
     validate_config,
 };
 use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+const RELEASE_API_URL: &str = "https://api.github.com/repos/oiekjr/fwd-deck/releases/latest";
+const RELEASE_CHECK_TIMEOUT_SECONDS: u64 = 2;
+const RELEASE_USER_AGENT_PRODUCT: &str = "fwd-deck";
+const RELEASE_ACCEPT_HEADER: &str = "application/vnd.github+json";
+const RELEASE_API_VERSION: &str = "2022-11-28";
+const CLI_UPDATE_COMMAND: &str = "brew update && brew upgrade fwd-deck";
 const DEFAULT_START_PARALLELISM: usize = 4;
 const DEFAULT_WATCH_INTERVAL_SECONDS: u64 = 5;
 const LIST_ID_MIN_WIDTH: usize = 24;
@@ -256,7 +263,6 @@ const DOCTOR_AFTER_HELP: &str = "\
 #[derive(Debug, Parser)]
 #[command(
     name = "fwd-deck",
-    version,
     about = "設定ファイルに定義したポートフォワーディングを操作する",
     after_help = CLI_AFTER_HELP
 )]
@@ -480,6 +486,40 @@ fn scope_kind(scope: Option<ConfigScopeArg>) -> Option<ConfigSourceKind> {
     scope.map(ConfigSourceKind::from)
 }
 
+/// GitHub Releases に基づくバージョン確認結果を表現する
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionStatus {
+    pub current_version: String,
+    pub latest_version: Option<String>,
+    pub release_url: Option<String>,
+    pub update_available: bool,
+    pub checked: bool,
+    pub message: String,
+}
+
+/// GitHub Releases から取得した最新リリースを表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LatestRelease {
+    version: String,
+    release_url: String,
+}
+
+/// GitHub Releases API の latest response を表現する
+#[derive(Debug, Deserialize)]
+struct GitHubLatestReleaseResponse {
+    tag_name: String,
+    html_url: String,
+}
+
+/// 比較可能な release version を表現する
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ReleaseVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+}
+
 /// CLI 実行時の失敗理由を表現する
 #[derive(Debug, Error)]
 enum CliError {
@@ -567,6 +607,11 @@ pub fn run_from_env() -> ExitCode {
 
 /// CLI の処理を実行する
 fn run() -> Result<ExitCode, CliError> {
+    if args_request_version(env::args_os().skip(1)) {
+        print_version_status(&load_version_status());
+        return Ok(ExitCode::SUCCESS);
+    }
+
     let cli = parse_cli_from_env();
     let state_path = cli.state.clone();
 
@@ -676,6 +721,14 @@ fn parse_cli_from_env() -> Cli {
 /// ヘルプ表示用の自動生成文言を日本語化した CLI 定義を生成する
 fn build_cli_command() -> clap::Command {
     let mut command = Cli::command();
+    command = command.arg(
+        Arg::new("version")
+            .short('V')
+            .long("version")
+            .global(true)
+            .action(ArgAction::SetTrue)
+            .help("バージョンを表示する"),
+    );
     command.build();
 
     localize_help_command(command)
@@ -735,6 +788,177 @@ fn reject_json_if_requested(json: bool) -> Result<(), CliError> {
     }
 
     Ok(())
+}
+
+/// CLI 引数がバージョン表示を要求しているか判定する
+fn args_request_version<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    for arg in args {
+        let arg = arg.as_ref();
+        if arg == OsStr::new("--") {
+            return false;
+        }
+
+        if arg == OsStr::new("--version") || arg == OsStr::new("-V") {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// 現在バージョンと GitHub Releases の最新バージョンを照合する
+pub fn load_version_status() -> VersionStatus {
+    version_status_from_latest_result(env!("CARGO_PKG_VERSION"), fetch_latest_release())
+}
+
+/// GitHub Releases の latest release を取得する
+fn fetch_latest_release() -> Result<LatestRelease, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(RELEASE_CHECK_TIMEOUT_SECONDS))
+        .build();
+    let user_agent = format!("{RELEASE_USER_AGENT_PRODUCT}/{}", env!("CARGO_PKG_VERSION"));
+
+    let response = agent
+        .get(RELEASE_API_URL)
+        .set("User-Agent", &user_agent)
+        .set("Accept", RELEASE_ACCEPT_HEADER)
+        .set("X-GitHub-Api-Version", RELEASE_API_VERSION)
+        .call()
+        .map_err(|error| error.to_string())?
+        .into_json::<GitHubLatestReleaseResponse>()
+        .map_err(|error| error.to_string())?;
+
+    latest_release_from_response(response)
+}
+
+/// GitHub Releases API の response を内部表現へ変換する
+fn latest_release_from_response(
+    response: GitHubLatestReleaseResponse,
+) -> Result<LatestRelease, String> {
+    let version = normalize_release_tag(&response.tag_name)
+        .ok_or_else(|| format!("invalid release tag: {}", response.tag_name))?;
+
+    Ok(LatestRelease {
+        version,
+        release_url: response.html_url,
+    })
+}
+
+/// 最新リリース取得結果から表示用のバージョン状態を生成する
+fn version_status_from_latest_result(
+    current_version: &str,
+    latest_result: Result<LatestRelease, String>,
+) -> VersionStatus {
+    let current_version = current_version.to_owned();
+
+    let Ok(latest) = latest_result else {
+        return VersionStatus {
+            current_version,
+            latest_version: None,
+            release_url: None,
+            update_available: false,
+            checked: false,
+            message: "GitHub Releases を確認できませんでした".to_owned(),
+        };
+    };
+
+    let current_parsed = parse_release_version(&current_version);
+    let latest_parsed = parse_release_version(&latest.version);
+    let Some((current_parsed, latest_parsed)) = current_parsed.zip(latest_parsed) else {
+        return VersionStatus {
+            current_version,
+            latest_version: Some(latest.version),
+            release_url: Some(latest.release_url),
+            update_available: false,
+            checked: false,
+            message: "バージョン形式を確認できませんでした".to_owned(),
+        };
+    };
+
+    let update_available = latest_parsed > current_parsed;
+    let message = if update_available {
+        "新しいバージョンがあります"
+    } else {
+        "最新バージョンです"
+    };
+
+    VersionStatus {
+        current_version,
+        latest_version: Some(latest.version),
+        release_url: Some(latest.release_url),
+        update_available,
+        checked: true,
+        message: message.to_owned(),
+    }
+}
+
+/// release tag から比較可能なバージョン表記を取得する
+fn normalize_release_tag(tag: &str) -> Option<String> {
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+    parse_release_version(version)?;
+
+    Some(version.to_owned())
+}
+
+/// release version を比較用構造体へ変換する
+fn parse_release_version(version: &str) -> Option<ReleaseVersion> {
+    let mut parts = version.split('.');
+    let major = parse_release_version_part(parts.next()?)?;
+    let minor = parse_release_version_part(parts.next()?)?;
+    let patch = parse_release_version_part(parts.next()?)?;
+
+    if parts.next().is_some() {
+        return None;
+    }
+
+    Some(ReleaseVersion {
+        major,
+        minor,
+        patch,
+    })
+}
+
+/// release version の数値部分を検証して変換する
+fn parse_release_version_part(part: &str) -> Option<u64> {
+    if part.is_empty() || !part.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+
+    if part.len() > 1 && part.starts_with('0') {
+        return None;
+    }
+
+    part.parse().ok()
+}
+
+/// バージョン状態を CLI 表示用の行へ変換する
+fn version_status_lines(status: &VersionStatus) -> Vec<String> {
+    let mut lines = vec![format!("fwd-deck {}", status.current_version)];
+
+    if status.update_available {
+        if let Some(latest_version) = &status.latest_version {
+            lines.push(format!("新しいバージョンがあります: {latest_version}"));
+        }
+
+        if let Some(release_url) = &status.release_url {
+            lines.push(format!("Release: {release_url}"));
+        }
+
+        lines.push(format!("CLI update: {CLI_UPDATE_COMMAND}"));
+    }
+
+    lines
+}
+
+/// バージョン状態を標準出力へ表示する
+fn print_version_status(status: &VersionStatus) {
+    for line in version_status_lines(status) {
+        println!("{line}");
+    }
 }
 
 /// CLI 引数に従って設定を読み込む
@@ -4433,6 +4657,128 @@ mod tests {
         let quoted = shell_quote("/tmp/key file's name");
 
         assert_eq!(quoted, "'/tmp/key file'\\''s name'");
+    }
+
+    /// --version がサブコマンドなしで検出されることを検証する
+    #[test]
+    fn args_request_version_detects_root_version_flag() {
+        let args = [OsStr::new("--version")];
+
+        let requested = args_request_version(args);
+
+        assert!(requested);
+    }
+
+    /// -- 以降の --version が通常引数として扱われることを検証する
+    #[test]
+    fn args_request_version_ignores_values_after_separator() {
+        let args = [
+            OsStr::new("config"),
+            OsStr::new("--"),
+            OsStr::new("--version"),
+        ];
+
+        let requested = args_request_version(args);
+
+        assert!(!requested);
+    }
+
+    /// GitHub の新しい release tag が更新ありとして扱われることを検証する
+    #[test]
+    fn version_status_detects_newer_release_tag() {
+        let status = version_status_from_latest_result(
+            "0.3.20",
+            Ok(LatestRelease {
+                version: "0.3.21".to_owned(),
+                release_url: "https://github.com/oiekjr/fwd-deck/releases/tag/v0.3.21".to_owned(),
+            }),
+        );
+
+        assert!(status.checked);
+        assert!(status.update_available);
+        assert_eq!(status.latest_version.as_deref(), Some("0.3.21"));
+    }
+
+    /// 同じ release tag が更新なしとして扱われることを検証する
+    #[test]
+    fn version_status_ignores_same_release_tag() {
+        let status = version_status_from_latest_result(
+            "0.3.20",
+            Ok(LatestRelease {
+                version: "0.3.20".to_owned(),
+                release_url: "https://github.com/oiekjr/fwd-deck/releases/tag/v0.3.20".to_owned(),
+            }),
+        );
+
+        assert!(status.checked);
+        assert!(!status.update_available);
+        assert_eq!(status.message, "最新バージョンです");
+    }
+
+    /// 古い release tag が更新なしとして扱われることを検証する
+    #[test]
+    fn version_status_ignores_older_release_tag() {
+        let status = version_status_from_latest_result(
+            "0.3.20",
+            Ok(LatestRelease {
+                version: "0.3.19".to_owned(),
+                release_url: "https://github.com/oiekjr/fwd-deck/releases/tag/v0.3.19".to_owned(),
+            }),
+        );
+
+        assert!(status.checked);
+        assert!(!status.update_available);
+    }
+
+    /// 不正な release tag が取得不可として扱われることを検証する
+    #[test]
+    fn latest_release_from_response_rejects_invalid_release_tag() {
+        let response = GitHubLatestReleaseResponse {
+            tag_name: "release-2026-06-03".to_owned(),
+            html_url: "https://github.com/oiekjr/fwd-deck/releases/tag/release-2026-06-03"
+                .to_owned(),
+        };
+
+        let release = latest_release_from_response(response);
+
+        assert!(release.is_err());
+    }
+
+    /// GitHub 確認失敗時に現在バージョンだけを表示することを検証する
+    #[test]
+    fn version_status_lines_fall_back_to_current_version_when_check_fails() {
+        let status =
+            version_status_from_latest_result("0.3.20", Err("network unavailable".to_owned()));
+
+        let lines = version_status_lines(&status);
+
+        assert!(!status.checked);
+        assert_eq!(lines, vec!["fwd-deck 0.3.20"]);
+    }
+
+    /// 更新ありの場合に release URL と更新コマンドを表示することを検証する
+    #[test]
+    fn version_status_lines_include_release_url_and_update_command() {
+        let release_url = "https://github.com/oiekjr/fwd-deck/releases/tag/v0.3.21";
+        let status = version_status_from_latest_result(
+            "0.3.20",
+            Ok(LatestRelease {
+                version: "0.3.21".to_owned(),
+                release_url: release_url.to_owned(),
+            }),
+        );
+
+        let lines = version_status_lines(&status);
+
+        assert_eq!(
+            lines,
+            vec![
+                "fwd-deck 0.3.20",
+                "新しいバージョンがあります: 0.3.21",
+                "Release: https://github.com/oiekjr/fwd-deck/releases/tag/v0.3.21",
+                "CLI update: brew update && brew upgrade fwd-deck",
+            ]
+        );
     }
 
     /// アプリ起動用の open 引数が Workspace パスを含むことを検証する

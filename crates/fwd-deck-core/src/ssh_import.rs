@@ -31,6 +31,7 @@ impl SshImport {
     ) -> TunnelConfig {
         TunnelConfig {
             name,
+            enabled: true,
             description,
             tags,
             local_host: Some(forward.local_host.clone()),

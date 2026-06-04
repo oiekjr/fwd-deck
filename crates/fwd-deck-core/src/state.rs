@@ -357,6 +357,7 @@ started_at_unix_seconds = 1700000000
             ConfigSource::new(source_kind, source_path),
             TunnelConfig {
                 name: name.to_owned(),
+                enabled: true,
                 description: None,
                 tags: Vec::new(),
                 local_host: None,

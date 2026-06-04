@@ -15,9 +15,9 @@ use std::{
 use clap::{Arg, ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use fwd_deck_core::{
-    ConfigEditError, ConfigPaths, ConfigSourceKind, DEFAULT_IMPORT_TAG, DEFAULT_LOCAL_HOST,
-    EffectiveConfig, ProcessState, ResolvedTimeoutConfig, ResolvedTunnelConfig, SshImport,
-    SshImportError, SshImportWarning, StartTunnelOptions, StartedTunnel, StoppedTunnel,
+    ConfigEditError, ConfigPaths, ConfigSource, ConfigSourceKind, DEFAULT_IMPORT_TAG,
+    DEFAULT_LOCAL_HOST, EffectiveConfig, ProcessState, ResolvedTimeoutConfig, ResolvedTunnelConfig,
+    SshImport, SshImportError, SshImportWarning, StartTunnelOptions, StartedTunnel, StoppedTunnel,
     TimeoutConfig, TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, TunnelState,
     ValidationReport, add_tunnel_to_config_file, add_tunnels_to_config_file,
     build_ssh_command_args, default_global_config_path, default_local_config_path,
@@ -1320,10 +1320,11 @@ fn generate_unique_import_names(
     count: usize,
 ) -> Vec<String> {
     let mut used_names = config
-        .tunnels
+        .sources
         .iter()
-        .filter(|resolved| resolved.source.kind == scope)
-        .map(|resolved| resolved.tunnel.name.clone())
+        .filter(|file| file.source.kind == scope)
+        .flat_map(|file| file.tunnels.iter())
+        .map(|tunnel| tunnel.name.clone())
         .collect::<HashSet<_>>();
     let mut names = Vec::with_capacity(count);
 
@@ -2840,6 +2841,7 @@ fn prompt_tunnel_config(
     scope: ConfigSourceKind,
 ) -> Result<TunnelConfig, CliError> {
     let id = prompt_available_tunnel_id(config, scope)?;
+    let enabled = true;
     let description = prompt_optional_text("Description:")?;
     let tags = prompt_tags()?;
     let local_host = Some(prompt_local_host()?);
@@ -2853,6 +2855,7 @@ fn prompt_tunnel_config(
 
     Ok(TunnelConfig {
         name: id,
+        enabled,
         description,
         tags,
         local_host,
@@ -2874,6 +2877,7 @@ fn prompt_tunnel_config_update(
     scope: ConfigSourceKind,
 ) -> Result<TunnelConfig, CliError> {
     let id = prompt_available_tunnel_id_for_update(config, scope, &current.name)?;
+    let enabled = prompt_existing_bool("Enabled:", current.enabled)?;
     let description =
         prompt_existing_optional_text("Description:", current.description.as_deref())?;
     let tags = prompt_existing_tags(&current.tags)?;
@@ -2890,6 +2894,7 @@ fn prompt_tunnel_config_update(
 
     Ok(TunnelConfig {
         name: id,
+        enabled,
         description,
         tags,
         local_host,
@@ -2966,11 +2971,8 @@ fn find_tunnel_id_conflict<'a>(
     config: &'a EffectiveConfig,
     scope: ConfigSourceKind,
     tunnel_id: &str,
-) -> Option<&'a ResolvedTunnelConfig> {
-    config
-        .tunnels
-        .iter()
-        .find(|resolved| resolved.source.kind == scope && resolved.tunnel.name == tunnel_id)
+) -> Option<ScopedTunnelRef<'a>> {
+    source_tunnels_for_scope(config, scope).find(|candidate| candidate.tunnel.name == tunnel_id)
 }
 
 /// 更新対象を除いてトンネル ID が重複する既存トンネルを取得する
@@ -2979,12 +2981,9 @@ fn find_tunnel_id_conflict_for_update<'a>(
     scope: ConfigSourceKind,
     current_id: &str,
     tunnel_id: &str,
-) -> Option<&'a ResolvedTunnelConfig> {
-    config.tunnels.iter().find(|resolved| {
-        resolved.source.kind == scope
-            && resolved.tunnel.name != current_id
-            && resolved.tunnel.name == tunnel_id
-    })
+) -> Option<ScopedTunnelRef<'a>> {
+    source_tunnels_for_scope(config, scope)
+        .find(|candidate| candidate.tunnel.name != current_id && candidate.tunnel.name == tunnel_id)
 }
 
 /// 既存設定と重複しない local_port の入力を受け取る
@@ -3052,12 +3051,34 @@ fn find_local_port_conflict<'a>(
     scope: ConfigSourceKind,
     tunnel_id: &str,
     local_port: u16,
-) -> Option<&'a ResolvedTunnelConfig> {
-    config.tunnels.iter().find(|resolved| {
-        resolved.source.kind == scope
-            && resolved.tunnel.name != tunnel_id
-            && resolved.tunnel.local_port == local_port
+) -> Option<ScopedTunnelRef<'a>> {
+    source_tunnels_for_scope(config, scope).find(|candidate| {
+        candidate.tunnel.name != tunnel_id && candidate.tunnel.local_port == local_port
     })
+}
+
+/// スコープ付きの raw トンネル設定参照を保持する
+#[derive(Debug, Clone, Copy)]
+struct ScopedTunnelRef<'a> {
+    source: &'a ConfigSource,
+    tunnel: &'a TunnelConfig,
+}
+
+/// 指定スコープに含まれる raw トンネル設定を取得する
+fn source_tunnels_for_scope(
+    config: &EffectiveConfig,
+    scope: ConfigSourceKind,
+) -> impl Iterator<Item = ScopedTunnelRef<'_>> {
+    config
+        .sources
+        .iter()
+        .filter(move |file| file.source.kind == scope)
+        .flat_map(|file| {
+            file.tunnels.iter().map(move |tunnel| ScopedTunnelRef {
+                source: &file.source,
+                tunnel,
+            })
+        })
 }
 
 /// 削除対象のトンネルを対話的に選択する
@@ -3132,6 +3153,11 @@ fn prompt_existing_optional_text(
     } else {
         Ok(Some(trimmed.to_owned()))
     }
+}
+
+/// 既存値を初期値として真偽値入力を受け取る
+fn prompt_existing_bool(label: &str, current: bool) -> Result<bool, CliError> {
+    Ok(Confirm::new(label).with_default(current).prompt()?)
 }
 
 /// 既存値を初期値としてタグ一覧の入力を受け取る
@@ -5135,6 +5161,7 @@ mod tests {
     fn tunnel(id: &str, local_port: u16) -> TunnelConfig {
         TunnelConfig {
             name: id.to_owned(),
+            enabled: true,
             description: None,
             tags: Vec::new(),
             local_host: None,

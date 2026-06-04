@@ -1664,6 +1664,7 @@ n127.0.0.1:25432 (LISTEN)
             ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml")),
             TunnelConfig {
                 name: "db".to_owned(),
+                enabled: true,
                 description: None,
                 tags: Vec::new(),
                 local_host: Some("127.0.0.1".to_owned()),

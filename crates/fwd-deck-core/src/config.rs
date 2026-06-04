@@ -156,6 +156,8 @@ impl Default for ResolvedTimeoutConfig {
 #[serde(deny_unknown_fields)]
 pub struct TunnelConfig {
     pub name: String,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
     pub description: Option<String>,
     #[serde(
         default,
@@ -214,10 +216,14 @@ impl LoadedConfigFile {
         &self,
         base_timeouts: ResolvedTimeoutConfig,
     ) -> impl Iterator<Item = ResolvedTunnelConfig> + '_ {
-        self.tunnels.iter().cloned().map(move |tunnel| {
-            let timeouts = tunnel.timeouts.resolve_with_base(base_timeouts);
-            ResolvedTunnelConfig::new_with_timeouts(self.source.clone(), tunnel, timeouts)
-        })
+        self.tunnels
+            .iter()
+            .filter(|tunnel| tunnel.enabled)
+            .cloned()
+            .map(move |tunnel| {
+                let timeouts = tunnel.timeouts.resolve_with_base(base_timeouts);
+                ResolvedTunnelConfig::new_with_timeouts(self.source.clone(), tunnel, timeouts)
+            })
     }
 }
 
@@ -508,6 +514,18 @@ pub fn add_tunnel_to_config_file(
         });
     }
 
+    if let Some(existing) = file
+        .tunnels
+        .iter()
+        .find(|existing| existing.local_port == tunnel.local_port)
+    {
+        return Err(ConfigEditError::DuplicateLocalPort {
+            path: path.to_path_buf(),
+            local_port: tunnel.local_port,
+            existing_name: existing.name.clone(),
+        });
+    }
+
     file.tunnels.push(tunnel);
     write_config_file(path, &file)?;
 
@@ -607,6 +625,21 @@ pub fn update_tunnel_in_config_file(
         return Err(ConfigEditError::DuplicateName {
             path: path.to_path_buf(),
             name: tunnel.name,
+        });
+    }
+
+    if let Some(existing) = file
+        .tunnels
+        .iter()
+        .enumerate()
+        .find_map(|(index, existing)| {
+            (index != position && existing.local_port == tunnel.local_port).then_some(existing)
+        })
+    {
+        return Err(ConfigEditError::DuplicateLocalPort {
+            path: path.to_path_buf(),
+            local_port: tunnel.local_port,
+            existing_name: existing.name.clone(),
         });
     }
 
@@ -725,23 +758,24 @@ pub fn validate_config(config: &EffectiveConfig) -> ValidationReport {
 
 /// 任意項目が指定された場合の制約を検証する
 fn validate_optional_fields(config: &EffectiveConfig, report: &mut ValidationReport) {
-    for resolved in &config.tunnels {
-        if let Some(local_host) = &resolved.tunnel.local_host {
-            validate_local_host(resolved, local_host, report);
+    for (source, tunnel) in source_tunnels(config) {
+        if let Some(local_host) = &tunnel.local_host {
+            validate_local_host(source, tunnel, local_host, report);
         }
     }
 }
 
 /// ローカル側の bind address として扱える値かを検証する
 fn validate_local_host(
-    resolved: &ResolvedTunnelConfig,
+    source: &ConfigSource,
+    tunnel: &TunnelConfig,
     local_host: &str,
     report: &mut ValidationReport,
 ) {
     if local_host.trim().is_empty() {
         report.push(ValidationError::new(
-            resolved.source.clone(),
-            Some(resolved.tunnel.name.clone()),
+            source.clone(),
+            Some(tunnel.name.clone()),
             "local_host cannot be empty",
         ));
         return;
@@ -749,8 +783,8 @@ fn validate_local_host(
 
     if local_host.chars().any(char::is_whitespace) {
         report.push(ValidationError::new(
-            resolved.source.clone(),
-            Some(resolved.tunnel.name.clone()),
+            source.clone(),
+            Some(tunnel.name.clone()),
             "local_host cannot contain whitespace",
         ));
     }
@@ -758,12 +792,12 @@ fn validate_local_host(
 
 /// タグが許可された形式で記述されているかを検証する
 fn validate_tags(config: &EffectiveConfig, report: &mut ValidationReport) {
-    for resolved in &config.tunnels {
-        for tag in &resolved.tunnel.tags {
+    for (source, tunnel) in source_tunnels(config) {
+        for tag in &tunnel.tags {
             if !tag_is_valid(tag) {
                 report.push(ValidationError::new(
-                    resolved.source.clone(),
-                    Some(resolved.tunnel.name.clone()),
+                    source.clone(),
+                    Some(tunnel.name.clone()),
                     format!(
                         "tag must contain only lowercase ASCII letters, numbers, '-', '_', '.', or '/': {tag}"
                     ),
@@ -908,6 +942,37 @@ fn normalize_tunnel(mut tunnel: TunnelConfig) -> TunnelConfig {
     tunnel
 }
 
+/// bool 設定の未指定時に有効を補う
+fn default_true() -> bool {
+    true
+}
+
+/// TOML 出力を省略できる有効設定かを判定する
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+/// 読み込み元ファイルに含まれる全トンネル設定を取得する
+fn source_tunnels(config: &EffectiveConfig) -> Vec<(&ConfigSource, &TunnelConfig)> {
+    if config.sources.is_empty() {
+        return config
+            .tunnels
+            .iter()
+            .map(|resolved| (&resolved.source, &resolved.tunnel))
+            .collect();
+    }
+
+    config
+        .sources
+        .iter()
+        .flat_map(|file| {
+            file.tunnels
+                .iter()
+                .map(move |tunnel| (&file.source, tunnel))
+        })
+        .collect()
+}
+
 /// 同一設定ファイル内の name 重複を検証する
 fn validate_duplicate_names(config: &EffectiveConfig, report: &mut ValidationReport) {
     for file in &config.sources {
@@ -931,15 +996,9 @@ fn validate_duplicate_names(config: &EffectiveConfig, report: &mut ValidationRep
 
 /// 必須項目が空文字列ではないことを検証する
 fn validate_required_fields(config: &EffectiveConfig, report: &mut ValidationReport) {
-    for resolved in &config.tunnels {
-        for (field_name, value) in required_string_fields(&resolved.tunnel) {
-            validate_non_empty(
-                &resolved.source,
-                &resolved.tunnel,
-                field_name,
-                value,
-                report,
-            );
+    for (source, tunnel) in source_tunnels(config) {
+        for (field_name, value) in required_string_fields(tunnel) {
+            validate_non_empty(source, tunnel, field_name, value, report);
         }
     }
 }
@@ -973,9 +1032,9 @@ fn validate_non_empty(
 
 /// ポート番号が有効範囲であることを検証する
 fn validate_ports(config: &EffectiveConfig, report: &mut ValidationReport) {
-    for resolved in &config.tunnels {
-        for (field_name, port) in port_fields(&resolved.tunnel) {
-            validate_non_zero_port(resolved, field_name, port, report);
+    for (source, tunnel) in source_tunnels(config) {
+        for (field_name, port) in port_fields(tunnel) {
+            validate_non_zero_port(source, tunnel, field_name, port, report);
         }
     }
 }
@@ -990,15 +1049,16 @@ fn port_fields(tunnel: &TunnelConfig) -> [(&'static str, u16); 2] {
 
 /// ポート番号が 0 ではないことを検証する
 fn validate_non_zero_port(
-    resolved: &ResolvedTunnelConfig,
+    source: &ConfigSource,
+    tunnel: &TunnelConfig,
     field_name: &str,
     port: u16,
     report: &mut ValidationReport,
 ) {
     if port == 0 {
         report.push(ValidationError::new(
-            resolved.source.clone(),
-            Some(resolved.tunnel.name.clone()),
+            source.clone(),
+            Some(tunnel.name.clone()),
             format!("{field_name} must be greater than or equal to 1"),
         ));
     }
@@ -1026,11 +1086,11 @@ fn validate_duplicate_local_ports(config: &EffectiveConfig, report: &mut Validat
 
 /// 権限が必要になる可能性があるローカルポートを警告する
 fn warn_privileged_local_ports(config: &EffectiveConfig, report: &mut ValidationReport) {
-    for resolved in &config.tunnels {
-        if (1..1024).contains(&resolved.tunnel.local_port) {
+    for (source, tunnel) in source_tunnels(config) {
+        if (1..1024).contains(&tunnel.local_port) {
             report.push_warning(ValidationWarning::new(
-                resolved.source.clone(),
-                Some(resolved.tunnel.name.clone()),
+                source.clone(),
+                Some(tunnel.name.clone()),
                 "local_port below 1024 may require elevated privileges",
             ));
         }
@@ -1094,6 +1154,68 @@ ssh_host = "local-bastion.example.com"
         let tunnel = tunnel("db", 15432);
 
         assert_eq!(tunnel.effective_local_host(), "127.0.0.1");
+    }
+
+    /// enabled 未指定時に有効として扱われることを検証する
+    #[test]
+    fn tunnel_config_defaults_enabled_to_true() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        fs::write(
+            &path,
+            r#"
+[[tunnels]]
+name = "db"
+local_port = 15432
+remote_host = "db.internal"
+remote_port = 5432
+ssh_user = "user"
+ssh_host = "bastion.example.com"
+"#,
+        )
+        .expect("write configuration");
+
+        let loaded = read_config_file(&path, ConfigSourceKind::Local)
+            .expect("read configuration")
+            .expect("configuration file exists");
+
+        assert!(loaded.tunnels[0].enabled);
+    }
+
+    /// disabled なトンネルが統合済み設定から除外されることを検証する
+    #[test]
+    fn disabled_tunnels_are_excluded_from_effective_config() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        fs::write(
+            &path,
+            r#"
+[[tunnels]]
+name = "enabled-db"
+local_port = 15432
+remote_host = "db.internal"
+remote_port = 5432
+ssh_user = "user"
+ssh_host = "bastion.example.com"
+
+[[tunnels]]
+name = "disabled-db"
+enabled = false
+local_port = 25432
+remote_host = "disabled-db.internal"
+remote_port = 5432
+ssh_user = "user"
+ssh_host = "bastion.example.com"
+"#,
+        )
+        .expect("write configuration");
+
+        let config = load_effective_config(&ConfigPaths::new(None, path)).expect("load config");
+
+        assert_eq!(config.sources[0].tunnels.len(), 2);
+        assert!(!config.sources[0].tunnels[1].enabled);
+        assert_eq!(config.tunnels.len(), 1);
+        assert_eq!(config.tunnels[0].tunnel.name, "enabled-db");
     }
 
     /// タイムアウト未指定時に既定値が使われることを検証する
@@ -1291,6 +1413,31 @@ connect_timeout_seconds = 10
         );
     }
 
+    /// disabled なトンネルも local_port 重複の検証対象になることを検証する
+    #[test]
+    fn validation_reports_disabled_duplicate_local_ports() {
+        let source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml"));
+        let mut disabled = tunnel("disabled-db", 15432);
+        disabled.enabled = false;
+        let config = EffectiveConfig::new(
+            vec![LoadedConfigFile::new(
+                source.clone(),
+                vec![tunnel("db", 15432), disabled],
+            )],
+            vec![ResolvedTunnelConfig::new(source, tunnel("db", 15432))],
+        );
+
+        let report = validate_config(&config);
+
+        assert!(!report.is_valid());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.message == "local_port 15432 duplicates db")
+        );
+    }
+
     /// global と local の同名・同ポートは設定検証エラーにしないことを検証する
     #[test]
     fn validation_allows_same_name_and_local_port_across_sources() {
@@ -1336,6 +1483,43 @@ connect_timeout_seconds = 10
                 .errors
                 .iter()
                 .any(|error| error.message == "local_host cannot contain whitespace")
+        );
+    }
+
+    /// disabled なトンネルも意味検証の対象になることを検証する
+    #[test]
+    fn validation_reports_disabled_tunnel_field_errors() {
+        let source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml"));
+        let mut invalid_tunnel = tunnel("disabled-db", 15432);
+        invalid_tunnel.enabled = false;
+        invalid_tunnel.tags = vec!["Invalid Tag".to_owned()];
+        invalid_tunnel.local_host = Some("127.0.0.1 ".to_owned());
+        invalid_tunnel.remote_port = 0;
+        let config = EffectiveConfig::new(
+            vec![LoadedConfigFile::new(source, vec![invalid_tunnel])],
+            Vec::new(),
+        );
+
+        let report = validate_config(&config);
+
+        assert!(!report.is_valid());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.message == "local_host cannot contain whitespace")
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.message.contains("tag must contain only"))
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.message == "remote_port must be greater than or equal to 1")
         );
     }
 
@@ -1447,6 +1631,26 @@ ssh_host = "bastion.example.com"
         let content = fs::read_to_string(path).expect("read configuration");
 
         assert!(!content.contains("tags"));
+    }
+
+    /// 有効設定の既定値は省略し、無効設定だけ TOML に出力することを検証する
+    #[test]
+    fn enabled_true_is_omitted_and_false_is_serialized() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        let mut disabled = tunnel("disabled-db", 25432);
+        disabled.enabled = false;
+
+        add_tunnels_to_config_file(
+            &path,
+            ConfigSourceKind::Local,
+            vec![tunnel("enabled-db", 15432), disabled],
+        )
+        .expect("add tunnels");
+        let content = fs::read_to_string(path).expect("read configuration");
+
+        assert!(!content.contains("enabled = true"));
+        assert!(content.contains("enabled = false"));
     }
 
     /// タグの正規化と検証ルールを検証する
@@ -1577,6 +1781,23 @@ ssh_host = "bastion.example.com"
         assert!(matches!(result, Err(ConfigEditError::DuplicateName { .. })));
     }
 
+    /// 同一設定ファイル内の local_port 重複が単体追加時に拒否されることを検証する
+    #[test]
+    fn add_tunnel_rejects_duplicate_local_port() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        let mut disabled = tunnel("disabled-db", 15432);
+        disabled.enabled = false;
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, disabled).expect("add tunnel");
+
+        let result = add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel("db", 15432));
+
+        assert!(matches!(
+            result,
+            Err(ConfigEditError::DuplicateLocalPort { .. })
+        ));
+    }
+
     /// 複数トンネルを1回の書き込みで追加できることを検証する
     #[test]
     fn add_tunnels_adds_multiple_entries_atomically() {
@@ -1689,10 +1910,36 @@ ssh_host = "bastion.example.com"
         assert!(matches!(result, Err(ConfigEditError::DuplicateName { .. })));
     }
 
+    /// 更新後 local_port が同一設定ファイル内で重複する場合に拒否されることを検証する
+    #[test]
+    fn update_tunnel_rejects_duplicate_local_port() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let path = temp_dir.path().join("fwd-deck.toml");
+        let mut disabled = tunnel("disabled-db", 16379);
+        disabled.enabled = false;
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, tunnel("db", 15432))
+            .expect("add first tunnel");
+        add_tunnel_to_config_file(&path, ConfigSourceKind::Local, disabled)
+            .expect("add second tunnel");
+
+        let result = update_tunnel_in_config_file(
+            &path,
+            ConfigSourceKind::Local,
+            "db",
+            tunnel("dev-db", 16379),
+        );
+
+        assert!(matches!(
+            result,
+            Err(ConfigEditError::DuplicateLocalPort { .. })
+        ));
+    }
+
     /// テスト用のトンネル設定を生成する
     fn tunnel(name: &str, local_port: u16) -> TunnelConfig {
         TunnelConfig {
             name: name.to_owned(),
+            enabled: true,
             description: None,
             tags: Vec::new(),
             local_host: None,

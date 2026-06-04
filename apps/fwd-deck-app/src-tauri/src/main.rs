@@ -16,17 +16,17 @@ use std::{
 };
 
 use fwd_deck_core::{
-    ConfigEditError, ConfigLoadError, ConfigPaths, ConfigSourceKind, EffectiveConfig, ProcessState,
-    ResolvedTimeoutConfig, ResolvedTunnelConfig, SshImportWarning, StartedTunnel, StoppedTunnel,
-    TimeoutConfig, TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, ValidationReport,
-    add_tunnel_to_config_file, add_tunnels_to_config_file, default_global_config_path,
-    default_local_config_path, default_state_file_path, format_path_for_display,
-    load_effective_config, normalize_runtime_source_path, parse_ssh_command,
-    remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel, start_tunnel,
-    start_tunnels_with_progress, stop_tunnels_with_progress as stop_tunnels_with_progress_core,
-    tag_is_valid, tunnel_runtime_id, tunnel_runtime_id_from_normalized_source_path,
-    tunnel_statuses, tunnel_statuses_for_state_files, update_tunnel_in_config_file,
-    validate_config,
+    ConfigEditError, ConfigLoadError, ConfigPaths, ConfigSource, ConfigSourceKind, EffectiveConfig,
+    ProcessState, ResolvedTimeoutConfig, ResolvedTunnelConfig, SshImportWarning, StartedTunnel,
+    StoppedTunnel, TimeoutConfig, TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus,
+    ValidationReport, add_tunnel_to_config_file, add_tunnels_to_config_file,
+    default_global_config_path, default_local_config_path, default_state_file_path,
+    format_path_for_display, load_effective_config, normalize_runtime_source_path,
+    parse_ssh_command, remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel,
+    start_tunnel, start_tunnels_with_progress,
+    stop_tunnels_with_progress as stop_tunnels_with_progress_core, tag_is_valid, tunnel_runtime_id,
+    tunnel_runtime_id_from_normalized_source_path, tunnel_statuses,
+    tunnel_statuses_for_state_files, update_tunnel_in_config_file, validate_config,
 };
 #[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
@@ -3832,6 +3832,7 @@ impl TunnelInput {
     fn into_tunnel_config(self) -> TunnelConfig {
         TunnelConfig {
             name: trimmed_required(self.id),
+            enabled: true,
             description: trimmed_optional(self.description),
             tags: self.tags.into_iter().map(trimmed_required).collect(),
             local_host: Some(trimmed_required(self.local_host)),
@@ -6043,43 +6044,8 @@ fn validate_new_tunnel(
 ) -> Result<(), AppError> {
     validate_tunnel_fields(tunnel)?;
 
-    let mut existing_id = None;
-    let mut existing_local_port = None;
-
-    for resolved in &config.tunnels {
-        if resolved.source.kind != kind {
-            continue;
-        }
-
-        if existing_id.is_none() && resolved.tunnel.name == tunnel.name {
-            existing_id = Some(resolved);
-        }
-
-        if existing_local_port.is_none() && resolved.tunnel.local_port == tunnel.local_port {
-            existing_local_port = Some(resolved);
-        }
-
-        if existing_id.is_some() && existing_local_port.is_some() {
-            break;
-        }
-    }
-
-    if let Some(existing) = existing_id {
-        return Err(AppError::InvalidInput(format!(
-            "同じ name のトンネルが既に存在します: {} ({})",
-            existing.tunnel.name,
-            format_path_for_display(&existing.source.path)
-        )));
-    }
-
-    if let Some(existing) = existing_local_port {
-        return Err(AppError::InvalidInput(format!(
-            "local_port は既存トンネルと重複しています: {} ({})",
-            tunnel.local_port, existing.tunnel.name
-        )));
-    }
-
-    Ok(())
+    let index = ScopedTunnelValidationIndex::new(config, kind);
+    validate_new_tunnel_against_index(&index, tunnel)
 }
 
 /// 追加対象の複数トンネルに意味的な不備がないことを検証する
@@ -6117,21 +6083,17 @@ fn validate_new_tunnels(
 /// 追加検証用に同一 scope の既存トンネルを索引化する
 #[derive(Debug)]
 struct ScopedTunnelValidationIndex<'a> {
-    by_name: HashMap<&'a str, &'a ResolvedTunnelConfig>,
-    by_local_port: HashMap<u16, &'a ResolvedTunnelConfig>,
+    by_name: HashMap<&'a str, ScopedTunnelRef<'a>>,
+    by_local_port: HashMap<u16, ScopedTunnelRef<'a>>,
 }
 
 impl<'a> ScopedTunnelValidationIndex<'a> {
-    /// 統合済み設定から指定 scope の検証索引を初期化する
+    /// raw 設定から指定 scope の検証索引を初期化する
     fn new(config: &'a EffectiveConfig, kind: ConfigSourceKind) -> Self {
         let mut by_name = HashMap::new();
         let mut by_local_port = HashMap::new();
 
-        for resolved in &config.tunnels {
-            if resolved.source.kind != kind {
-                continue;
-            }
-
+        for resolved in source_tunnels_for_scope(config, kind) {
             by_name
                 .entry(resolved.tunnel.name.as_str())
                 .or_insert(resolved);
@@ -6145,6 +6107,43 @@ impl<'a> ScopedTunnelValidationIndex<'a> {
             by_local_port,
         }
     }
+}
+
+/// スコープ付きの raw トンネル設定参照を保持する
+#[derive(Debug, Clone, Copy)]
+struct ScopedTunnelRef<'a> {
+    source: &'a ConfigSource,
+    tunnel: &'a TunnelConfig,
+}
+
+/// 指定スコープに含まれる raw トンネル設定を取得する
+fn source_tunnels_for_scope(
+    config: &EffectiveConfig,
+    kind: ConfigSourceKind,
+) -> Vec<ScopedTunnelRef<'_>> {
+    if config.sources.is_empty() {
+        return config
+            .tunnels
+            .iter()
+            .filter(|resolved| resolved.source.kind == kind)
+            .map(|resolved| ScopedTunnelRef {
+                source: &resolved.source,
+                tunnel: &resolved.tunnel,
+            })
+            .collect();
+    }
+
+    config
+        .sources
+        .iter()
+        .filter(|file| file.source.kind == kind)
+        .flat_map(|file| {
+            file.tunnels.iter().map(|tunnel| ScopedTunnelRef {
+                source: &file.source,
+                tunnel,
+            })
+        })
+        .collect()
 }
 
 /// 追加候補が既存トンネルと競合しないことを検証する
@@ -6200,11 +6199,7 @@ fn validate_updated_tunnel(
     let mut existing_id = None;
     let mut existing_local_port = None;
 
-    for resolved in &config.tunnels {
-        if resolved.source.kind != kind {
-            continue;
-        }
-
+    for resolved in source_tunnels_for_scope(config, kind) {
         if resolved.tunnel.name == current_id {
             continue;
         }
@@ -7256,7 +7251,7 @@ mod tests {
     use std::{net::TcpListener, path::Path};
 
     use fwd_deck_core::{
-        ConfigSource, TunnelState, TunnelStateFile,
+        ConfigSource, LoadedConfigFile, TunnelState, TunnelStateFile,
         state::{read_state_file, write_state_file},
     };
     use tempfile::TempDir;
@@ -10190,6 +10185,57 @@ hide_tracked_runtime_bar = true
         );
     }
 
+    /// disabled な既存 name との重複が追加検証で拒否されることを検証する
+    #[test]
+    fn validate_new_tunnel_rejects_disabled_existing_duplicate_name() {
+        let source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml"));
+        let mut disabled = tunnel_config("db", 15432);
+        disabled.enabled = false;
+        let config = EffectiveConfig::new(
+            vec![LoadedConfigFile::new(source, vec![disabled])],
+            Vec::new(),
+        );
+
+        let result = validate_new_tunnel(
+            &config,
+            ConfigSourceKind::Local,
+            &tunnel_config("db", 25432),
+        );
+
+        assert!(
+            matches!(result, Err(AppError::InvalidInput(message)) if message.contains("同じ name"))
+        );
+    }
+
+    /// disabled な既存 local_port との重複が更新検証で拒否されることを検証する
+    #[test]
+    fn validate_updated_tunnel_rejects_disabled_existing_duplicate_local_port() {
+        let source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml"));
+        let mut disabled = tunnel_config("disabled-db", 16379);
+        disabled.enabled = false;
+        let config = EffectiveConfig::new(
+            vec![LoadedConfigFile::new(
+                source.clone(),
+                vec![tunnel_config("db", 15432), disabled],
+            )],
+            vec![ResolvedTunnelConfig::new(
+                source,
+                tunnel_config("db", 15432),
+            )],
+        );
+
+        let result = validate_updated_tunnel(
+            &config,
+            ConfigSourceKind::Local,
+            "db",
+            &tunnel_config("db", 16379),
+        );
+
+        assert!(
+            matches!(result, Err(AppError::InvalidInput(message)) if message.contains("local_port"))
+        );
+    }
+
     /// 複数追加時に候補内 local_port 重複が拒否されることを検証する
     #[test]
     fn validate_new_tunnels_rejects_candidate_duplicate_local_port() {
@@ -10469,6 +10515,7 @@ hide_tracked_runtime_bar = true
     fn tunnel_config(id: &str, local_port: u16) -> TunnelConfig {
         TunnelConfig {
             name: id.to_owned(),
+            enabled: true,
             description: None,
             tags: Vec::new(),
             local_host: None,

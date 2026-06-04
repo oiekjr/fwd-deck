@@ -6,6 +6,7 @@ start_grace_milliseconds = 300
 
 [[tunnels]]
 name = "dev-db"
+enabled = true
 description = "Development database"
 tags = ["dev", "project-a"]
 local_host = "127.0.0.1"

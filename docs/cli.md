@@ -49,6 +49,7 @@ start_grace_milliseconds = 300
 
 [[tunnels]]
 name = "dev-db"
+enabled = true
 description = "Development database"
 tags = ["dev", "project-a"]
 local_host = "127.0.0.1"
@@ -69,6 +70,7 @@ connect_timeout_seconds = 10
 | フィールド | 必須 | 説明 |
 | --- | --- | --- |
 | `name` | 必須 | トンネルを識別する表示名です。 |
+| `enabled` | 任意 | `false` の場合、通常の一覧表示、参照、起動対象から除外します。省略時は `true` です。 |
 | `description` | 任意 | `show` や `list --query` で使う説明です。 |
 | `tags` | 任意 | `start --tag` や `list --tag` で使うタグです。 |
 | `local_host` | 任意 | ローカル側のバインドアドレスです。省略時は `127.0.0.1` です。 |
@@ -82,6 +84,8 @@ connect_timeout_seconds = 10
 | `timeouts` | 任意 | トンネル単位のタイムアウト上書きです。 |
 
 `tags` は小文字 ASCII の `a-z`, `0-9`, `-`, `_`, `.`, `/` を使えます。  
+`enabled = false` のトンネルは通常操作では存在しないものとして扱いますが、設定ファイル内の `name` 重複と `local_port` 重複の検証対象には含まれます。
+
 同一設定ファイル内の `name` 重複と `local_port` 重複は検証エラーです。  
 ローカル設定とグローバル設定の間で同じ `name` や `local_port` を使う設定は許容されます。  
 同じ `local_port` のトンネルを同時に起動しようとした場合、後から起動した側がローカルエンドポイント使用中として失敗します。  

@@ -74,6 +74,29 @@ fn list_json_outputs_configured_tunnels() {
     assert_eq!(json["tunnels"][0]["localPort"], 16379);
 }
 
+/// disabled なトンネルが list と list --json から除外されることを検証する
+#[test]
+fn list_excludes_disabled_tunnels() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(disabled_tunnel_config());
+
+    let output = workspace.run(["list"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("enabled-db");
+    output.assert_stdout_not_contains("disabled-db");
+
+    let output = workspace.run(["--json", "list"]);
+
+    assert!(output.status.success());
+    let json = output.stdout_json();
+    assert_eq!(
+        json["tunnels"].as_array().expect("tunnels is array").len(),
+        1
+    );
+    assert_eq!(json["tunnels"][0]["name"], "enabled-db");
+}
+
 /// list --wide が REMOTE の省略有無を切り替えることを検証する
 #[test]
 fn list_wide_displays_full_remote_host() {
@@ -121,6 +144,18 @@ fn show_fails_for_unknown_tunnel_id() {
 
     assert!(!output.status.success());
     output.assert_stderr_contains("No tunnel matched NAME: missing.");
+}
+
+/// disabled なトンネルが show の参照対象から除外されることを検証する
+#[test]
+fn show_does_not_reference_disabled_tunnels() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(disabled_tunnel_config());
+
+    let output = workspace.run(["show", "disabled-db"]);
+
+    assert!(!output.status.success());
+    output.assert_stderr_contains("No tunnel matched NAME: disabled-db.");
 }
 
 /// validate が有効な設定を成功として扱うことを検証する
@@ -187,6 +222,47 @@ fn start_dry_run_prints_plan_without_writing_state() {
     output.assert_stdout_contains("Detach: enabled");
     output.assert_stdout_contains("Would start tunnel: dev-db");
     output.assert_stdout_contains("Would start tunnel: prod-cache");
+    assert!(!workspace.state_path().exists());
+}
+
+/// disabled なトンネルが start --all --dry-run から除外されることを検証する
+#[test]
+fn start_all_dry_run_excludes_disabled_tunnels() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(disabled_tunnel_config());
+
+    let output = workspace.run([
+        "--state",
+        workspace.state_path_str(),
+        "start",
+        "--all",
+        "--dry-run",
+    ]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("Would start tunnel: enabled-db");
+    output.assert_stdout_not_contains("disabled-db");
+    assert!(!workspace.state_path().exists());
+}
+
+/// disabled なトンネルが start --tag --dry-run から除外されることを検証する
+#[test]
+fn start_tag_dry_run_excludes_disabled_tunnels() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(disabled_tunnel_config());
+
+    let output = workspace.run([
+        "--state",
+        workspace.state_path_str(),
+        "start",
+        "--tag",
+        "dev",
+        "--dry-run",
+    ]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("Would start tunnel: enabled-db");
+    output.assert_stdout_not_contains("disabled-db");
     assert!(!workspace.state_path().exists());
 }
 
@@ -692,6 +768,29 @@ fn config_import_ssh_rejects_existing_local_port_conflict() {
     assert!(!content.contains("imported-db"));
 }
 
+/// config import-ssh が disabled な既存 local_port との重複を拒否することを検証する
+#[test]
+fn config_import_ssh_rejects_disabled_existing_local_port_conflict() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(disabled_tunnel_config());
+
+    let output = workspace.run([
+        "config",
+        "import-ssh",
+        "--scope",
+        "local",
+        "--name",
+        "imported-db",
+        "--command",
+        "ssh -L 25432:db.example.com:5432 user@bastion",
+    ]);
+
+    assert!(!output.status.success());
+    output.assert_stderr_contains("local_port は既存トンネルと重複しています");
+    let content = fs::read_to_string(workspace.config_path()).expect("read configuration");
+    assert!(!content.contains("imported-db"));
+}
+
 /// doctor が設定ファイルなしを失敗として診断することを検証する
 #[test]
 fn doctor_fails_when_configuration_is_missing() {
@@ -1075,6 +1174,32 @@ name = "dev-cache"
 local_port = 15432
 remote_host = "127.0.0.1"
 remote_port = 6379
+ssh_user = "ec2-user"
+ssh_host = "bastion.example.com"
+"#
+}
+
+/// disabled なトンネルを含むテスト用設定を生成する
+fn disabled_tunnel_config() -> &'static str {
+    r#"
+[[tunnels]]
+name = "enabled-db"
+tags = ["dev"]
+local_host = "127.0.0.1"
+local_port = 15432
+remote_host = "127.0.0.1"
+remote_port = 5432
+ssh_user = "ec2-user"
+ssh_host = "bastion.example.com"
+
+[[tunnels]]
+name = "disabled-db"
+enabled = false
+tags = ["dev"]
+local_host = "127.0.0.1"
+local_port = 25432
+remote_host = "127.0.0.1"
+remote_port = 5432
 ssh_user = "ec2-user"
 ssh_host = "bastion.example.com"
 "#

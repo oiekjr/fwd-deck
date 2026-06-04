@@ -329,6 +329,28 @@ fn start_all_dry_run_sorts_tunnels_by_id() {
     ]);
 }
 
+/// start --all --exclude-tag が指定タグを持つトンネルを除外することを検証する
+#[test]
+fn start_all_exclude_tag_dry_run_omits_matching_tunnels() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(valid_config());
+
+    let output = workspace.run([
+        "--state",
+        workspace.state_path_str(),
+        "start",
+        "--all",
+        "--exclude-tag",
+        "prod",
+        "--dry-run",
+    ]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("Would start tunnel: dev-db");
+    output.assert_stdout_not_contains("Would start tunnel: prod-cache");
+    assert!(!workspace.state_path().exists());
+}
+
 /// start が起動済みの同一トンネルを成功扱いで報告することを検証する
 #[test]
 fn start_reports_already_running_tunnel_without_failure() {
@@ -379,6 +401,49 @@ fn start_fails_when_id_and_tag_are_combined() {
 
     assert!(!output.status.success());
     output.assert_stderr_contains("Cannot combine tunnel NAMEs with --tag.");
+}
+
+/// start が --exclude-tag 単独指定を失敗として扱うことを検証する
+#[test]
+fn start_fails_when_exclude_tag_is_used_without_all() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(valid_config());
+
+    let output = workspace.run(["start", "--exclude-tag", "prod", "--dry-run"]);
+
+    assert!(!output.status.success());
+    output.assert_stderr_contains("Cannot use --exclude-tag without --all.");
+}
+
+/// start が NAME と --exclude-tag の同時指定を失敗として扱うことを検証する
+#[test]
+fn start_fails_when_id_and_exclude_tag_are_combined() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(valid_config());
+
+    let output = workspace.run(["start", "dev-db", "--exclude-tag", "prod", "--dry-run"]);
+
+    assert!(!output.status.success());
+    output.assert_stderr_contains("Cannot combine --exclude-tag with tunnel NAMEs or --tag.");
+}
+
+/// start が --tag と --exclude-tag の同時指定を失敗として扱うことを検証する
+#[test]
+fn start_fails_when_tag_and_exclude_tag_are_combined() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(valid_config());
+
+    let output = workspace.run([
+        "start",
+        "--tag",
+        "dev",
+        "--exclude-tag",
+        "prod",
+        "--dry-run",
+    ]);
+
+    assert!(!output.status.success());
+    output.assert_stderr_contains("Cannot combine --exclude-tag with tunnel NAMEs or --tag.");
 }
 
 /// --help が日本語の概要、主要コマンド、代表例を表示することを検証する
@@ -469,6 +534,11 @@ fn start_help_displays_selection_constraints_and_dry_run_note() {
     assert!(output.status.success());
     output.assert_stdout_contains("NAME を省略すると対話選択を表示します。");
     output.assert_stdout_contains("--all、NAME、--tag は同時に指定できません。");
+    output.assert_stdout_contains("--exclude-tag <TAG>");
+    output.assert_stdout_contains(
+        "--exclude-tag は --all と併用し、指定タグを1つでも持つトンネルを除外します。",
+    );
+    output.assert_stdout_contains("--exclude-tag は NAME、--tag と同時に指定できません。");
     output.assert_stdout_contains(
         "既定では SSH を呼び出し元の端末プロセスグループから切り離します。",
     );

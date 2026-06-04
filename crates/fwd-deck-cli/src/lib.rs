@@ -21,9 +21,9 @@ use fwd_deck_core::{
     TimeoutConfig, TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus, TunnelState,
     ValidationReport, add_tunnel_to_config_file, add_tunnels_to_config_file,
     build_ssh_command_args, default_global_config_path, default_local_config_path,
-    default_state_file_path, filter_tunnels_by_tags, format_path_for_display,
-    generate_import_tunnel_name, load_effective_config, normalize_tag, parse_ssh_args,
-    parse_ssh_command, read_config_file, remove_tunnel_from_config_file,
+    default_state_file_path, filter_tunnels_by_tags, filter_tunnels_excluding_tags,
+    format_path_for_display, generate_import_tunnel_name, load_effective_config, normalize_tag,
+    parse_ssh_args, parse_ssh_command, read_config_file, remove_tunnel_from_config_file,
     runtime_id_for_resolved_tunnel, start_tunnel_with_options, start_tunnels_with_options,
     stop_tunnels as stop_tunnels_core, tag_is_valid, tunnel_statuses, update_tunnel_in_config_file,
     validate_config,
@@ -144,6 +144,7 @@ const START_AFTER_HELP: &str = "\
   fwd-deck start dev-db
   fwd-deck start --all
   fwd-deck start --all --parallel 4
+  fwd-deck start --all --exclude-tag prod
   fwd-deck start --tag dev --tag project-a
   fwd-deck start --all --scope local --no-detach
   fwd-deck start dev-db --dry-run
@@ -152,6 +153,8 @@ const START_AFTER_HELP: &str = "\
 補足:
   NAME を省略すると対話選択を表示します。
   --all、NAME、--tag は同時に指定できません。
+  --exclude-tag は --all と併用し、指定タグを1つでも持つトンネルを除外します。
+  --exclude-tag は NAME、--tag と同時に指定できません。
   --parallel は複数トンネルの開始処理を指定件数まで並列実行します。省略時は4件です。
   既定では SSH を呼び出し元の端末プロセスグループから切り離します。
   --no-detach は SSH を呼び出し元と同じプロセスグループで起動します。
@@ -342,6 +345,12 @@ enum Command {
             help = "指定タグに一致するトンネルを起動する"
         )]
         tags: Vec<String>,
+        #[arg(
+            long = "exclude-tag",
+            value_name = "TAG",
+            help = "指定タグに一致するトンネルを除外して起動する"
+        )]
+        exclude_tags: Vec<String>,
         #[arg(long, help = "設定済みの全トンネルを起動する")]
         all: bool,
         #[arg(
@@ -631,6 +640,7 @@ fn run() -> Result<ExitCode, CliError> {
         Command::Start {
             names,
             tags,
+            exclude_tags,
             all,
             parallel,
             dry_run,
@@ -645,6 +655,7 @@ fn run() -> Result<ExitCode, CliError> {
                 StartCommandOptions {
                     names: names.clone(),
                     tags: tags.clone(),
+                    exclude_tags: exclude_tags.clone(),
                     all: *all,
                     parallel: *parallel,
                     dry_run: *dry_run,
@@ -1935,6 +1946,7 @@ fn start_command(
     let StartCommandOptions {
         names,
         tags,
+        exclude_tags,
         all,
         parallel,
         dry_run,
@@ -1952,6 +1964,17 @@ fn start_command(
     }
 
     if !print_validation_if_invalid(config) {
+        return Ok(ExitCode::FAILURE);
+    }
+
+    if !exclude_tags.is_empty() && (!names.is_empty() || !tags.is_empty()) {
+        eprintln!(
+            "{}",
+            red(
+                "Cannot combine --exclude-tag with tunnel NAMEs or --tag.",
+                OutputStream::Stderr
+            )
+        );
         return Ok(ExitCode::FAILURE);
     }
 
@@ -1977,6 +2000,17 @@ fn start_command(
         return Ok(ExitCode::FAILURE);
     }
 
+    if !exclude_tags.is_empty() && !all {
+        eprintln!(
+            "{}",
+            red(
+                "Cannot use --exclude-tag without --all.",
+                OutputStream::Stderr
+            )
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+
     if parallel == 0 {
         eprintln!(
             "{}",
@@ -1989,9 +2023,10 @@ fn start_command(
     }
 
     let tags = normalize_cli_tags(&tags)?;
+    let exclude_tags = normalize_cli_tags(&exclude_tags)?;
 
     let tunnels = if all {
-        select_tunnels_for_scope(sorted_tunnels_by_id(&config.tunnels), scope)
+        select_tunnels_for_scope(select_tunnels_excluding_tags(config, &exclude_tags), scope)
     } else if !tags.is_empty() {
         let tunnels = select_tunnels_for_scope(select_tunnels_for_tags(config, &tags), scope);
 
@@ -2065,6 +2100,7 @@ fn start_command(
 struct StartCommandOptions {
     names: Vec<String>,
     tags: Vec<String>,
+    exclude_tags: Vec<String>,
     all: bool,
     parallel: usize,
     dry_run: bool,
@@ -2682,6 +2718,18 @@ fn select_tunnels_for_tags<'a>(
     }
 
     sorted_tunnels_by_id(filter_tunnels_by_tags(&config.tunnels, tags))
+}
+
+/// 除外タグ指定に応じて統合済みトンネル設定を選択する
+fn select_tunnels_excluding_tags<'a>(
+    config: &'a EffectiveConfig,
+    tags: &[String],
+) -> Vec<&'a ResolvedTunnelConfig> {
+    if tags.is_empty() {
+        return sorted_tunnels_by_id(&config.tunnels);
+    }
+
+    sorted_tunnels_by_id(filter_tunnels_excluding_tags(&config.tunnels, tags))
 }
 
 /// 指定スコープがある場合に統合済みトンネルを絞り込む

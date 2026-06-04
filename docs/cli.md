@@ -174,6 +174,7 @@ fwd-deck start
 fwd-deck start dev-db
 fwd-deck start --all
 fwd-deck start --all --parallel 4
+fwd-deck start --all --exclude-tag prod
 fwd-deck start --tag dev --tag project-a
 fwd-deck start --all --scope local --no-detach
 fwd-deck start dev-db --dry-run
@@ -185,11 +186,14 @@ fwd-deck --json start dev-db --dry-run
 NAME を指定しない場合は対話選択を表示します。  
 `--all` は設定済みのすべてのトンネルを開始します。  
 `--tag` は、指定したタグをすべて持つトンネルだけを開始します。  
+`--exclude-tag` は `--all` と併用し、指定タグを1つでも持つトンネルを除外して開始します。  
+`--exclude-tag` は複数指定でき、いずれかの指定タグを持つトンネルを除外します。  
 `--parallel` は複数トンネルの開始処理を指定件数まで並列実行します。省略時は4件です。  
 既定では、起動した SSH プロセスを呼び出し元の端末プロセスグループから切り離します。  
 go-task などから `fwd-deck start` を実行した後に後続コマンドを `Ctrl-C` で終了しても、起動済みトンネルは `status` / `stop` で管理できます。  
 `--no-detach` は、SSH プロセスを呼び出し元と同じプロセスグループで起動します。  
 `--all`、NAME、`--tag` は同時に指定できません。  
+`--exclude-tag` は NAME、`--tag` と同時に指定できません。  
 `--dry-run` は SSH を起動せず、状態ファイルも更新せずに実行予定だけを表示します。  
 状態ファイル上で同じトンネルが起動中と判定された場合、`start` は成功扱いでその PID を表示します。  
 

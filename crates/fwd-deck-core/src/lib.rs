@@ -13,8 +13,8 @@ pub use config::{
     ResolvedTimeoutConfig, ResolvedTunnelConfig, TimeoutConfig, TunnelConfig, ValidationError,
     ValidationReport, ValidationWarning, add_tunnel_to_config_file, add_tunnels_to_config_file,
     default_global_config_path, default_local_config_path, filter_tunnels_by_tags,
-    load_effective_config, normalize_tag, normalize_tags, read_config_file,
-    remove_tunnel_from_config_file, tag_is_valid, tunnel_matches_tags,
+    filter_tunnels_excluding_tags, load_effective_config, normalize_tag, normalize_tags,
+    read_config_file, remove_tunnel_from_config_file, tag_is_valid, tunnel_matches_tags,
     update_tunnel_in_config_file, validate_config,
 };
 pub use path_display::{format_path_for_display, format_path_for_display_with_home};

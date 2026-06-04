@@ -662,6 +662,19 @@ pub fn filter_tunnels_by_tags<'a>(
         .collect()
 }
 
+/// 指定タグを1つでも持つ統合済みトンネル設定を除外する
+pub fn filter_tunnels_excluding_tags<'a>(
+    tunnels: &'a [ResolvedTunnelConfig],
+    excluded_tags: &[String],
+) -> Vec<&'a ResolvedTunnelConfig> {
+    let excluded_tags = normalize_tags(excluded_tags);
+
+    tunnels
+        .iter()
+        .filter(|resolved| !tunnel_matches_any_normalized_tag(&resolved.tunnel, &excluded_tags))
+        .collect()
+}
+
 /// 正規化済みタグ条件でトンネルを照合する
 fn tunnel_matches_normalized_tags(tunnel: &TunnelConfig, required_tags: &[String]) -> bool {
     if required_tags.is_empty() {
@@ -673,6 +686,20 @@ fn tunnel_matches_normalized_tags(tunnel: &TunnelConfig, required_tags: &[String
             .tags
             .iter()
             .any(|tag| tag_matches_normalized(tag, required))
+    })
+}
+
+/// 正規化済みタグ条件のいずれかでトンネルを照合する
+fn tunnel_matches_any_normalized_tag(tunnel: &TunnelConfig, target_tags: &[String]) -> bool {
+    if target_tags.is_empty() {
+        return false;
+    }
+
+    target_tags.iter().any(|target| {
+        tunnel
+            .tags
+            .iter()
+            .any(|tag| tag_matches_normalized(tag, target))
     })
 }
 
@@ -1450,6 +1477,42 @@ ssh_host = "bastion.example.com"
 
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].tunnel.name, "dev-db");
+    }
+
+    /// 除外タグ指定が OR 条件でトンネルを除外することを検証する
+    #[test]
+    fn filter_tunnels_excluding_tags_removes_any_matching_tag() {
+        let source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml"));
+        let mut dev_db = tunnel("dev-db", 15432);
+        dev_db.tags = vec!["dev".to_owned(), "project-a".to_owned()];
+        let mut prod_db = tunnel("prod-db", 25432);
+        prod_db.tags = vec!["prod".to_owned(), "project-a".to_owned()];
+        let mut archived_db = tunnel("archived-db", 35432);
+        archived_db.tags = vec!["archived".to_owned()];
+        let tunnels = vec![
+            ResolvedTunnelConfig::new(source.clone(), dev_db),
+            ResolvedTunnelConfig::new(source.clone(), prod_db),
+            ResolvedTunnelConfig::new(source, archived_db),
+        ];
+
+        let matched =
+            filter_tunnels_excluding_tags(&tunnels, &["prod".to_owned(), "archived".to_owned()]);
+
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].tunnel.name, "dev-db");
+    }
+
+    /// 未正規化のトンネルタグでも除外タグ指定に一致することを検証する
+    #[test]
+    fn filter_tunnels_excluding_tags_compares_without_requiring_normalized_tunnel_tags() {
+        let source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml"));
+        let mut tunnel = tunnel("prod-db", 25432);
+        tunnel.tags = vec![" Prod ".to_owned(), "PROJECT-A".to_owned()];
+        let tunnels = vec![ResolvedTunnelConfig::new(source, tunnel)];
+
+        let matched = filter_tunnels_excluding_tags(&tunnels, &["prod".to_owned()]);
+
+        assert!(matched.is_empty());
     }
 
     /// 未正規化のトンネルタグでもタグ指定に一致することを検証する

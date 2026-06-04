@@ -136,6 +136,7 @@ fn main() -> ExitCode {
         .plugin(tauri_plugin_dialog::init())
         .manage(OperationLockState::default())
         .manage(AutoRecoverState::default())
+        .manage(DashboardConfigCacheState::default())
         .manage(TrayState::default())
         .menu(build_app_menu)
         .on_menu_event(handle_app_menu_event)
@@ -289,6 +290,10 @@ struct OperationLockState(Mutex<()>);
 /// 自動復旧 worker の実行状態を保持する
 #[derive(Debug, Default)]
 struct AutoRecoverState(Mutex<AutoRecoverWorkerState>);
+
+/// ダッシュボード用の設定読込結果を保持する
+#[derive(Debug, Default)]
+struct DashboardConfigCacheState(Mutex<Option<DashboardConfigCache>>);
 
 /// トレイアイコンと動的メニュー操作を保持する
 #[derive(Default)]
@@ -1020,7 +1025,7 @@ fn tray_configured_tunnel_targets_for_source(
     source_kind: ConfigSourceKind,
 ) -> Result<Vec<OperationTargetInput>, AppError> {
     let runtime_paths = resolve_runtime_paths(app, None)?;
-    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let config = load_config_with_validation(app, &runtime_paths)?.config;
 
     Ok(configured_tunnel_targets_for_source(&config, source_kind))
 }
@@ -1868,9 +1873,10 @@ fn tray_top_level_menu_label_order() -> [&'static str; 8] {
 /// トレイメニュー生成に必要な表示モデルを読み込む
 fn load_tray_menu_model(app: &tauri::AppHandle) -> Result<TrayMenuModel, AppError> {
     let runtime_paths = resolve_runtime_paths(app, None)?;
-    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let config_with_validation = load_config_with_validation(app, &runtime_paths)?;
     let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
-    let validation = validate_config(&config);
+    let config = config_with_validation.config;
+    let validation = config_with_validation.validation;
     let status_lookup = RuntimeStatusLookup::new(&statuses);
     let global_tunnel_items = tray_tunnel_menu_items_for_scope(
         &config,
@@ -1969,9 +1975,10 @@ fn load_tray_favorite_tunnel_items(
     app: &tauri::AppHandle,
 ) -> Result<Vec<TrayTunnelMenuItem>, AppError> {
     let runtime_paths = resolve_runtime_paths(app, None)?;
-    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let config_with_validation = load_config_with_validation(app, &runtime_paths)?;
     let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
-    let validation = validate_config(&config);
+    let config = config_with_validation.config;
+    let validation = config_with_validation.validation;
     let status_lookup = RuntimeStatusLookup::new(&statuses);
 
     Ok(tray_favorite_tunnel_menu_items(
@@ -3438,6 +3445,74 @@ struct DashboardState {
     tracked_tunnels: Vec<TrackedTunnelView>,
 }
 
+/// 設定読込結果と検証結果をまとめて保持する
+#[derive(Debug, Clone)]
+struct ConfigWithValidation {
+    config: EffectiveConfig,
+    validation: ValidationReport,
+}
+
+/// ダッシュボード用に再利用可能な設定読込結果を保持する
+#[derive(Debug, Clone)]
+struct DashboardConfigCache {
+    key: DashboardConfigCacheKey,
+    value: ConfigWithValidation,
+}
+
+/// 設定読込結果の再利用可否を判定するキーを保持する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DashboardConfigCacheKey {
+    config_paths: ConfigPaths,
+    files: Vec<DashboardConfigFileSnapshot>,
+}
+
+/// 設定ファイルの観測済み状態を保持する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DashboardConfigFileSnapshot {
+    path: PathBuf,
+    state: DashboardConfigFileState,
+}
+
+/// 設定ファイルの存在状態と更新情報を保持する
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DashboardConfigFileState {
+    Missing,
+    Present {
+        len: u64,
+        modified: Option<SystemTime>,
+    },
+    Unknown,
+}
+
+impl DashboardConfigCacheState {
+    /// キャッシュキーが一致する設定読込結果を取得する
+    fn get(&self, key: &DashboardConfigCacheKey) -> Option<ConfigWithValidation> {
+        self.0
+            .lock()
+            .expect("dashboard config cache should not be poisoned")
+            .as_ref()
+            .filter(|cache| &cache.key == key)
+            .map(|cache| cache.value.clone())
+    }
+
+    /// 設定読込結果をキャッシュへ保存する
+    fn set(&self, key: DashboardConfigCacheKey, value: ConfigWithValidation) {
+        *self
+            .0
+            .lock()
+            .expect("dashboard config cache should not be poisoned") =
+            Some(DashboardConfigCache { key, value });
+    }
+
+    /// 保存済みの設定読込結果を破棄する
+    fn clear(&self) {
+        *self
+            .0
+            .lock()
+            .expect("dashboard config cache should not be poisoned") = None;
+    }
+}
+
 /// ワークスペース切り替え結果を表現する
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -4256,36 +4331,115 @@ fn load_dashboard_inner(
     let runtime_paths = resolve_runtime_paths(app, paths)?;
 
     bootstrap_initial_global_config_for_app(app, &runtime_paths)?;
-    load_dashboard_from_runtime_paths(runtime_paths)
+    load_dashboard_from_runtime_paths(app, runtime_paths)
 }
 
 /// 解決済みパスからダッシュボード状態を組み立てる
 fn load_dashboard_from_runtime_paths(
+    app: &tauri::AppHandle,
     runtime_paths: RuntimePaths,
 ) -> Result<DashboardState, AppError> {
     let (config_with_validation, statuses) = thread::scope(|scope| {
         let statuses_handle = scope.spawn(|| load_scoped_runtime_statuses(&runtime_paths));
-        let config_with_validation =
-            load_effective_config(&runtime_paths.config_paths).map(|config| {
-                let validation = validate_config(&config);
-
-                (config, validation)
-            });
+        let config_with_validation = load_config_with_validation(app, &runtime_paths);
         let statuses = statuses_handle
             .join()
             .expect("runtime status worker should not panic");
 
         (config_with_validation, statuses)
     });
-    let (config, validation) = config_with_validation?;
+    let config_with_validation = config_with_validation?;
     let statuses = statuses?;
 
     Ok(build_dashboard_state(
         runtime_paths,
-        config,
+        config_with_validation.config,
         statuses,
-        validation,
+        config_with_validation.validation,
     ))
+}
+
+/// 設定読込結果と検証結果をキャッシュから取得または再生成する
+fn load_config_with_validation(
+    app: &tauri::AppHandle,
+    runtime_paths: &RuntimePaths,
+) -> Result<ConfigWithValidation, AppError> {
+    let cache_key = dashboard_config_cache_key(&runtime_paths.config_paths);
+
+    if let Some(cache_key) = cache_key.as_ref()
+        && let Some(cache_state) = app.try_state::<DashboardConfigCacheState>()
+        && let Some(cached) = cache_state.get(cache_key)
+    {
+        return Ok(cached);
+    }
+
+    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let validation = validate_config(&config);
+    let value = ConfigWithValidation { config, validation };
+
+    if let Some(cache_key) = cache_key
+        && let Some(cache_state) = app.try_state::<DashboardConfigCacheState>()
+    {
+        cache_state.set(cache_key, value.clone());
+    }
+
+    Ok(value)
+}
+
+/// 設定ファイルの現在状態からキャッシュキーを生成する
+fn dashboard_config_cache_key(config_paths: &ConfigPaths) -> Option<DashboardConfigCacheKey> {
+    let files = dashboard_config_file_snapshots(config_paths);
+
+    if files
+        .iter()
+        .any(|file| matches!(file.state, DashboardConfigFileState::Unknown))
+    {
+        return None;
+    }
+
+    Some(DashboardConfigCacheKey {
+        config_paths: config_paths.clone(),
+        files,
+    })
+}
+
+/// 読込対象の設定ファイル状態を収集する
+fn dashboard_config_file_snapshots(config_paths: &ConfigPaths) -> Vec<DashboardConfigFileSnapshot> {
+    let mut files = Vec::new();
+
+    if let Some(global_path) = config_paths.global.as_deref() {
+        files.push(dashboard_config_file_snapshot(global_path));
+    }
+
+    files.push(dashboard_config_file_snapshot(&config_paths.local));
+
+    files
+}
+
+/// 設定ファイル 1 件の現在状態を取得する
+fn dashboard_config_file_snapshot(path: &Path) -> DashboardConfigFileSnapshot {
+    let state = match fs::metadata(path) {
+        Ok(metadata) => DashboardConfigFileState::Present {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            DashboardConfigFileState::Missing
+        }
+        Err(_) => DashboardConfigFileState::Unknown,
+    };
+
+    DashboardConfigFileSnapshot {
+        path: path.to_path_buf(),
+        state,
+    }
+}
+
+/// 保存済みの設定読込結果を破棄する
+fn clear_dashboard_config_cache(app: &tauri::AppHandle) {
+    if let Some(cache_state) = app.try_state::<DashboardConfigCacheState>() {
+        cache_state.clear();
+    }
 }
 
 /// 読み込み済み設定と最新 runtime 状態からダッシュボード状態を組み立てる
@@ -4310,7 +4464,7 @@ fn switch_workspace_inner(
     selection: WorkspaceSelection,
 ) -> Result<WorkspaceSwitchResult, AppError> {
     let (runtime_paths, stopped_count) = switch_workspace_runtime_paths_for_app(app, selection)?;
-    let dashboard = load_dashboard_from_runtime_paths(runtime_paths)?;
+    let dashboard = load_dashboard_from_runtime_paths(app, runtime_paths)?;
 
     Ok(WorkspaceSwitchResult {
         dashboard,
@@ -4385,7 +4539,7 @@ fn load_tunnel_operation_context(
     paths: Option<WorkspaceSelection>,
 ) -> Result<(RuntimePaths, EffectiveConfig), AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths)?;
-    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let config = load_config_with_validation(app, &runtime_paths)?.config;
 
     Ok((runtime_paths, config))
 }
@@ -4435,13 +4589,14 @@ fn add_tunnel_entry_inner(
     tunnel: TunnelInput,
 ) -> Result<DashboardState, AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths.clone())?;
-    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let config = load_config_with_validation(app, &runtime_paths)?.config;
     let tunnel = tunnel.into_tunnel_config();
 
     let kind = ConfigSourceKind::from(scope);
     validate_new_tunnel(&config, kind, &tunnel)?;
     let path = config_path_for_scope(&runtime_paths, kind)?;
     add_tunnel_to_config_file(&path, kind, tunnel)?;
+    clear_dashboard_config_cache(app);
     load_dashboard_inner(app, paths)
 }
 
@@ -4459,7 +4614,7 @@ fn add_tunnel_entries_inner(
     }
 
     let runtime_paths = resolve_runtime_paths(app, paths.clone())?;
-    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let config = load_config_with_validation(app, &runtime_paths)?.config;
     let tunnels = tunnels
         .into_iter()
         .map(TunnelInput::into_tunnel_config)
@@ -4469,6 +4624,7 @@ fn add_tunnel_entries_inner(
     validate_new_tunnels(&config, kind, &tunnels)?;
     let path = config_path_for_scope(&runtime_paths, kind)?;
     add_tunnels_to_config_file(&path, kind, tunnels)?;
+    clear_dashboard_config_cache(app);
     load_dashboard_inner(app, paths)
 }
 
@@ -4528,7 +4684,7 @@ fn duplicate_tunnel_entry_inner(
     duplicate: DuplicateTunnelInput,
 ) -> Result<DashboardState, AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths.clone())?;
-    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let config = load_config_with_validation(app, &runtime_paths)?.config;
     let source_kind = ConfigSourceKind::from(source_scope);
     let target_kind = ConfigSourceKind::from(target_scope);
     let tunnel = duplicate_tunnel_config(&config, source_kind, source_id, duplicate)?;
@@ -4536,6 +4692,7 @@ fn duplicate_tunnel_entry_inner(
     validate_new_tunnel(&config, target_kind, &tunnel)?;
     let path = config_path_for_scope(&runtime_paths, target_kind)?;
     add_tunnel_to_config_file(&path, target_kind, tunnel)?;
+    clear_dashboard_config_cache(app);
     load_dashboard_inner(app, paths)
 }
 
@@ -4548,7 +4705,7 @@ fn update_tunnel_entry_inner(
     tunnel: TunnelInput,
 ) -> Result<DashboardState, AppError> {
     let mut runtime_paths = resolve_runtime_paths(app, paths.clone())?;
-    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let config = load_config_with_validation(app, &runtime_paths)?.config;
     let tunnel = tunnel.into_tunnel_config();
 
     let kind = ConfigSourceKind::from(scope);
@@ -4557,6 +4714,7 @@ fn update_tunnel_entry_inner(
     let previous_runtime_id = configured_tunnel_runtime_id(&config, kind, id);
     let next_runtime_id = tunnel_runtime_id(kind, &path, &tunnel.name);
     update_tunnel_in_config_file(&path, kind, id, tunnel)?;
+    clear_dashboard_config_cache(app);
 
     if let Some(previous_runtime_id) = previous_runtime_id {
         let mut preferences_changed = false;
@@ -4591,12 +4749,13 @@ fn remove_tunnel_entry_inner(
     id: &str,
 ) -> Result<DashboardState, AppError> {
     let mut runtime_paths = resolve_runtime_paths(app, paths.clone())?;
-    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let config = load_config_with_validation(app, &runtime_paths)?.config;
     let kind = ConfigSourceKind::from(scope);
     let path = config_path_for_scope(&runtime_paths, kind)?;
     let runtime_id = configured_tunnel_runtime_id(&config, kind, id);
 
     remove_tunnel_from_config_file(&path, kind, id)?;
+    clear_dashboard_config_cache(app);
 
     if let Some(runtime_id) = runtime_id {
         let mut preferences_changed = false;
@@ -6002,38 +6161,36 @@ fn timeout_view(timeouts: ResolvedTimeoutConfig) -> TimeoutView {
     }
 }
 
-/// 設定が開始可能な状態であることを検証する
-fn ensure_valid_config(config: &EffectiveConfig) -> Result<(), AppError> {
-    ensure_valid_config_for_source(config, None)
-}
-
 /// 設定が指定スコープで開始可能な状態であることを検証する
 fn ensure_valid_config_for_source(
     config: &EffectiveConfig,
     source_kind: Option<ConfigSourceKind>,
 ) -> Result<(), AppError> {
     let report = validate_config(config);
+    ensure_valid_report_for_source(&report, source_kind)
+}
+
+/// 検証結果が指定スコープで開始可能な状態かを判定する
+fn ensure_valid_report_for_source(
+    report: &ValidationReport,
+    source_kind: Option<ConfigSourceKind>,
+) -> Result<(), AppError> {
     let errors = report
         .errors
-        .into_iter()
+        .iter()
         .filter(|error| {
             source_kind
                 .map(|source_kind| error.source.kind == source_kind)
                 .unwrap_or(true)
         })
+        .map(|error| error.message.clone())
         .collect::<Vec<_>>();
 
     if errors.is_empty() {
         return Ok(());
     }
 
-    Err(AppError::InvalidConfig(
-        errors
-            .into_iter()
-            .map(|error| error.message)
-            .collect::<Vec<_>>()
-            .join(", "),
-    ))
+    Err(AppError::InvalidConfig(errors.join(", ")))
 }
 
 /// 追加対象トンネルの意味的な不備を検証する
@@ -6641,13 +6798,14 @@ fn auto_recover_current_stale_tunnels(
         return Ok(AutoRecoverReport::default());
     }
 
-    let config = load_effective_config(&runtime_paths.config_paths)?;
+    let config_with_validation = load_config_with_validation(app, &runtime_paths)?;
+    let config = config_with_validation.config;
 
     if !config.has_sources() {
         return Ok(AutoRecoverReport::default());
     }
 
-    ensure_valid_config(&config)?;
+    ensure_valid_report_for_source(&config_with_validation.validation, None)?;
 
     let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
     let mut report = confirm_auto_recover_pending(worker_state, &statuses, now);
@@ -7350,6 +7508,59 @@ mod tests {
         let persisted = read_preferences_file(&path).expect("read persisted preferences");
 
         assert_eq!(persisted, next);
+    }
+
+    /// 設定ファイルの作成と更新がキャッシュキーへ反映されることを検証する
+    #[test]
+    fn dashboard_config_cache_key_tracks_config_file_changes() {
+        let temp_dir = TempDir::new().expect("create a temporary directory");
+        let config_path = temp_dir.path().join("fwd-deck.toml");
+        let config_paths = ConfigPaths::new(None, config_path.clone());
+
+        let missing_key =
+            dashboard_config_cache_key(&config_paths).expect("create missing cache key");
+
+        fs::write(&config_path, "[[tunnels]]\nname = \"db\"\n").expect("write config");
+        let created_key =
+            dashboard_config_cache_key(&config_paths).expect("create present cache key");
+
+        fs::write(
+            &config_path,
+            "[[tunnels]]\nname = \"db\"\ndescription = \"changed\"\n",
+        )
+        .expect("update config");
+        let updated_key =
+            dashboard_config_cache_key(&config_paths).expect("create updated cache key");
+
+        assert_ne!(missing_key, created_key);
+        assert_ne!(created_key, updated_key);
+    }
+
+    /// ダッシュボード設定キャッシュが一致キーだけを返すことを検証する
+    #[test]
+    fn dashboard_config_cache_state_returns_matching_value_only() {
+        let cache_state = DashboardConfigCacheState::default();
+        let key = DashboardConfigCacheKey {
+            config_paths: ConfigPaths::new(None, PathBuf::from("fwd-deck.toml")),
+            files: Vec::new(),
+        };
+        let other_key = DashboardConfigCacheKey {
+            config_paths: ConfigPaths::new(None, PathBuf::from("other.toml")),
+            files: Vec::new(),
+        };
+        let value = ConfigWithValidation {
+            config: EffectiveConfig::new(Vec::new(), Vec::new()),
+            validation: ValidationReport::valid(),
+        };
+
+        cache_state.set(key.clone(), value);
+
+        assert!(cache_state.get(&key).is_some());
+        assert!(cache_state.get(&other_key).is_none());
+
+        cache_state.clear();
+
+        assert!(cache_state.get(&key).is_none());
     }
 
     /// 初回起動時に example global 設定と preferences が作成されることを検証する
@@ -8899,7 +9110,7 @@ hide_tracked_runtime_bar = true
 
         assert!(ensure_valid_config_for_source(&config, Some(ConfigSourceKind::Global)).is_ok());
         assert!(ensure_valid_config_for_source(&config, Some(ConfigSourceKind::Local)).is_err());
-        assert!(ensure_valid_config(&config).is_err());
+        assert!(ensure_valid_config_for_source(&config, None).is_err());
     }
 
     /// トレイのお気に入り項目が保存済み runtime ID だけを表示順どおりに抽出することを検証する

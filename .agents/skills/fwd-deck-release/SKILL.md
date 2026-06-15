@@ -15,10 +15,20 @@ If the user wants to insert release commits into older history, retag an existin
 If the user does not specify a target version, ask the user for the exact version before editing files.
 Do not infer a default next version from tags, package metadata, or commit history.
 
+Release versions use `YY.MDD.N` as a SemVer-compatible three-number format:
+
+- `YY` is the last two digits of the year.
+- `MDD` is the month and day without zero padding.
+- `N` is the release sequence number for the same date.
+
+For the first release on a date, use `YY.MDD.1`.
+For additional releases on the same date, increment only `N`.
+Use the Asia/Tokyo date unless the user explicitly specifies another date basis.
+
 Run the bundled script from the repository root:
 
 ```sh
-python3 .agents/skills/fwd-deck-release/scripts/prepare_release.py 0.4.0
+python3 .agents/skills/fwd-deck-release/scripts/prepare_release.py 26.616.1
 ```
 
 The script updates only these release metadata files:
@@ -38,8 +48,8 @@ Use `--dry-run` first when the worktree has unrelated user edits or when checkin
 ## Workflow
 
 1. Inspect `git status --short --branch` and preserve unrelated user changes.
-2. Confirm the target version is a plain semantic version such as `0.4.0`; if the user omitted it, ask for the exact version before proceeding.
-   Normalize `v0.4.0` to `0.4.0` only for file updates.
+2. Confirm the target version is a plain `YY.MDD.N` version such as `26.616.1`; if the user omitted it, ask for the exact version before proceeding.
+   Normalize `v26.616.1` to `26.616.1` only for file updates.
 3. Run `scripts/prepare_release.py <version>` to update version metadata.
 4. Verify release workflow inputs:
 

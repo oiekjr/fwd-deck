@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 VERSION_FILES = [
@@ -31,6 +34,7 @@ WORKSPACE_LOCK_PACKAGES = {
 }
 
 SEMVER_PATTERN = re.compile(r"^v?(?P<version>\d+\.\d+\.\d+)$")
+TOKYO_TIMEZONE = ZoneInfo("Asia/Tokyo")
 
 
 def main() -> None:
@@ -47,10 +51,10 @@ def main() -> None:
     """
 
     args = parse_args()
-    version = normalize_version(args.version)
     repo = args.repo.resolve()
 
     validate_repo_root(repo)
+    version = resolve_version(args.version, repo)
     updated_files = build_updated_files(repo, version)
 
     if args.dry_run:
@@ -85,7 +89,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "version",
-        help="Release version such as 0.4.0. A leading v is accepted and normalized.",
+        nargs="?",
+        help=(
+            "Release version such as 26.616.1. A leading v is accepted and normalized. "
+            "Defaults to the next YY.MDD.N version from local tags."
+        ),
     )
     parser.add_argument(
         "--repo",
@@ -99,6 +107,26 @@ def parse_args() -> argparse.Namespace:
         help="Validate and print target files without writing changes.",
     )
     return parser.parse_args()
+
+
+def resolve_version(raw_version: str | None, repo: Path) -> str:
+    """指定値またはlocal tagからrelease versionを決定する。
+
+    Parameters:
+        raw_version: ユーザー指定のversion文字列。未指定の場合はNone。
+        repo: release tagを確認するrepository root。
+
+    Returns:
+        str: ファイルへ設定するsemantic versionを返却する。
+
+    Raises:
+        SystemExit: 指定値または既存tagの検証に失敗した場合に送出する。
+    """
+
+    if raw_version is not None:
+        return normalize_version(raw_version)
+
+    return build_next_version(repo, datetime.now(TOKYO_TIMEZONE))
 
 
 def normalize_version(raw_version: str) -> str:
@@ -119,6 +147,70 @@ def normalize_version(raw_version: str) -> str:
         raise SystemExit(f"version must be X.Y.Z or vX.Y.Z: {raw_version}")
 
     return match.group("version")
+
+
+def build_next_version(repo: Path, now: datetime) -> str:
+    """Asia/Tokyo日付とlocal tagから次のrelease versionを生成する。
+
+    Parameters:
+        repo: release tagを確認するrepository root。
+        now: version prefixの基準日時。
+
+    Returns:
+        str: 次に使用するrelease versionを返却する。
+
+    Raises:
+        SystemExit: 既存tagの取得または解析に失敗した場合に送出する。
+    """
+
+    prefix = f"{now:%y}.{now.month}{now:%d}"
+    sequences = list_release_sequences(repo, prefix)
+    next_sequence = max(sequences, default=0) + 1
+
+    return f"{prefix}.{next_sequence}"
+
+
+def list_release_sequences(repo: Path, prefix: str) -> list[int]:
+    """指定日のlocal release tagからsequence番号を抽出する。
+
+    Parameters:
+        repo: release tagを確認するrepository root。
+        prefix: `YY.MDD`形式のversion prefix。
+
+    Returns:
+        list[int]: 既存release tagのsequence番号を返却する。
+
+    Raises:
+        SystemExit: git tagの取得またはtag形式の検証に失敗した場合に送出する。
+    """
+
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo), "tag", "--list", f"v{prefix}.*"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        message = exc.stderr.strip() or exc.stdout.strip() or str(exc)
+        raise SystemExit(f"failed to inspect local release tags: {message}") from exc
+
+    tag_pattern = re.compile(rf"^v{re.escape(prefix)}\.([1-9]\d*)$")
+    sequences: list[int] = []
+    invalid_tags: list[str] = []
+
+    for tag in completed.stdout.splitlines():
+        match = tag_pattern.match(tag)
+        if match is None:
+            invalid_tags.append(tag)
+            continue
+
+        sequences.append(int(match.group(1)))
+
+    if invalid_tags:
+        raise SystemExit("unexpected same-day release tags:\n" + "\n".join(invalid_tags))
+
+    return sequences
 
 
 def validate_repo_root(repo: Path) -> None:

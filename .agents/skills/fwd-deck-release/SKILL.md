@@ -1,6 +1,6 @@
 ---
 name: fwd-deck-release
-description: Prepare normal current-tip Fwd Deck releases by updating fixed Cargo, npm, Tauri, and lockfile version metadata. Use when Codex needs to bump the Fwd Deck release version, create a release preparation commit, tag a new release, or verify release version consistency; do not use for backfilling releases into past commits or rewriting published history.
+description: Prepare normal current-tip Fwd Deck releases by determining the next date-based version when omitted, then updating fixed Cargo, npm, Tauri, and lockfile version metadata. Use when Codex needs to bump the Fwd Deck release version, create a release preparation commit, tag a new release, or verify release version consistency; do not use for backfilling releases into past commits or rewriting published history.
 ---
 
 # Fwd Deck Release
@@ -12,20 +12,28 @@ If the user wants to insert release commits into older history, retag an existin
 
 ## Version Update
 
-If the user does not specify a target version, ask the user for the exact version before editing files.
-Do not infer a default next version from tags, package metadata, or commit history.
+If the user does not specify a target version, determine the next version from the Asia/Tokyo date and local release tags before editing files.
+Ask for the exact version only when the user wants a non-default date basis, local tags are ambiguous, or the next version cannot be determined reliably.
 
 Release versions use `YY.MDD.N` as a SemVer-compatible three-number format:
 
 - `YY` is the last two digits of the year.
-- `MDD` is the month and day without zero padding.
+- `MDD` is the month without zero padding followed by a two-digit day.
 - `N` is the release sequence number for the same date.
 
 For the first release on a date, use `YY.MDD.1`.
 For additional releases on the same date, increment only `N`.
 Use the Asia/Tokyo date unless the user explicitly specifies another date basis.
+The bundled script calculates this default from local tags matching `vYY.MDD.N`; it does not fetch remote tags.
+Ask before running `git fetch --tags` or any other remote check.
 
-Run the bundled script from the repository root:
+Run the bundled script from the repository root without a version when the user omitted it:
+
+```sh
+python3 .agents/skills/fwd-deck-release/scripts/prepare_release.py
+```
+
+When the user specifies a version, pass it explicitly:
 
 ```sh
 python3 .agents/skills/fwd-deck-release/scripts/prepare_release.py 26.616.1
@@ -48,9 +56,10 @@ Use `--dry-run` first when the worktree has unrelated user edits or when checkin
 ## Workflow
 
 1. Inspect `git status --short --branch` and preserve unrelated user changes.
-2. Confirm the target version is a plain `YY.MDD.N` version such as `26.616.1`; if the user omitted it, ask for the exact version before proceeding.
-   Normalize `v26.616.1` to `26.616.1` only for file updates.
-3. Run `scripts/prepare_release.py <version>` to update version metadata.
+2. Determine the target version:
+   - If the user specified a version, confirm it is a plain `YY.MDD.N` version such as `26.616.1`; normalize `v26.616.1` to `26.616.1` only for file updates.
+   - If the user omitted the version, run `scripts/prepare_release.py --dry-run` to calculate and report the next version from local tags.
+3. Run `scripts/prepare_release.py` with no version for the default next version, or `scripts/prepare_release.py <version>` for an explicit target, to update version metadata.
 4. Verify release workflow inputs:
 
 ```sh

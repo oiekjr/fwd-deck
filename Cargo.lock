@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "fwd-deck-app"
-version = "26.616.1"
+version = "26.713.1"
 dependencies = [
  "fwd-deck-cli",
  "fwd-deck-core",
@@ -1301,7 +1301,7 @@ dependencies = [
 
 [[package]]
 name = "fwd-deck-cli"
-version = "26.616.1"
+version = "26.713.1"
 dependencies = [
  "clap",
  "clap_complete",
@@ -1317,7 +1317,7 @@ dependencies = [
 
 [[package]]
 name = "fwd-deck-core"
-version = "26.616.1"
+version = "26.713.1"
 dependencies = [
  "libc",
  "serde",

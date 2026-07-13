@@ -2183,6 +2183,11 @@ function App(): ReactElement {
   const handleSubmitImportedTunnels = useStableEvent((): void => {
     void submitImportedTunnels();
   });
+  const handleSshImportDraftChange = useStableEvent(
+    (index: number, field: TunnelImportDraftEditableField, value: string): void => {
+      updateSshImportDraft(index, field, value);
+    },
+  );
   const handleBrowseIdentityFile = useStableEvent((): void => {
     void browseIdentityFile();
   });
@@ -2334,7 +2339,7 @@ function App(): ReactElement {
               onChange={updateForm}
               onSubmit={handleSubmitTunnel}
               onSshImportFormChange={updateSshImportForm}
-              onSshImportDraftChange={updateSshImportDraft}
+              onSshImportDraftChange={handleSshImportDraftChange}
               onParseSshImportCommand={handleParseSshImportCommand}
               onSubmitImportedTunnels={handleSubmitImportedTunnels}
               onOpenSettings={handleOpenSettings}
@@ -3311,7 +3316,11 @@ interface SshImportDraftEditorProps {
 /**
  * SSHコマンド取り込み候補の編集欄を表示する
  */
-function SshImportDraftEditor({ index, draft, onChange }: SshImportDraftEditorProps): ReactElement {
+const SshImportDraftEditor = memo(function SshImportDraftEditor({
+  index,
+  draft,
+  onChange,
+}: SshImportDraftEditorProps): ReactElement {
   return (
     <div className="rounded-lg border border-border bg-card p-3">
       <div className="mb-3 flex items-center justify-between gap-2">
@@ -3405,7 +3414,7 @@ function SshImportDraftEditor({ index, draft, onChange }: SshImportDraftEditorPr
       </div>
     </div>
   );
-}
+});
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -7252,16 +7261,27 @@ function reconcileDashboardState(
     return next;
   }
 
-  if (dashboardStateEquals(current, next)) {
+  const paths = reconcileWorkspaceSelection(current.paths, next.paths);
+  const validation = reconcileValidationView(current.validation, next.validation);
+  const tunnels = reconcileTunnelViews(current.tunnels, next.tunnels);
+  const trackedTunnels = reconcileTrackedTunnelViews(current.trackedTunnels, next.trackedTunnels);
+
+  if (
+    paths === current.paths &&
+    current.hasConfig === next.hasConfig &&
+    validation === current.validation &&
+    tunnels === current.tunnels &&
+    trackedTunnels === current.trackedTunnels
+  ) {
     return current;
   }
 
   return {
     ...next,
-    paths: reconcileWorkspaceSelection(current.paths, next.paths),
-    validation: reconcileValidationView(current.validation, next.validation),
-    tunnels: reconcileTunnelViews(current.tunnels, next.tunnels),
-    trackedTunnels: reconcileTrackedTunnelViews(current.trackedTunnels, next.trackedTunnels),
+    paths,
+    validation,
+    tunnels,
+    trackedTunnels,
   };
 }
 
@@ -7307,10 +7327,37 @@ function reconcileArrayItemsByKey<Item>(
   keyForItem: (item: Item) => string,
   itemEquals: (left: Item, right: Item) => boolean,
 ): Item[] {
-  if (arrayItemsEqual(current, next, itemEquals)) {
+  if (current === next) {
     return current;
   }
 
+  if (current.length === next.length) {
+    let reconciled: Item[] | null = null;
+    let hasSameOrder = true;
+
+    for (let index = 0; index < next.length; index += 1) {
+      const currentItem = current[index];
+      const nextItem = next[index];
+
+      if (keyForItem(currentItem) !== keyForItem(nextItem)) {
+        hasSameOrder = false;
+        break;
+      }
+
+      const item = itemEquals(currentItem, nextItem) ? currentItem : nextItem;
+      if (reconciled === null && item !== currentItem) {
+        reconciled = current.slice(0, index);
+      }
+
+      reconciled?.push(item);
+    }
+
+    if (hasSameOrder) {
+      return reconciled ?? current;
+    }
+  }
+
+  // 並び順が変わった場合だけキー索引で既存要素を探索する
   const currentByKey = new Map<string, Item>();
   current.forEach((item) => currentByKey.set(keyForItem(item), item));
 
@@ -7319,23 +7366,6 @@ function reconcileArrayItemsByKey<Item>(
 
     return currentItem !== undefined && itemEquals(currentItem, nextItem) ? currentItem : nextItem;
   });
-}
-
-/**
- * ダッシュボード表示モデルの値が一致するか判定する
- */
-function dashboardStateEquals(left: DashboardState, right: DashboardState): boolean {
-  if (left === right) {
-    return true;
-  }
-
-  return (
-    workspaceSelectionEquals(left.paths, right.paths) &&
-    left.hasConfig === right.hasConfig &&
-    validationViewEquals(left.validation, right.validation) &&
-    arrayItemsEqual(left.tunnels, right.tunnels, tunnelViewEquals) &&
-    arrayItemsEqual(left.trackedTunnels, right.trackedTunnels, trackedTunnelViewEquals)
-  );
 }
 
 /**

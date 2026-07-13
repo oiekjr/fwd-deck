@@ -294,23 +294,7 @@ where
 
     let parallelism = parallelism.max(1);
     for chunk in pending_jobs.chunks(parallelism) {
-        let handles = chunk
-            .iter()
-            .map(|job| {
-                let resolved = job.resolved.clone();
-                thread::spawn(move || start_tunnel_without_state_write(&resolved, options))
-            })
-            .collect::<Vec<_>>();
-
-        for (job, handle) in chunk.iter().zip(handles) {
-            let result = handle.join().unwrap_or_else(|_| {
-                Err(TunnelRuntimeError::StartWorkerPanic {
-                    name: job.resolved.tunnel.name.clone(),
-                })
-            });
-            on_result(job.index, &result);
-            results[job.index] = Some(result);
-        }
+        start_tunnel_job_chunk(chunk, options, &mut results, &mut on_result);
     }
 
     let mut has_state_changes = false;
@@ -327,6 +311,175 @@ where
         .into_iter()
         .map(|result| result.expect("start tunnel result should be recorded"))
         .collect())
+}
+
+/// 1バッチのSSHプロセスを開始し、LISTEN状態をまとめて確認する
+fn start_tunnel_job_chunk<F>(
+    jobs: &[StartTunnelJob],
+    options: StartTunnelOptions,
+    results: &mut [Option<Result<StartedTunnel, TunnelRuntimeError>>],
+    on_result: &mut F,
+) where
+    F: FnMut(usize, &Result<StartedTunnel, TunnelRuntimeError>),
+{
+    let mut completed = (0..jobs.len()).map(|_| None).collect::<Vec<_>>();
+    let mut pending = Vec::with_capacity(jobs.len());
+
+    for (chunk_index, job) in jobs.iter().enumerate() {
+        match spawn_pending_tunnel_start(chunk_index, &job.resolved, options) {
+            Ok(start) => pending.push(start),
+            Err(error) => completed[chunk_index] = Some(Err(error)),
+        }
+    }
+
+    let mut next_report_index = 0;
+    report_completed_start_results(
+        jobs,
+        &mut completed,
+        &mut next_report_index,
+        results,
+        on_result,
+    );
+
+    while !pending.is_empty() {
+        pending.retain_mut(|start| {
+            let resolved = &jobs[start.chunk_index].resolved;
+            let Some(error) = inspect_ssh_startup_exit(&mut start.child, resolved) else {
+                return true;
+            };
+
+            completed[start.chunk_index] = Some(Err(error));
+            false
+        });
+        report_completed_start_results(
+            jobs,
+            &mut completed,
+            &mut next_report_index,
+            results,
+            on_result,
+        );
+
+        if pending.is_empty() {
+            break;
+        }
+
+        let local_port_processes = probe_startup_listeners(
+            pending.iter().map(|start| {
+                (
+                    start.child.id(),
+                    jobs[start.chunk_index].resolved.tunnel.local_port,
+                )
+            }),
+            find_local_port_processes_by_ports_for_pids,
+        );
+        let now = Instant::now();
+
+        pending.retain(|start| {
+            let resolved = &jobs[start.chunk_index].resolved;
+            let local_port = resolved.tunnel.local_port;
+            let is_listening = local_port_processes
+                .get(&local_port)
+                .is_some_and(|processes| processes.contains_pid(start.child.id()));
+
+            if !is_listening && now < start.deadline {
+                return true;
+            }
+
+            completed[start.chunk_index] =
+                Some(Ok(started_tunnel_from_child(resolved, start.child.id())));
+            false
+        });
+        report_completed_start_results(
+            jobs,
+            &mut completed,
+            &mut next_report_index,
+            results,
+            on_result,
+        );
+
+        if let Some(next_deadline) = pending.iter().map(|start| start.deadline).min() {
+            let now = Instant::now();
+            thread::sleep(
+                startup_probe_interval().min(next_deadline.saturating_duration_since(now)),
+            );
+        }
+    }
+
+    debug_assert_eq!(next_report_index, jobs.len());
+}
+
+/// SSHプロセスを開始してバッチ起動確認へ登録する
+fn spawn_pending_tunnel_start(
+    chunk_index: usize,
+    resolved: &ResolvedTunnelConfig,
+    options: StartTunnelOptions,
+) -> Result<PendingTunnelStart, TunnelRuntimeError> {
+    ensure_local_endpoint_available(resolved)?;
+
+    let child = spawn_ssh_tunnel_with_options(resolved, options)?;
+    let deadline = Instant::now() + startup_readiness_wait_period(resolved.timeouts);
+
+    Ok(PendingTunnelStart {
+        chunk_index,
+        child,
+        deadline,
+    })
+}
+
+/// 起動直後のSSHプロセスが終了したか確認する
+fn inspect_ssh_startup_exit(
+    child: &mut Child,
+    resolved: &ResolvedTunnelConfig,
+) -> Option<TunnelRuntimeError> {
+    match child.try_wait() {
+        Ok(Some(status)) => Some(TunnelRuntimeError::EarlyExit {
+            name: resolved.tunnel.name.clone(),
+            status,
+        }),
+        Err(source) => Some(TunnelRuntimeError::StartupCheck {
+            name: resolved.tunnel.name.clone(),
+            source,
+        }),
+        Ok(None) => None,
+    }
+}
+
+/// 起動待ちPIDとポートを1回の詳細probeへ集約する
+fn probe_startup_listeners<I, F>(targets: I, probe: F) -> HashMap<u16, LocalPortProcesses>
+where
+    I: IntoIterator<Item = (u32, u16)>,
+    F: FnOnce(&HashSet<u16>, &HashSet<u32>) -> HashMap<u16, LocalPortProcesses>,
+{
+    let mut local_ports = HashSet::new();
+    let mut pids = HashSet::new();
+
+    for (pid, local_port) in targets {
+        pids.insert(pid);
+        local_ports.insert(local_port);
+    }
+
+    probe(&local_ports, &pids)
+}
+
+/// 入力順で確定済みの起動結果を通知する
+fn report_completed_start_results<F>(
+    jobs: &[StartTunnelJob],
+    completed: &mut [Option<Result<StartedTunnel, TunnelRuntimeError>>],
+    next_report_index: &mut usize,
+    results: &mut [Option<Result<StartedTunnel, TunnelRuntimeError>>],
+    on_result: &mut F,
+) where
+    F: FnMut(usize, &Result<StartedTunnel, TunnelRuntimeError>),
+{
+    while *next_report_index < jobs.len() {
+        let Some(result) = completed[*next_report_index].take() else {
+            break;
+        };
+        let result_index = jobs[*next_report_index].index;
+        on_result(result_index, &result);
+        results[result_index] = Some(result);
+        *next_report_index += 1;
+    }
 }
 
 /// トンネル状態の一覧を取得する
@@ -706,13 +859,14 @@ fn start_tunnel_without_state_write(
     let mut child = spawn_ssh_tunnel_with_options(resolved, options)?;
     wait_for_tunnel_readiness(&mut child, resolved)?;
 
-    let started_at_unix_seconds = current_unix_seconds();
-    let tunnel_state =
-        TunnelState::from_resolved_tunnel(resolved, child.id(), started_at_unix_seconds);
+    Ok(started_tunnel_from_child(resolved, child.id()))
+}
 
-    Ok(StartedTunnel {
-        state: tunnel_state,
-    })
+/// 起動確認済みの子プロセスからトンネル状態を生成する
+fn started_tunnel_from_child(resolved: &ResolvedTunnelConfig, pid: u32) -> StartedTunnel {
+    StartedTunnel {
+        state: TunnelState::from_resolved_tunnel(resolved, pid, current_unix_seconds()),
+    }
 }
 
 /// SSH プロセスの早期終了と local port のLISTEN状態を確認する
@@ -755,6 +909,14 @@ fn wait_for_tunnel_readiness(
 struct StartTunnelJob {
     index: usize,
     resolved: ResolvedTunnelConfig,
+}
+
+/// バッチ単位で起動確認中のSSH子プロセスを保持する
+#[derive(Debug)]
+struct PendingTunnelStart {
+    chunk_index: usize,
+    child: Child,
+    deadline: Instant,
 }
 
 /// SSH 子プロセスを指定オプションで起動する
@@ -1210,6 +1372,74 @@ mod tests {
             startup_readiness_wait_period(long_grace),
             Duration::from_millis(1_500)
         );
+    }
+
+    /// 同一バッチの起動確認対象を1回の詳細probeへ集約することを検証する
+    #[test]
+    fn startup_listener_probe_aggregates_batch_targets_once() {
+        let mut probe_calls = 0;
+        let mut observed_ports = HashSet::new();
+        let mut observed_pids = HashSet::new();
+
+        let processes =
+            probe_startup_listeners([(1001, 15432), (1002, 25432)], |local_ports, pids| {
+                probe_calls += 1;
+                observed_ports = local_ports.clone();
+                observed_pids = pids.clone();
+                HashMap::new()
+            });
+
+        assert_eq!(probe_calls, 1);
+        assert_eq!(observed_ports, HashSet::from([15432, 25432]));
+        assert_eq!(observed_pids, HashSet::from([1001, 1002]));
+        assert!(processes.is_empty());
+    }
+
+    /// 後続の起動結果が先に確定しても入力順で通知することを検証する
+    #[test]
+    fn completed_start_results_are_reported_in_input_order() {
+        let jobs = vec![
+            StartTunnelJob {
+                index: 0,
+                resolved: resolved_tunnel(),
+            },
+            StartTunnelJob {
+                index: 1,
+                resolved: resolved_tunnel(),
+            },
+        ];
+        let mut completed = (0..jobs.len()).map(|_| None).collect::<Vec<_>>();
+        completed[1] = Some(Err(TunnelRuntimeError::StartWorkerPanic {
+            name: "second".to_owned(),
+        }));
+        completed[0] = Some(Err(TunnelRuntimeError::StartWorkerPanic {
+            name: "first".to_owned(),
+        }));
+        let mut results = (0..jobs.len()).map(|_| None).collect::<Vec<_>>();
+        let mut next_report_index = 0;
+        let mut reported_indexes = Vec::new();
+        let mut on_result = |index, _result: &Result<StartedTunnel, TunnelRuntimeError>| {
+            reported_indexes.push(index);
+        };
+
+        report_completed_start_results(
+            &jobs,
+            &mut completed,
+            &mut next_report_index,
+            &mut results,
+            &mut on_result,
+        );
+
+        assert_eq!(reported_indexes, vec![0, 1]);
+        assert_eq!(next_report_index, jobs.len());
+        assert!(matches!(
+            &results[0],
+            Some(Err(TunnelRuntimeError::StartWorkerPanic { name })) if name == "first"
+        ));
+        assert!(matches!(
+            &results[1],
+            Some(Err(TunnelRuntimeError::StartWorkerPanic { name })) if name == "second"
+        ));
     }
 
     /// 起動オプションの既定値が既存の非 detach 起動を維持することを検証する

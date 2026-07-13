@@ -419,14 +419,31 @@ impl TrayState {
 
         for item in items {
             if let Some(menu_item) = item_handles.get(&item.menu_id) {
-                menu_item.set_text(&item.label)?;
-                menu_item.set_enabled(item.enabled)?;
-                menu_item.set_checked(item.checked)?;
+                let current = TrayTunnelMenuItemDisplayState {
+                    label: menu_item.text()?,
+                    enabled: menu_item.is_enabled()?,
+                    checked: menu_item.is_checked()?,
+                };
+                let changes = tray_tunnel_menu_item_changes(&current, item);
+
+                if changes.label_changed {
+                    menu_item.set_text(&item.label)?;
+                }
+
+                if changes.enabled_changed {
+                    menu_item.set_enabled(item.enabled)?;
+                }
+
+                if changes.checked_changed {
+                    menu_item.set_checked(item.checked)?;
+                }
             }
         }
 
         for item in bulk_items {
-            if let Some(menu_item) = bulk_item_handles.get(&item.menu_id) {
+            if let Some(menu_item) = bulk_item_handles.get(&item.menu_id)
+                && tray_bulk_menu_item_enabled_changed(menu_item.is_enabled()?, item)
+            {
                 menu_item.set_enabled(item.enabled)?;
             }
         }
@@ -578,6 +595,14 @@ struct TrayTunnelMenuItem {
     action: TrayTunnelAction,
 }
 
+/// 適用済みトレイトンネル項目の表示値を表現する
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrayTunnelMenuItemDisplayState {
+    label: String,
+    checked: bool,
+    enabled: bool,
+}
+
 /// トレイメニューへ表示する一括操作項目を表現する
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TrayBulkMenuItem {
@@ -626,6 +651,14 @@ enum TrayIconKind {
 enum TrayInPlaceMenuUpdate {
     Apply,
     RebuildRequired,
+}
+
+/// トレイトンネル項目で更新が必要な表示フィールドを表現する
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TrayTunnelMenuItemChanges {
+    label_changed: bool,
+    enabled_changed: bool,
+    checked_changed: bool,
 }
 
 /// トレイから実行するワークスペース操作を表現する
@@ -2052,6 +2085,23 @@ fn tray_menu_model_bulk_items(model: &TrayMenuModel) -> Vec<TrayBulkMenuItem> {
             enabled: model.local_stop_all_enabled,
         },
     ]
+}
+
+/// 適用済みトレイトンネル項目と次の表示値から変更フィールドを判定する
+fn tray_tunnel_menu_item_changes(
+    current: &TrayTunnelMenuItemDisplayState,
+    next: &TrayTunnelMenuItem,
+) -> TrayTunnelMenuItemChanges {
+    TrayTunnelMenuItemChanges {
+        label_changed: current.label != next.label,
+        enabled_changed: current.enabled != next.enabled,
+        checked_changed: current.checked != next.checked,
+    }
+}
+
+/// 適用済み一括操作項目と次の表示値から有効状態の変更有無を判定する
+fn tray_bulk_menu_item_enabled_changed(current_enabled: bool, next: &TrayBulkMenuItem) -> bool {
+    current_enabled != next.enabled
 }
 
 /// 既存メニュー構造のまま項目を更新できるか判定する
@@ -9306,6 +9356,100 @@ hide_tracked_runtime_bar = true
         );
     }
 
+    /// 未変更のトレイトンネル項目で表示フィールド更新を省略することを検証する
+    #[test]
+    fn tray_tunnel_menu_item_changes_skips_unchanged_fields() {
+        let next = tray_tunnel_menu_item_for_test();
+        let current = tray_tunnel_menu_item_display_state_for_test(&next);
+
+        let changes = tray_tunnel_menu_item_changes(&current, &next);
+
+        assert_eq!(changes, TrayTunnelMenuItemChanges::default());
+    }
+
+    /// ラベル変更時にラベルだけを更新対象にすることを検証する
+    #[test]
+    fn tray_tunnel_menu_item_changes_detects_label_only() {
+        let mut next = tray_tunnel_menu_item_for_test();
+        let current = tray_tunnel_menu_item_display_state_for_test(&next);
+        next.label = "db (stale)".to_owned();
+
+        let changes = tray_tunnel_menu_item_changes(&current, &next);
+
+        assert_eq!(
+            changes,
+            TrayTunnelMenuItemChanges {
+                label_changed: true,
+                ..TrayTunnelMenuItemChanges::default()
+            }
+        );
+    }
+
+    /// 有効状態変更時に有効状態だけを更新対象にすることを検証する
+    #[test]
+    fn tray_tunnel_menu_item_changes_detects_enabled_only() {
+        let mut next = tray_tunnel_menu_item_for_test();
+        let current = tray_tunnel_menu_item_display_state_for_test(&next);
+        next.enabled = !current.enabled;
+
+        let changes = tray_tunnel_menu_item_changes(&current, &next);
+
+        assert_eq!(
+            changes,
+            TrayTunnelMenuItemChanges {
+                enabled_changed: true,
+                ..TrayTunnelMenuItemChanges::default()
+            }
+        );
+    }
+
+    /// 選択状態変更時に選択状態だけを更新対象にすることを検証する
+    #[test]
+    fn tray_tunnel_menu_item_changes_detects_checked_only() {
+        let mut next = tray_tunnel_menu_item_for_test();
+        let current = tray_tunnel_menu_item_display_state_for_test(&next);
+        next.checked = !current.checked;
+
+        let changes = tray_tunnel_menu_item_changes(&current, &next);
+
+        assert_eq!(
+            changes,
+            TrayTunnelMenuItemChanges {
+                checked_changed: true,
+                ..TrayTunnelMenuItemChanges::default()
+            }
+        );
+    }
+
+    /// 操作変更だけでは表示フィールドを更新対象にしないことを検証する
+    #[test]
+    fn tray_tunnel_menu_item_changes_ignores_action_only() {
+        let mut next = tray_tunnel_menu_item_for_test();
+        let current = tray_tunnel_menu_item_display_state_for_test(&next);
+        next.action.operation = TrayTunnelOperation::Stop;
+
+        let changes = tray_tunnel_menu_item_changes(&current, &next);
+
+        assert_eq!(changes, TrayTunnelMenuItemChanges::default());
+    }
+
+    /// 一括操作項目の有効状態変更を更新対象にすることを検証する
+    #[test]
+    fn tray_bulk_menu_item_enabled_changed_detects_change() {
+        let current = TrayBulkMenuItem {
+            menu_id: TRAY_MENU_LOCAL_START_ALL.to_owned(),
+            enabled: true,
+        };
+        let next = TrayBulkMenuItem {
+            enabled: false,
+            ..current.clone()
+        };
+
+        let enabled_changed = tray_bulk_menu_item_enabled_changed(current.enabled, &next);
+
+        assert!(enabled_changed);
+    }
+
     /// 設定エラー時は該当スコープの開始系トレイ項目だけが無効化されることを検証する
     #[test]
     fn tray_menu_items_disable_start_actions_when_config_is_invalid() {
@@ -10704,6 +10848,35 @@ hide_tracked_runtime_bar = true
     /// テスト用のトレイ項目 ID セットを生成する
     fn tray_item_ids(items: &[TrayTunnelMenuItem]) -> HashSet<String> {
         items.iter().map(|item| item.menu_id.clone()).collect()
+    }
+
+    /// 表示差分テスト用のトレイトンネル項目を生成する
+    fn tray_tunnel_menu_item_for_test() -> TrayTunnelMenuItem {
+        TrayTunnelMenuItem {
+            menu_id: format!("{TRAY_LOCAL_TUNNEL_ITEM_PREFIX}0"),
+            label: "db".to_owned(),
+            checked: false,
+            enabled: true,
+            action: TrayTunnelAction {
+                id: "db".to_owned(),
+                runtime_id: Some("local:fwd-deck.toml:db".to_owned()),
+                runtime_scope: None,
+                operation: TrayTunnelOperation::Start {
+                    source_kind: ConfigSourceKind::Local,
+                },
+            },
+        }
+    }
+
+    /// トレイトンネル項目から表示差分テスト用の適用済み状態を生成する
+    fn tray_tunnel_menu_item_display_state_for_test(
+        item: &TrayTunnelMenuItem,
+    ) -> TrayTunnelMenuItemDisplayState {
+        TrayTunnelMenuItemDisplayState {
+            label: item.label.clone(),
+            checked: item.checked,
+            enabled: item.enabled,
+        }
     }
 
     /// テスト用のワークスペース項目を path で取得する

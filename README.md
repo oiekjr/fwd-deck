@@ -14,6 +14,7 @@
 - `name` と `tag` による SSHトンネル管理
 - ローカル設定とグローバル設定の統合読み込み
 - Git で共有できるポートフォワーディング設定ファイル
+- ローカル設定を環境ごとに差し替える `fwd-deck.override.toml`
 - CLI と macOSアプリからの起動、停止、状態確認
 - stale状態のトンネルの復旧と監視
 - 既存の SSHコマンドからのトンネル設定取り込み
@@ -68,6 +69,16 @@ macOSアプリを初めて起動した場合は、グローバル設定が未作
 `fwd-deck.toml` を自分の SSH接続先に合わせて編集し、設定と実行環境を確認します。  
 既存の SSHコマンドを使う場合は、`config import-ssh` で `-L` を設定ファイルへ取り込めます。
 
+チームで `fwd-deck.toml` を共有しつつ自分の環境だけ一部を変更する場合は、同じディレクトリに `fwd-deck.override.toml` を作成します。  
+たとえば共有設定のポート番号が自分の環境で競合する場合、`name` が一致するローカルトンネルの `local_port` だけを差し替えられます。  
+`fwd-deck.override.toml` は Git の管理対象から除外してください。
+
+```toml
+[[tunnels]]
+name = "dev-db"
+local_port = 25432
+```
+
 ```sh
 fwd-deck config import-ssh --scope local --name-prefix db -- ssh -N -L 15432:dev-db.example.com:5432 -L 15433:prod-db.example.com:5432 ec2-user@bastion.example.com
 fwd-deck validate
@@ -93,6 +104,9 @@ fwd-deck open ~/projects/my-service
 切り替え時は旧 Workspace の localスコープのトンネルを停止し、globalスコープのトンネルは維持します。
 
 アプリ表示中は `Cmd+R` または `Ctrl+R` で Dashboard を再読み込みできます。
+ローカルトンネルの編集画面では、個人用の `Personal override` と共有用の `Shared config` を切り替えられます。  
+ローカルトンネルは、`fwd-deck.toml` 本体または local override のどちらで `enabled = false` にしても、`Disabled` として一覧に残ります。  
+local override が適用されている場合だけ、`Overridden` バッジを表示します。
 
 問題がなければトンネルを起動し、状態を確認します。
 

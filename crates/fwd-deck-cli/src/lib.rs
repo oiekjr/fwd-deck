@@ -23,9 +23,10 @@ use fwd_deck_core::{
     build_ssh_command_args, default_global_config_path, default_local_config_path,
     default_state_file_path, filter_tunnels_by_tags, filter_tunnels_excluding_tags,
     format_path_for_display, generate_import_tunnel_name, load_effective_config, normalize_tag,
-    parse_ssh_args, parse_ssh_command, read_config_file, remove_tunnel_from_config_file,
-    runtime_id_for_resolved_tunnel, start_tunnel_with_options, start_tunnels_with_options,
-    stop_tunnels as stop_tunnels_core, tag_is_valid, tunnel_statuses, update_tunnel_in_config_file,
+    parse_ssh_args, parse_ssh_command, read_config_file,
+    remove_tunnel_and_override_from_config_files, runtime_id_for_resolved_tunnel,
+    start_tunnel_with_options, start_tunnels_with_options, stop_tunnels as stop_tunnels_core,
+    tag_is_valid, tunnel_statuses, update_tunnel_and_override_name_in_config_files,
     validate_config,
 };
 use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
@@ -108,7 +109,8 @@ const CLI_AFTER_HELP: &str = "\
   fwd-deck status
 
 設定:
-  既定では ./fwd-deck.toml と ~/.config/fwd-deck/config.toml を読み込みます。
+  既定では ./fwd-deck.toml、./fwd-deck.override.toml、~/.config/fwd-deck/config.toml を読み込みます。
+  local override は local 設定と同じ NAME の指定項目だけへ適用します。
   起動中トンネルの状態は ~/.local/state/fwd-deck/state.toml に保存します。";
 const OPEN_AFTER_HELP: &str = "\
 例:
@@ -137,7 +139,7 @@ const SHOW_AFTER_HELP: &str = "\
   fwd-deck --json show dev-db
 
 補足:
-  統合後の設定、接続先、有効なタイムアウト、読み込み元の設定ファイルを表示します。";
+  統合後の設定、接続先、有効なタイムアウト、読み込み元と override の設定ファイルを表示します。";
 const START_AFTER_HELP: &str = "\
 例:
   fwd-deck start
@@ -228,6 +230,7 @@ const CONFIG_EDIT_AFTER_HELP: &str = "\
 
 補足:
   既存値を初期値として表示し、空入力は既存値維持として扱います。
+  local 設定を編集し、NAME の変更時は対応する local override も追従します。
   同じ NAME が local と global の両方に存在する場合、対話実行時は編集対象を選択します。
   非対話実行時は --scope を指定します。";
 const CONFIG_REMOVE_AFTER_HELP: &str = "\
@@ -238,7 +241,8 @@ const CONFIG_REMOVE_AFTER_HELP: &str = "\
 
 補足:
   --scope を省略すると、編集する local または global 設定を対話選択します。
-  選択した設定ファイルに定義されているトンネルだけを削除対象にします。";
+  選択した設定ファイルに定義されているトンネルだけを削除対象にします。
+  local 設定から削除した場合は、同じ NAME の local override も削除します。";
 const COMPLETION_AFTER_HELP: &str = "\
 例:
   fwd-deck completion zsh
@@ -1431,7 +1435,7 @@ fn config_remove_command(
         return Ok(ExitCode::SUCCESS);
     }
 
-    remove_tunnel_from_config_file(&path, scope, &choice.id)?;
+    remove_tunnel_and_override_from_config_files(&path, &paths.local_override, scope, &choice.id)?;
     println!(
         "{}",
         green(
@@ -1452,8 +1456,15 @@ fn config_edit_command(
     let target = resolve_config_edit_target(paths, id, scope)?;
     let config = load_effective_config(paths)?;
     let tunnel = prompt_tunnel_config_update(&config, &target.tunnel, target.scope)?;
+    validate_config_edit_effective_tunnel(&config, target.scope, id, &target.path, &tunnel)?;
 
-    update_tunnel_in_config_file(&target.path, target.scope, id, tunnel)?;
+    update_tunnel_and_override_name_in_config_files(
+        &target.path,
+        &paths.local_override,
+        target.scope,
+        id,
+        tunnel,
+    )?;
     println!(
         "{}",
         green(
@@ -1467,6 +1478,45 @@ fn config_edit_command(
     );
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// 共有設定の更新後に local override を適用した local_port 重複を検証する
+fn validate_config_edit_effective_tunnel(
+    config: &EffectiveConfig,
+    scope: ConfigSourceKind,
+    current_id: &str,
+    config_path: &Path,
+    tunnel: &TunnelConfig,
+) -> Result<(), ConfigEditError> {
+    let applied_override = (scope == ConfigSourceKind::Local)
+        .then(|| {
+            config.local_override.as_ref().and_then(|file| {
+                file.tunnels
+                    .iter()
+                    .find(|candidate| candidate.name == current_id && candidate.has_overrides())
+            })
+        })
+        .flatten();
+    let effective_tunnel = applied_override
+        .map(|tunnel_override| tunnel_override.apply_to(tunnel))
+        .unwrap_or_else(|| tunnel.clone());
+
+    if let Some(existing) = config.configured_tunnels.iter().find(|resolved| {
+        resolved.source.kind == scope
+            && resolved.tunnel.name != current_id
+            && resolved.tunnel.local_port == effective_tunnel.local_port
+    }) {
+        return Err(ConfigEditError::DuplicateLocalPort {
+            path: applied_override
+                .and(config.local_override.as_ref())
+                .map(|file| file.source.path.clone())
+                .unwrap_or_else(|| config_path.to_path_buf()),
+            local_port: effective_tunnel.local_port,
+            existing_name: existing.tunnel.name.clone(),
+        });
+    }
+
+    Ok(())
 }
 
 /// CLI 指定または対話選択から設定スコープを解決する
@@ -1885,6 +1935,12 @@ fn print_tunnel_details(resolved: &ResolvedTunnelConfig) {
         resolved.source.kind,
         format_path_for_display(&resolved.source.path)
     );
+    if let Some(override_source) = &resolved.override_source {
+        println!(
+            "Override: {}",
+            format_path_for_display(&override_source.path)
+        );
+    }
     println!("Runtime ID: {}", runtime_id_for_resolved_tunnel(resolved));
     print_timeout_details(resolved.timeouts);
 }
@@ -2406,22 +2462,25 @@ fn doctor_checks(
 /// 設定ファイルの有無を診断する
 fn doctor_config_presence_check(config: &EffectiveConfig, paths: &ConfigPaths) -> DoctorCheck {
     if config.has_sources() {
+        let loaded_file_count = config.sources.len() + usize::from(config.local_override.is_some());
+
         return DoctorCheck::ok(
             "Configuration files",
-            format!("loaded {} file(s)", config.sources.len()),
+            format!("loaded {loaded_file_count} file(s)"),
         );
     }
 
     DoctorCheck::error(
         "Configuration files",
         format!(
-            "no configuration files were found (global: {}, local: {})",
+            "no configuration files were found (global: {}, local: {}, override: {})",
             paths
                 .global
                 .as_deref()
                 .map(format_path_for_display)
                 .unwrap_or_else(|| "-".to_owned()),
-            format_path_for_display(&paths.local)
+            format_path_for_display(&paths.local),
+            format_path_for_display(&paths.local_override)
         ),
     )
 }
@@ -4060,6 +4119,7 @@ struct TunnelJson {
     identity_file: Option<String>,
     source: String,
     source_path: String,
+    override_path: Option<String>,
     timeouts: TimeoutJson,
 }
 
@@ -4086,6 +4146,10 @@ impl TunnelJson {
             identity_file: tunnel.identity_file.clone(),
             source: resolved.source.kind.to_string(),
             source_path: resolved.source.path.display().to_string(),
+            override_path: resolved
+                .override_source
+                .as_ref()
+                .map(|source| source.path.display().to_string()),
             timeouts: TimeoutJson::from_timeouts(resolved.timeouts),
         }
     }
@@ -4622,7 +4686,10 @@ fn is_terminal(stream: OutputStream) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use fwd_deck_core::{ConfigSource, TunnelState, config::LoadedConfigFile};
+    use fwd_deck_core::{
+        ConfigSource, LoadedConfigOverrideFile, TunnelConfigOverride, TunnelState,
+        config::LoadedConfigFile,
+    };
 
     use super::*;
 
@@ -4637,6 +4704,51 @@ mod tests {
             conflict.map(|resolved| resolved.tunnel.name.as_str()),
             Some("db")
         );
+    }
+
+    /// 共有設定更新後の local override による実効 local_port 重複を検出することを検証する
+    #[test]
+    fn validate_config_edit_effective_tunnel_detects_override_port_conflict() {
+        let source = ConfigSource::new(ConfigSourceKind::Local, PathBuf::from("fwd-deck.toml"));
+        let override_source = ConfigSource::new(
+            ConfigSourceKind::Local,
+            PathBuf::from("fwd-deck.override.toml"),
+        );
+        let db = tunnel("db", 15432);
+        let cache = tunnel("cache", 16379);
+        let mut db_override = TunnelConfigOverride::new("db".to_owned());
+        db_override.local_port = Some(25432);
+        let effective_db = db_override.apply_to(&db);
+        let config = EffectiveConfig {
+            sources: vec![LoadedConfigFile::new(
+                source.clone(),
+                vec![db, cache.clone()],
+            )],
+            local_override: Some(LoadedConfigOverrideFile::new(
+                override_source,
+                vec![db_override],
+            )),
+            configured_tunnels: vec![
+                ResolvedTunnelConfig::new(source.clone(), effective_db),
+                ResolvedTunnelConfig::new(source, cache),
+            ],
+            tunnels: Vec::new(),
+        };
+        let candidate = tunnel("cache", 25432);
+
+        let result = validate_config_edit_effective_tunnel(
+            &config,
+            ConfigSourceKind::Local,
+            "cache",
+            Path::new("fwd-deck.toml"),
+            &candidate,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ConfigEditError::DuplicateLocalPort { existing_name, .. })
+                if existing_name == "db"
+        ));
     }
 
     /// 未使用の ID は重複扱いしないことを検証する

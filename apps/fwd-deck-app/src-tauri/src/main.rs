@@ -18,15 +18,17 @@ use std::{
 use fwd_deck_core::{
     ConfigEditError, ConfigLoadError, ConfigPaths, ConfigSource, ConfigSourceKind, EffectiveConfig,
     ProcessState, ResolvedTimeoutConfig, ResolvedTunnelConfig, SshImportWarning, StartedTunnel,
-    StoppedTunnel, TimeoutConfig, TunnelConfig, TunnelRuntimeError, TunnelRuntimeStatus,
-    ValidationReport, add_tunnel_to_config_file, add_tunnels_to_config_file,
+    StoppedTunnel, TimeoutConfig, TunnelConfig, TunnelConfigOverride, TunnelRuntimeError,
+    TunnelRuntimeStatus, ValidationReport, add_tunnel_to_config_file, add_tunnels_to_config_file,
     default_global_config_path, default_local_config_path, default_state_file_path,
     format_path_for_display, load_effective_config, normalize_runtime_source_path,
-    parse_ssh_command, remove_tunnel_from_config_file, runtime_id_for_resolved_tunnel,
-    start_tunnel, start_tunnels_with_progress,
-    stop_tunnels_with_progress as stop_tunnels_with_progress_core, tag_is_valid, tunnel_runtime_id,
-    tunnel_runtime_id_from_normalized_source_path, tunnel_statuses,
-    tunnel_statuses_for_state_files, update_tunnel_in_config_file, validate_config,
+    parse_ssh_command, remove_tunnel_and_override_from_config_files,
+    remove_tunnel_override_from_config_file, runtime_id_for_resolved_tunnel, start_tunnel,
+    start_tunnels_with_progress, stop_tunnels_with_progress as stop_tunnels_with_progress_core,
+    tag_is_valid, tunnel_runtime_id, tunnel_runtime_id_from_normalized_source_path,
+    tunnel_statuses, tunnel_statuses_for_state_files,
+    update_tunnel_and_override_name_in_config_files, upsert_tunnel_override_in_config_file,
+    validate_config,
 };
 #[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
@@ -158,6 +160,7 @@ fn main() -> ExitCode {
             duplicate_tunnel_entry,
             update_tunnel_entry,
             remove_tunnel_entry,
+            remove_tunnel_override_entry,
             set_tunnel_favorite,
             set_tunnel_auto_recover,
             remove_workspace_history_entry,
@@ -3427,6 +3430,7 @@ struct PathView {
     workspace_path: String,
     workspace_history: Vec<String>,
     local_config_path: String,
+    local_override_config_path: String,
     global_config_path: String,
     use_global: bool,
     global_state_path: String,
@@ -3498,8 +3502,8 @@ struct DashboardState {
 /// 設定読込結果と検証結果をまとめて保持する
 #[derive(Debug, Clone)]
 struct ConfigWithValidation {
-    config: EffectiveConfig,
-    validation: ValidationReport,
+    config: Arc<EffectiveConfig>,
+    validation: Arc<ValidationReport>,
 }
 
 /// ダッシュボード用に再利用可能な設定読込結果を保持する
@@ -3596,6 +3600,9 @@ struct ValidationIssueView {
 struct TunnelView {
     id: String,
     runtime_id: String,
+    enabled: bool,
+    is_overridden: bool,
+    override_path: Option<String>,
     is_favorite: bool,
     auto_recover_enabled: bool,
     description: Option<String>,
@@ -3613,8 +3620,27 @@ struct TunnelView {
     identity_file: Option<String>,
     source: String,
     source_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shared: Option<TunnelDefinitionView>,
     timeouts: TimeoutView,
     status: Option<RuntimeStatusView>,
+}
+
+/// トンネル本体の編集可能な値を表現する
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TunnelDefinitionView {
+    enabled: bool,
+    description: Option<String>,
+    tags: Vec<String>,
+    local_host: String,
+    local_port: u16,
+    remote_host: String,
+    remote_port: u16,
+    ssh_user: String,
+    ssh_host: String,
+    ssh_port: Option<u16>,
+    identity_file: Option<String>,
 }
 
 /// 起動中または stale なトンネル状態の表示情報を表現する
@@ -3712,6 +3738,14 @@ impl From<ConfigScopeInput> for ConfigSourceKind {
             ConfigScopeInput::Local => Self::Local,
         }
     }
+}
+
+/// アプリから編集する設定レイヤーを表現する
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ConfigEditLayerInput {
+    Shared,
+    Override,
 }
 
 /// runtime 状態ファイルのスコープを表現する
@@ -3938,6 +3972,8 @@ impl WorkspaceSwitchStopTarget {
 #[serde(rename_all = "camelCase")]
 struct TunnelInput {
     id: String,
+    #[serde(default = "default_enabled_input")]
+    enabled: bool,
     description: Option<String>,
     tags: Vec<String>,
     local_host: String,
@@ -3957,7 +3993,7 @@ impl TunnelInput {
     fn into_tunnel_config(self) -> TunnelConfig {
         TunnelConfig {
             name: trimmed_required(self.id),
-            enabled: true,
+            enabled: self.enabled,
             description: trimmed_optional(self.description),
             tags: self.tags.into_iter().map(trimmed_required).collect(),
             local_host: Some(trimmed_required(self.local_host)),
@@ -3974,6 +4010,11 @@ impl TunnelInput {
                 .unwrap_or_default(),
         }
     }
+}
+
+/// 旧フロントエンド入力の enabled 既定値を返す
+fn default_enabled_input() -> bool {
+    true
 }
 
 /// 設定追加入力から受け取るタイムアウト上書きを表現する
@@ -4282,10 +4323,11 @@ fn update_tunnel_entry(
     app: tauri::AppHandle,
     paths: Option<WorkspaceSelection>,
     scope: ConfigScopeInput,
+    layer: ConfigEditLayerInput,
     id: String,
     tunnel: TunnelInput,
 ) -> Result<DashboardState, String> {
-    let result = update_tunnel_entry_inner(&app, paths, scope, &id, tunnel);
+    let result = update_tunnel_entry_inner(&app, paths, scope, layer, &id, tunnel);
     let _ = rebuild_tray_menu(&app);
 
     command_result(result)
@@ -4300,6 +4342,19 @@ fn remove_tunnel_entry(
     id: String,
 ) -> Result<DashboardState, String> {
     let result = remove_tunnel_entry_inner(&app, paths, scope, &id);
+    let _ = rebuild_tray_menu(&app);
+
+    command_result(result)
+}
+
+/// local override からトンネル上書きを解除する
+#[tauri::command]
+fn remove_tunnel_override_entry(
+    app: tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    id: String,
+) -> Result<DashboardState, String> {
+    let result = remove_tunnel_override_entry_inner(&app, paths, &id);
     let _ = rebuild_tray_menu(&app);
 
     command_result(result)
@@ -4403,9 +4458,9 @@ fn load_dashboard_from_runtime_paths(
 
     Ok(build_dashboard_state(
         runtime_paths,
-        config_with_validation.config,
+        config_with_validation.config.as_ref(),
         statuses,
-        config_with_validation.validation,
+        config_with_validation.validation.as_ref(),
     ))
 }
 
@@ -4423,8 +4478,8 @@ fn load_config_with_validation(
         return Ok(cached);
     }
 
-    let config = load_effective_config(&runtime_paths.config_paths)?;
-    let validation = validate_config(&config);
+    let config = Arc::new(load_effective_config(&runtime_paths.config_paths)?);
+    let validation = Arc::new(validate_config(&config));
     let value = ConfigWithValidation { config, validation };
 
     if let Some(cache_key) = cache_key
@@ -4462,6 +4517,7 @@ fn dashboard_config_file_snapshots(config_paths: &ConfigPaths) -> Vec<DashboardC
     }
 
     files.push(dashboard_config_file_snapshot(&config_paths.local));
+    files.push(dashboard_config_file_snapshot(&config_paths.local_override));
 
     files
 }
@@ -4495,16 +4551,16 @@ fn clear_dashboard_config_cache(app: &tauri::AppHandle) {
 /// 読み込み済み設定と最新 runtime 状態からダッシュボード状態を組み立てる
 fn load_dashboard_from_runtime_paths_and_config(
     runtime_paths: RuntimePaths,
-    config: EffectiveConfig,
+    config: Arc<EffectiveConfig>,
 ) -> Result<DashboardState, AppError> {
     let validation = validate_config(&config);
     let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
 
     Ok(build_dashboard_state(
         runtime_paths,
-        config,
+        &config,
         statuses,
-        validation,
+        &validation,
     ))
 }
 
@@ -4587,7 +4643,7 @@ fn stop_tunnels_with_dashboard_inner(
 fn load_tunnel_operation_context(
     app: &tauri::AppHandle,
     paths: Option<WorkspaceSelection>,
-) -> Result<(RuntimePaths, EffectiveConfig), AppError> {
+) -> Result<(RuntimePaths, Arc<EffectiveConfig>), AppError> {
     let runtime_paths = resolve_runtime_paths(app, paths)?;
     let config = load_config_with_validation(app, &runtime_paths)?.config;
 
@@ -4751,19 +4807,94 @@ fn update_tunnel_entry_inner(
     app: &tauri::AppHandle,
     paths: Option<WorkspaceSelection>,
     scope: ConfigScopeInput,
+    layer: ConfigEditLayerInput,
     id: &str,
     tunnel: TunnelInput,
 ) -> Result<DashboardState, AppError> {
     let mut runtime_paths = resolve_runtime_paths(app, paths.clone())?;
     let config = load_config_with_validation(app, &runtime_paths)?.config;
-    let tunnel = tunnel.into_tunnel_config();
-
     let kind = ConfigSourceKind::from(scope);
-    validate_updated_tunnel(&config, kind, id, &tunnel)?;
     let path = config_path_for_scope(&runtime_paths, kind)?;
     let previous_runtime_id = configured_tunnel_runtime_id(&config, kind, id);
-    let next_runtime_id = tunnel_runtime_id(kind, &path, &tunnel.name);
-    update_tunnel_in_config_file(&path, kind, id, tunnel)?;
+    let next_runtime_id = match layer {
+        ConfigEditLayerInput::Shared => {
+            let base = source_tunnels_for_scope(&config, kind)
+                .into_iter()
+                .find(|resolved| resolved.tunnel.name == id)
+                .ok_or_else(|| {
+                    AppError::InvalidInput(format!("編集対象トンネルが見つかりません: {id}"))
+                })?;
+            let mut tunnel = tunnel.into_tunnel_config();
+            tunnel.timeouts = base.tunnel.timeouts.clone();
+            validate_updated_tunnel(&config, kind, id, &tunnel)?;
+            let effective_tunnel = if kind == ConfigSourceKind::Local {
+                config
+                    .local_override
+                    .as_ref()
+                    .and_then(|file| {
+                        file.tunnels
+                            .iter()
+                            .find(|candidate| candidate.name == id && candidate.has_overrides())
+                    })
+                    .map(|tunnel_override| tunnel_override.apply_to(&tunnel))
+                    .unwrap_or_else(|| tunnel.clone())
+            } else {
+                tunnel.clone()
+            };
+            validate_updated_effective_tunnel(&config, kind, id, &effective_tunnel)?;
+            let next_runtime_id = tunnel_runtime_id(kind, &path, &tunnel.name);
+            update_tunnel_and_override_name_in_config_files(
+                &path,
+                &runtime_paths.config_paths.local_override,
+                kind,
+                id,
+                tunnel,
+            )?;
+
+            next_runtime_id
+        }
+        ConfigEditLayerInput::Override => {
+            if kind != ConfigSourceKind::Local {
+                return Err(AppError::InvalidInput(
+                    "global 設定には override を適用できません".to_owned(),
+                ));
+            }
+
+            let base = source_tunnels_for_scope(&config, kind)
+                .into_iter()
+                .find(|resolved| resolved.tunnel.name == id)
+                .ok_or_else(|| {
+                    AppError::InvalidInput(format!("編集対象トンネルが見つかりません: {id}"))
+                })?;
+            let effective = config
+                .configured_tunnels
+                .iter()
+                .find(|resolved| resolved.source.kind == kind && resolved.tunnel.name == id)
+                .ok_or_else(|| {
+                    AppError::InvalidInput(format!("編集対象トンネルが見つかりません: {id}"))
+                })?;
+            let mut tunnel = tunnel.into_tunnel_config();
+            if tunnel.name != id {
+                return Err(AppError::InvalidInput(
+                    "override では name を変更できません".to_owned(),
+                ));
+            }
+            tunnel.timeouts = effective.tunnel.timeouts.clone();
+            validate_updated_effective_tunnel(&config, kind, id, &tunnel)?;
+            let existing_override = config
+                .local_override
+                .as_ref()
+                .and_then(|file| file.tunnels.iter().find(|candidate| candidate.name == id));
+            let tunnel_override =
+                tunnel_override_from_form(base.tunnel, &tunnel, existing_override);
+            upsert_tunnel_override_in_config_file(
+                &runtime_paths.config_paths.local_override,
+                tunnel_override,
+            )?;
+
+            tunnel_runtime_id(kind, &path, id)
+        }
+    };
     clear_dashboard_config_cache(app);
 
     if let Some(previous_runtime_id) = previous_runtime_id {
@@ -4804,7 +4935,12 @@ fn remove_tunnel_entry_inner(
     let path = config_path_for_scope(&runtime_paths, kind)?;
     let runtime_id = configured_tunnel_runtime_id(&config, kind, id);
 
-    remove_tunnel_from_config_file(&path, kind, id)?;
+    remove_tunnel_and_override_from_config_files(
+        &path,
+        &runtime_paths.config_paths.local_override,
+        kind,
+        id,
+    )?;
     clear_dashboard_config_cache(app);
 
     if let Some(runtime_id) = runtime_id {
@@ -4818,6 +4954,27 @@ fn remove_tunnel_entry_inner(
             write_app_preferences(app, &runtime_paths.preferences)?;
         }
 
+        reset_auto_recover_runtime_state(app, &runtime_id);
+    }
+
+    load_dashboard_inner(app, paths)
+}
+
+/// local override のトンネル上書きを解除する
+fn remove_tunnel_override_entry_inner(
+    app: &tauri::AppHandle,
+    paths: Option<WorkspaceSelection>,
+    id: &str,
+) -> Result<DashboardState, AppError> {
+    let runtime_paths = resolve_runtime_paths(app, paths.clone())?;
+    remove_tunnel_override_from_config_file(&runtime_paths.config_paths.local_override, id)?;
+    clear_dashboard_config_cache(app);
+
+    if let Some(runtime_id) = configured_tunnel_runtime_id(
+        &load_effective_config(&runtime_paths.config_paths)?,
+        ConfigSourceKind::Local,
+        id,
+    ) {
         reset_auto_recover_runtime_state(app, &runtime_id);
     }
 
@@ -4847,6 +5004,7 @@ fn set_tunnel_favorite_for_app_config_dir(
         app_config_dir,
         paths,
         runtime_id,
+        TunnelPreferenceTarget::Configured,
         |preferences| {
             set_favorite_tunnel_runtime_id(preferences, runtime_id, is_favorite);
         },
@@ -4880,6 +5038,7 @@ fn set_tunnel_auto_recover_for_app_config_dir(
         app_config_dir,
         paths,
         runtime_id,
+        TunnelPreferenceTarget::Enabled,
         |preferences| {
             set_auto_recover_tunnel_runtime_id(preferences, runtime_id, enabled);
         },
@@ -4891,6 +5050,7 @@ fn update_tunnel_runtime_preference_for_app_config_dir<F>(
     app_config_dir: &Path,
     paths: Option<WorkspaceSelection>,
     runtime_id: &str,
+    target: TunnelPreferenceTarget,
     update_preference: F,
 ) -> Result<PathView, AppError>
 where
@@ -4907,9 +5067,12 @@ where
 
     let mut runtime_paths = runtime_paths_from_preferences(app_config_dir, preferences)?;
     let config = load_effective_config(&runtime_paths.config_paths)?;
-    let lookup = ConfiguredTunnelLookup::new(&config);
+    let tunnels = match target {
+        TunnelPreferenceTarget::Configured => &config.configured_tunnels,
+        TunnelPreferenceTarget::Enabled => &config.tunnels,
+    };
 
-    ensure_configured_runtime_id(&lookup, runtime_id)?;
+    ensure_runtime_id_in_tunnels(tunnels, runtime_id)?;
     update_preference(&mut runtime_paths.preferences);
     write_preferences_file_if_changed(
         &preferences_path,
@@ -4918,6 +5081,13 @@ where
     )?;
 
     Ok(path_view(&runtime_paths))
+}
+
+/// トンネル単位設定で許可する対象範囲を表現する
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TunnelPreferenceTarget {
+    Configured,
+    Enabled,
 }
 
 /// ワークスペース履歴の削除結果を表示用パスとして返す
@@ -5815,9 +5985,9 @@ impl DisplayPathCache {
 /// ダッシュボード状態へ変換する
 fn build_dashboard_state(
     runtime_paths: RuntimePaths,
-    config: EffectiveConfig,
+    config: &EffectiveConfig,
     statuses: Vec<ScopedRuntimeStatus>,
-    validation: ValidationReport,
+    validation: &ValidationReport,
 ) -> DashboardState {
     let favorite_runtime_ids = runtime_paths
         .preferences
@@ -5834,13 +6004,24 @@ fn build_dashboard_state(
     let mut display_path_cache = DisplayPathCache::default();
     let status_lookup = RuntimeStatusLookup::new(&statuses);
     let mut runtime_id_cache = RuntimeIdCache::default();
+    let shared_tunnel_lookup = build_shared_tunnel_lookup(config);
     let mut tunnels = config
-        .tunnels
+        .configured_tunnels
         .iter()
+        .filter(|resolved| {
+            resolved.tunnel.enabled || resolved.source.kind == ConfigSourceKind::Local
+        })
         .map(|resolved| {
             let runtime_id = runtime_id_cache.runtime_id_for_resolved_tunnel(resolved);
+            let shared_tunnel = resolved.is_overridden().then(|| {
+                shared_tunnel_lookup
+                    .get(&(resolved.source.kind, resolved.tunnel.name.as_str()))
+                    .copied()
+                    .unwrap_or(&resolved.tunnel)
+            });
             tunnel_view(
                 resolved,
+                shared_tunnel,
                 &runtime_id,
                 favorite_runtime_ids.contains(runtime_id.as_str()),
                 auto_recover_runtime_ids.contains(runtime_id.as_str()),
@@ -5881,6 +6062,40 @@ fn build_dashboard_state(
         tunnels,
         tracked_tunnels,
     }
+}
+
+/// override 適用時だけ必要な共有トンネル設定を name で検索できる形式へ変換する
+fn build_shared_tunnel_lookup(
+    config: &EffectiveConfig,
+) -> HashMap<(ConfigSourceKind, &str), &TunnelConfig> {
+    if config.local_override.is_none()
+        || !config
+            .configured_tunnels
+            .iter()
+            .any(ResolvedTunnelConfig::is_overridden)
+    {
+        return HashMap::new();
+    }
+
+    let local_tunnel_count = config
+        .sources
+        .iter()
+        .filter(|file| file.source.kind == ConfigSourceKind::Local)
+        .map(|file| file.tunnels.len())
+        .sum();
+    let mut lookup = HashMap::with_capacity(local_tunnel_count);
+
+    for file in &config.sources {
+        if file.source.kind != ConfigSourceKind::Local {
+            continue;
+        }
+
+        for tunnel in &file.tunnels {
+            lookup.insert((file.source.kind, tunnel.name.as_str()), tunnel);
+        }
+    }
+
+    lookup
 }
 
 /// お気に入り runtime ID を追加または削除する
@@ -6002,18 +6217,23 @@ fn configured_tunnel_runtime_id(
     let mut runtime_id_cache = RuntimeIdCache::default();
 
     config
-        .tunnels
+        .configured_tunnels
         .iter()
         .find(|resolved| resolved.source.kind == kind && resolved.tunnel.name == name)
         .map(|resolved| runtime_id_cache.runtime_id_for_resolved_tunnel(resolved))
 }
 
 /// runtime ID が現在の設定済みトンネルに存在することを検証する
-fn ensure_configured_runtime_id(
-    lookup: &ConfiguredTunnelLookup<'_>,
+fn ensure_runtime_id_in_tunnels(
+    tunnels: &[ResolvedTunnelConfig],
     runtime_id: &str,
 ) -> Result<(), AppError> {
-    if lookup.by_runtime_id(runtime_id).is_some() {
+    let mut runtime_id_cache = RuntimeIdCache::default();
+
+    if tunnels
+        .iter()
+        .any(|resolved| runtime_id_cache.runtime_id_for_resolved_tunnel(resolved) == runtime_id)
+    {
         return Ok(());
     }
 
@@ -6065,6 +6285,11 @@ fn path_view_with_cache(paths: &RuntimePaths, display_paths: &mut DisplayPathCac
             .as_deref()
             .map(|path| display_paths.display_path(path))
             .unwrap_or_default(),
+        local_override_config_path: paths
+            .local_config_path
+            .as_ref()
+            .map(|_| display_paths.display_path(&paths.config_paths.local_override))
+            .unwrap_or_default(),
         global_config_path: paths
             .global_config_display_path
             .as_deref()
@@ -6093,29 +6318,29 @@ fn path_view_with_cache(paths: &RuntimePaths, display_paths: &mut DisplayPathCac
 
 /// 設定検証結果を表示用へ変換する
 fn validation_view(
-    report: ValidationReport,
+    report: &ValidationReport,
     display_paths: &mut DisplayPathCache,
 ) -> ValidationView {
     ValidationView {
         is_valid: report.is_valid(),
         errors: report
             .errors
-            .into_iter()
+            .iter()
             .map(|issue| ValidationIssueView {
                 source: issue.source.kind.to_string(),
                 path: display_paths.display_path(&issue.source.path),
-                tunnel_name: issue.tunnel_name,
-                message: issue.message,
+                tunnel_name: issue.tunnel_name.clone(),
+                message: issue.message.clone(),
             })
             .collect(),
         warnings: report
             .warnings
-            .into_iter()
+            .iter()
             .map(|issue| ValidationIssueView {
                 source: issue.source.kind.to_string(),
                 path: display_paths.display_path(&issue.source.path),
-                tunnel_name: issue.tunnel_name,
-                message: issue.message,
+                tunnel_name: issue.tunnel_name.clone(),
+                message: issue.message.clone(),
             })
             .collect(),
     }
@@ -6124,6 +6349,7 @@ fn validation_view(
 /// 設定済みトンネルを表示用へ変換する
 fn tunnel_view(
     resolved: &ResolvedTunnelConfig,
+    shared_tunnel: Option<&TunnelConfig>,
     runtime_id: &str,
     is_favorite: bool,
     auto_recover_enabled: bool,
@@ -6135,6 +6361,12 @@ fn tunnel_view(
     TunnelView {
         id: tunnel.name.clone(),
         runtime_id: runtime_id.to_owned(),
+        enabled: tunnel.enabled,
+        is_overridden: resolved.is_overridden(),
+        override_path: resolved
+            .override_source
+            .as_ref()
+            .map(|source| display_paths.display_path(&source.path)),
         is_favorite,
         auto_recover_enabled,
         description: tunnel.description.clone(),
@@ -6152,8 +6384,26 @@ fn tunnel_view(
         identity_file: tunnel.identity_file.clone(),
         source: resolved.source.kind.to_string(),
         source_path: display_paths.display_path(&resolved.source.path),
+        shared: shared_tunnel.map(tunnel_definition_view),
         timeouts: timeout_view(resolved.timeouts),
         status: status.map(|status| runtime_status_view(status, display_paths)),
+    }
+}
+
+/// トンネル本体を編集表示用へ変換する
+fn tunnel_definition_view(tunnel: &TunnelConfig) -> TunnelDefinitionView {
+    TunnelDefinitionView {
+        enabled: tunnel.enabled,
+        description: tunnel.description.clone(),
+        tags: tunnel.tags.clone(),
+        local_host: tunnel.effective_local_host().to_owned(),
+        local_port: tunnel.local_port,
+        remote_host: tunnel.remote_host.clone(),
+        remote_port: tunnel.remote_port,
+        ssh_user: tunnel.ssh_user.clone(),
+        ssh_host: tunnel.ssh_host.clone(),
+        ssh_port: tunnel.ssh_port,
+        identity_file: tunnel.identity_file.clone(),
     }
 }
 
@@ -6384,7 +6634,7 @@ fn duplicate_tunnel_config(
     duplicate: DuplicateTunnelInput,
 ) -> Result<TunnelConfig, AppError> {
     let source = config
-        .tunnels
+        .configured_tunnels
         .iter()
         .find(|resolved| resolved.source.kind == kind && resolved.tunnel.name == source_id)
         .ok_or_else(|| {
@@ -6440,6 +6690,73 @@ fn validate_updated_tunnel(
     }
 
     Ok(())
+}
+
+/// override 更新後の実効トンネルに意味的な不備がないことを検証する
+fn validate_updated_effective_tunnel(
+    config: &EffectiveConfig,
+    kind: ConfigSourceKind,
+    current_id: &str,
+    tunnel: &TunnelConfig,
+) -> Result<(), AppError> {
+    validate_tunnel_fields(tunnel)?;
+
+    if let Some(existing) = config.configured_tunnels.iter().find(|resolved| {
+        resolved.source.kind == kind
+            && resolved.tunnel.name != current_id
+            && resolved.tunnel.local_port == tunnel.local_port
+    }) {
+        return Err(AppError::InvalidInput(format!(
+            "local_port は既存トンネルと重複しています: {} ({})",
+            tunnel.local_port, existing.tunnel.name
+        )));
+    }
+
+    Ok(())
+}
+
+/// アプリ入力と共有設定の差分から local override を生成する
+fn tunnel_override_from_form(
+    base: &TunnelConfig,
+    tunnel: &TunnelConfig,
+    existing_override: Option<&TunnelConfigOverride>,
+) -> TunnelConfigOverride {
+    let mut tunnel_override = TunnelConfigOverride::new(base.name.clone());
+    tunnel_override.enabled = (tunnel.enabled != base.enabled).then_some(tunnel.enabled);
+    tunnel_override.description = concrete_optional_string_override(
+        base.description.as_deref(),
+        tunnel.description.as_deref(),
+    );
+    tunnel_override.tags = (tunnel.tags != base.tags).then(|| tunnel.tags.clone());
+    tunnel_override.local_host = (tunnel.effective_local_host() != base.effective_local_host())
+        .then(|| tunnel.effective_local_host().to_owned());
+    tunnel_override.local_port =
+        (tunnel.local_port != base.local_port).then_some(tunnel.local_port);
+    tunnel_override.remote_host =
+        (tunnel.remote_host != base.remote_host).then(|| tunnel.remote_host.clone());
+    tunnel_override.remote_port =
+        (tunnel.remote_port != base.remote_port).then_some(tunnel.remote_port);
+    tunnel_override.ssh_user = (tunnel.ssh_user != base.ssh_user).then(|| tunnel.ssh_user.clone());
+    tunnel_override.ssh_host = (tunnel.ssh_host != base.ssh_host).then(|| tunnel.ssh_host.clone());
+    tunnel_override.ssh_port = tunnel
+        .ssh_port
+        .filter(|ssh_port| Some(*ssh_port) != base.ssh_port);
+    tunnel_override.identity_file = concrete_optional_string_override(
+        base.identity_file.as_deref(),
+        tunnel.identity_file.as_deref(),
+    );
+    tunnel_override.timeouts = existing_override
+        .map(|existing| existing.timeouts.clone())
+        .unwrap_or_default();
+
+    tunnel_override
+}
+
+/// 具体値だけを許可する任意文字列の上書きを生成する
+fn concrete_optional_string_override(base: Option<&str>, value: Option<&str>) -> Option<String> {
+    value
+        .filter(|value| Some(*value) != base)
+        .map(str::to_owned)
 }
 
 /// トンネル入力値の単体制約を検証する
@@ -7582,8 +7899,17 @@ mod tests {
         let updated_key =
             dashboard_config_cache_key(&config_paths).expect("create updated cache key");
 
+        fs::write(
+            &config_paths.local_override,
+            "[[tunnels]]\nname = \"db\"\nenabled = false\n",
+        )
+        .expect("write local override");
+        let override_key =
+            dashboard_config_cache_key(&config_paths).expect("create override cache key");
+
         assert_ne!(missing_key, created_key);
         assert_ne!(created_key, updated_key);
+        assert_ne!(updated_key, override_key);
     }
 
     /// ダッシュボード設定キャッシュが一致キーだけを返すことを検証する
@@ -7599,13 +7925,15 @@ mod tests {
             files: Vec::new(),
         };
         let value = ConfigWithValidation {
-            config: EffectiveConfig::new(Vec::new(), Vec::new()),
-            validation: ValidationReport::valid(),
+            config: Arc::new(EffectiveConfig::new(Vec::new(), Vec::new())),
+            validation: Arc::new(ValidationReport::valid()),
         };
 
-        cache_state.set(key.clone(), value);
+        cache_state.set(key.clone(), value.clone());
 
-        assert!(cache_state.get(&key).is_some());
+        let cached = cache_state.get(&key).expect("matching value exists");
+        assert!(Arc::ptr_eq(&cached.config, &value.config));
+        assert!(Arc::ptr_eq(&cached.validation, &value.validation));
         assert!(cache_state.get(&other_key).is_none());
 
         cache_state.clear();
@@ -8424,6 +8752,42 @@ hide_tracked_runtime_bar = true
         );
     }
 
+    /// override で無効化したトンネルもお気に入り設定を変更できることを検証する
+    #[test]
+    fn set_tunnel_favorite_accepts_tunnel_disabled_by_override() {
+        let app_config_dir = TempDir::new().expect("create app config directory");
+        let workspace = TempDir::new().expect("create workspace");
+        let local_config_path = default_local_config_path(workspace.path());
+        let config_paths = ConfigPaths::new(None, local_config_path.clone());
+        add_tunnel_to_config_file(
+            &local_config_path,
+            ConfigSourceKind::Local,
+            tunnel_config("db", 15432),
+        )
+        .expect("write local tunnel");
+        let mut tunnel_override = TunnelConfigOverride::new("db".to_owned());
+        tunnel_override.enabled = Some(false);
+        upsert_tunnel_override_in_config_file(&config_paths.local_override, tunnel_override)
+            .expect("disable local tunnel");
+        let runtime_id = tunnel_runtime_id(ConfigSourceKind::Local, &local_config_path, "db");
+        let mut selection =
+            workspace_selection_for_path(workspace.path()).expect("select workspace");
+        selection.use_global = Some(false);
+
+        set_tunnel_favorite_for_app_config_dir(
+            app_config_dir.path(),
+            Some(selection),
+            &runtime_id,
+            true,
+        )
+        .expect("set favorite");
+        let preferences =
+            read_preferences_file(&app_config_dir.path().join(APP_PREFERENCES_FILE_NAME))
+                .expect("read preferences");
+
+        assert_eq!(preferences.favorite_tunnel_runtime_ids, vec![runtime_id]);
+    }
+
     /// 自動復旧設定コマンドが保存内容と解決済みパスを更新することを検証する
     #[test]
     fn set_tunnel_auto_recover_persists_preference_and_returns_paths() {
@@ -8493,6 +8857,40 @@ hide_tracked_runtime_bar = true
         );
     }
 
+    /// override で無効化したトンネルの自動復旧有効化が拒否されることを検証する
+    #[test]
+    fn set_tunnel_auto_recover_rejects_tunnel_disabled_by_override() {
+        let app_config_dir = TempDir::new().expect("create app config directory");
+        let workspace = TempDir::new().expect("create workspace");
+        let local_config_path = default_local_config_path(workspace.path());
+        let config_paths = ConfigPaths::new(None, local_config_path.clone());
+        add_tunnel_to_config_file(
+            &local_config_path,
+            ConfigSourceKind::Local,
+            tunnel_config("db", 15432),
+        )
+        .expect("write local tunnel");
+        let mut tunnel_override = TunnelConfigOverride::new("db".to_owned());
+        tunnel_override.enabled = Some(false);
+        upsert_tunnel_override_in_config_file(&config_paths.local_override, tunnel_override)
+            .expect("disable local tunnel");
+        let runtime_id = tunnel_runtime_id(ConfigSourceKind::Local, &local_config_path, "db");
+        let mut selection =
+            workspace_selection_for_path(workspace.path()).expect("select workspace");
+        selection.use_global = Some(false);
+
+        let result = set_tunnel_auto_recover_for_app_config_dir(
+            app_config_dir.path(),
+            Some(selection),
+            &runtime_id,
+            true,
+        );
+
+        assert!(
+            matches!(result, Err(AppError::InvalidInput(message)) if message.contains("未定義"))
+        );
+    }
+
     /// お気に入り状態がトンネル一覧の名前順に影響しないことを検証する
     #[test]
     fn dashboard_tunnels_keep_name_sort_when_favorite_exists() {
@@ -8506,15 +8904,21 @@ hide_tracked_runtime_bar = true
 
         let dashboard = build_dashboard_state(
             paths,
-            EffectiveConfig::new(Vec::new(), vec![regular, favorite]),
+            &EffectiveConfig::new(Vec::new(), vec![regular, favorite]),
             Vec::new(),
-            ValidationReport::valid(),
+            &ValidationReport::valid(),
         );
 
         assert_eq!(dashboard.tunnels[0].id, "aaa-cache");
         assert!(!dashboard.tunnels[0].is_favorite);
         assert_eq!(dashboard.tunnels[1].id, "zzz-db");
         assert!(dashboard.tunnels[1].is_favorite);
+        assert!(
+            dashboard
+                .tunnels
+                .iter()
+                .all(|tunnel| tunnel.shared.is_none())
+        );
     }
 
     /// 自動復旧状態がトンネル一覧の名前順に影響しないことを検証する
@@ -8530,15 +8934,82 @@ hide_tracked_runtime_bar = true
 
         let dashboard = build_dashboard_state(
             paths,
-            EffectiveConfig::new(Vec::new(), vec![regular, watched]),
+            &EffectiveConfig::new(Vec::new(), vec![regular, watched]),
             Vec::new(),
-            ValidationReport::valid(),
+            &ValidationReport::valid(),
         );
 
         assert_eq!(dashboard.tunnels[0].id, "aaa-cache");
         assert!(!dashboard.tunnels[0].auto_recover_enabled);
         assert_eq!(dashboard.tunnels[1].id, "zzz-db");
         assert!(dashboard.tunnels[1].auto_recover_enabled);
+    }
+
+    /// local override で無効化したトンネルが Dashboard に差分情報付きで残ることを検証する
+    #[test]
+    fn dashboard_keeps_local_tunnel_disabled_by_override() {
+        let workspace = TempDir::new().expect("create workspace");
+        let local_config_path = workspace.path().join("fwd-deck.toml");
+        let paths = ConfigPaths::new(None, local_config_path.clone());
+        let mut shared = tunnel_config("db", 15432);
+        shared.description = Some("Shared database".to_owned());
+        add_tunnel_to_config_file(&local_config_path, ConfigSourceKind::Local, shared)
+            .expect("write local tunnel");
+        let mut tunnel_override = TunnelConfigOverride::new("db".to_owned());
+        tunnel_override.enabled = Some(false);
+        tunnel_override.description = Some("My database".to_owned());
+        upsert_tunnel_override_in_config_file(&paths.local_override, tunnel_override)
+            .expect("write local override");
+        let config = load_effective_config(&paths).expect("load effective configuration");
+
+        let dashboard = build_dashboard_state(
+            runtime_paths_for_local_config(local_config_path),
+            &config,
+            Vec::new(),
+            &ValidationReport::valid(),
+        );
+
+        assert_eq!(dashboard.tunnels.len(), 1);
+        assert!(!dashboard.tunnels[0].enabled);
+        assert!(dashboard.tunnels[0].is_overridden);
+        assert_eq!(
+            dashboard.tunnels[0].description.as_deref(),
+            Some("My database")
+        );
+        assert_eq!(
+            dashboard.tunnels[0]
+                .shared
+                .as_ref()
+                .and_then(|shared| shared.description.as_deref()),
+            Some("Shared database")
+        );
+        assert_eq!(
+            dashboard.tunnels[0].override_path.as_deref(),
+            Some(display_path(&paths.local_override).as_str())
+        );
+    }
+
+    /// 編集フォームの共有値との差分だけが local override として生成されることを検証する
+    #[test]
+    fn tunnel_override_from_form_keeps_only_personal_differences() {
+        let mut base = tunnel_config("db", 15432);
+        base.description = Some("Shared database".to_owned());
+        base.tags = vec!["shared".to_owned()];
+        let mut edited = base.clone();
+        edited.enabled = false;
+        edited.description = Some("My database".to_owned());
+        edited.tags.clear();
+        let mut existing = TunnelConfigOverride::new("db".to_owned());
+        existing.timeouts.connect_timeout_seconds = Some(5);
+
+        let tunnel_override = tunnel_override_from_form(&base, &edited, Some(&existing));
+
+        assert_eq!(tunnel_override.enabled, Some(false));
+        assert_eq!(tunnel_override.description.as_deref(), Some("My database"));
+        assert_eq!(tunnel_override.tags, Some(Vec::new()));
+        assert_eq!(tunnel_override.local_port, None);
+        assert_eq!(tunnel_override.remote_host, None);
+        assert_eq!(tunnel_override.timeouts.connect_timeout_seconds, Some(5));
     }
 
     /// 編集時にお気に入り runtime ID が新しい ID へ引き継がれることを検証する
@@ -10624,9 +11095,9 @@ hide_tracked_runtime_bar = true
 
         let dashboard = build_dashboard_state(
             paths,
-            EffectiveConfig::new(Vec::new(), Vec::new()),
+            &EffectiveConfig::new(Vec::new(), Vec::new()),
             statuses,
-            ValidationReport::valid(),
+            &ValidationReport::valid(),
         );
 
         let runtime_keys = dashboard

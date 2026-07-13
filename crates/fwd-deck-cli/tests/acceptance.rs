@@ -74,6 +74,75 @@ fn list_json_outputs_configured_tunnels() {
     assert_eq!(json["tunnels"][0]["localPort"], 16379);
 }
 
+/// local override の指定項目と読み込み元が JSON 出力へ反映されることを検証する
+#[test]
+fn list_json_applies_local_override() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(valid_config());
+    workspace.write_override(
+        r#"
+[[tunnels]]
+name = "dev-db"
+description = "My development database"
+tags = []
+local_port = 25432
+"#,
+    );
+
+    let output = workspace.run(["--json", "list", "--query", "my development"]);
+
+    assert!(output.status.success());
+    let json = output.stdout_json();
+    assert_eq!(json["tunnels"][0]["name"], "dev-db");
+    assert_eq!(json["tunnels"][0]["description"], "My development database");
+    assert_eq!(json["tunnels"][0]["tags"], serde_json::json!([]));
+    assert_eq!(json["tunnels"][0]["localPort"], 25432);
+    assert_eq!(
+        json["tunnels"][0]["overridePath"],
+        workspace.override_path_str()
+    );
+}
+
+/// local override で無効化したトンネルが通常一覧から除外されることを検証する
+#[test]
+fn list_excludes_tunnel_disabled_by_local_override() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(valid_config());
+    workspace.write_override(
+        r#"
+[[tunnels]]
+name = "dev-db"
+enabled = false
+"#,
+    );
+
+    let output = workspace.run(["list"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_not_contains("dev-db");
+    output.assert_stdout_contains("prod-cache");
+}
+
+/// local設定に存在しない override が警告されても検証は成功することを検証する
+#[test]
+fn validate_warns_for_unmatched_local_override() {
+    let workspace = TestWorkspace::new();
+    workspace.write_config(valid_config());
+    workspace.write_override(
+        r#"
+[[tunnels]]
+name = "missing"
+enabled = false
+"#,
+    );
+
+    let output = workspace.run(["validate"]);
+
+    assert!(output.status.success());
+    output.assert_stdout_contains("Configuration is valid with warnings.");
+    output.assert_stdout_contains("Override name was not found in local configuration");
+}
+
 /// disabled なトンネルが list と list --json から除外されることを検証する
 #[test]
 fn list_excludes_disabled_tunnels() {
@@ -889,6 +958,7 @@ fn status_displays_stale_when_tracked_pid_does_not_listen_on_local_port() {
 struct TestWorkspace {
     temp_dir: TempDir,
     config_path: PathBuf,
+    override_path: PathBuf,
     state_path: PathBuf,
 }
 
@@ -897,11 +967,13 @@ impl TestWorkspace {
     fn new() -> Self {
         let temp_dir = TempDir::new().expect("create temporary directory");
         let config_path = temp_dir.path().join("fwd-deck.toml");
+        let override_path = temp_dir.path().join("fwd-deck.override.toml");
         let state_path = temp_dir.path().join("state.toml");
 
         Self {
             temp_dir,
             config_path,
+            override_path,
             state_path,
         }
     }
@@ -909,6 +981,11 @@ impl TestWorkspace {
     /// テスト用設定ファイルを書き込む
     fn write_config(&self, content: &str) {
         fs::write(&self.config_path, content).expect("write test configuration");
+    }
+
+    /// テスト用 local override ファイルを書き込む
+    fn write_override(&self, content: &str) {
+        fs::write(&self.override_path, content).expect("write test local override");
     }
 
     /// テスト用状態ファイルを書き込む
@@ -994,6 +1071,13 @@ impl TestWorkspace {
         self.config_path
             .to_str()
             .expect("configuration path must be valid UTF-8")
+    }
+
+    /// local override ファイルのパスを CLI 引数用文字列として取得する
+    fn override_path_str(&self) -> &str {
+        self.override_path
+            .to_str()
+            .expect("local override path must be valid UTF-8")
     }
 
     /// 状態ファイルのパスを取得する

@@ -25,18 +25,22 @@ fwd-deck open ~/projects/my-service
 
 ## Configuration Files
 
-既定では次の2つの設定ファイルを読み込みます。
+既定では次の設定ファイルを読み込みます。
 
 | 種別 | パス | 用途 |
 | --- | --- | --- |
 | global | `~/.config/fwd-deck/config.toml` | 複数プロジェクトで共有する設定 |
 | local | `./fwd-deck.toml` | 作業ディレクトリ固有の設定 |
+| local override | `./fwd-deck.override.toml` | local設定の環境固有の上書き |
 
 同じ `name` はローカル設定とグローバル設定の両方に共存できます。  
 スコープなしの `name` を指定する操作ではローカル設定が優先され、グローバル設定を対象にする場合は `--scope global` を指定します。
 
 CLI のローカル設定は、実行時の作業ディレクトリにある `./fwd-deck.toml` を基準にします。  
 `fwd-deck open` で開いた macOSアプリは、指定した Workspace 配下の `fwd-deck.toml` をローカル設定として扱います。
+
+`--config ./my-fwd-deck.toml` を指定した場合、local override は同じディレクトリの `./my-fwd-deck.override.toml` です。  
+local override のパスは local設定のパスから自動決定され、グローバル設定には適用されません。
 
 ## Configuration Format
 
@@ -90,6 +94,26 @@ connect_timeout_seconds = 10
 ローカル設定とグローバル設定の間で同じ `name` や `local_port` を使う設定は許容されます。  
 同じ `local_port` のトンネルを同時に起動しようとした場合、後から起動した側がローカルエンドポイント使用中として失敗します。  
 `local_port` が `1024` 未満の場合、`validate` は権限が必要になる可能性を警告として表示します。
+
+### Local Override Format
+
+`fwd-deck.override.toml` は、Git で共有する `fwd-deck.toml` に対する環境固有の差分を保持します。  
+`name` が一致する localトンネルだけが対象になり、`name` 以外の Tunnel Fields とトンネル単位の Timeout Fields を上書きできます。
+たとえば共有設定のポート番号が自分の環境で競合する場合、`local_port` だけを別の番号へ差し替えられます。
+
+```toml
+[[tunnels]]
+name = "dev-db"
+local_port = 25432
+```
+
+記述しないフィールドは `fwd-deck.toml` の値を継承し、具体値を記述したフィールドだけを置き換えます。  
+`tags = []` はタグを空にします。  
+local override ではトップレベルの `[timeouts]` を指定できません。
+
+local設定に存在しない `name` は警告を表示して無視します。  
+同じ `name` の重複、未知のフィールド、値の型違いは検証エラーです。  
+`enabled = false` にしたトンネルは CLI の通常操作対象から除外されます。
 
 ### Timeout Fields
 
@@ -289,6 +313,8 @@ fwd-deck config remove --scope global
 `config add` は対象ファイルが存在しない場合に新規作成し、既定値の `[timeouts]` も書き込みます。  
 同一設定ファイル内で重複する `name` と `local_port` は入力時に拒否します。  
 `config edit` は既存値を初期値として表示し、空入力は既存値の維持として扱います。  
+local設定に対する `config edit` は共有側の `fwd-deck.toml` を編集し、`name` を変更した場合は対応する local override のキーも追従します。  
+local設定に対する `config remove` は共有側の項目と同じ `name` の local override を削除します。  
 同じ `name` がローカル設定とグローバル設定の両方に存在する場合、対話実行時は編集対象を選択します。  
 非対話実行時は `--scope` を指定します。
 
@@ -364,4 +390,5 @@ fwd-deck doctor
 ## JSON Output
 
 `--json` は `list`, `show`, `status`, `validate`, `start --dry-run` で利用できます。  
-通常のメッセージではなく機械処理向けの JSON を標準出力へ表示します。
+通常のメッセージではなく機械処理向けの JSON を標準出力へ表示します。  
+トンネルに local override が適用されている場合、`overridePath` にそのパスを出力します。適用されていない場合は `null` です。

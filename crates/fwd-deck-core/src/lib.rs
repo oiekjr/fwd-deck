@@ -10,12 +10,16 @@ pub use config::{
     ConfigEditError, ConfigLoadError, ConfigPaths, ConfigSource, ConfigSourceKind,
     DEFAULT_CONNECT_TIMEOUT_SECONDS, DEFAULT_LOCAL_HOST, DEFAULT_SERVER_ALIVE_COUNT_MAX,
     DEFAULT_SERVER_ALIVE_INTERVAL_SECONDS, DEFAULT_START_GRACE_MILLISECONDS, EffectiveConfig,
-    LoadedConfigFile, ResolvedTimeoutConfig, ResolvedTunnelConfig, TimeoutConfig, TunnelConfig,
-    ValidationError, ValidationReport, ValidationWarning, add_tunnel_to_config_file,
-    add_tunnels_to_config_file, default_global_config_path, default_local_config_path,
-    filter_tunnels_by_tags, filter_tunnels_excluding_tags, load_effective_config, normalize_tag,
-    normalize_tags, read_config_file, remove_tunnel_from_config_file, tag_is_valid,
-    tunnel_matches_tags, update_tunnel_in_config_file, validate_config,
+    LoadedConfigFile, LoadedConfigOverrideFile, ResolvedTimeoutConfig, ResolvedTunnelConfig,
+    TimeoutConfig, TunnelConfig, TunnelConfigOverride, ValidationError, ValidationReport,
+    ValidationWarning, add_tunnel_to_config_file, add_tunnels_to_config_file,
+    default_global_config_path, default_local_config_path, filter_tunnels_by_tags,
+    filter_tunnels_excluding_tags, load_effective_config, local_override_config_path,
+    normalize_tag, normalize_tags, read_config_file, read_config_override_file,
+    remove_tunnel_and_override_from_config_files, remove_tunnel_from_config_file,
+    remove_tunnel_override_from_config_file, tag_is_valid, tunnel_matches_tags,
+    update_tunnel_and_override_name_in_config_files, update_tunnel_in_config_file,
+    upsert_tunnel_override_in_config_file, validate_config,
 };
 pub use path_display::{format_path_for_display, format_path_for_display_with_home};
 pub use ssh_import::{

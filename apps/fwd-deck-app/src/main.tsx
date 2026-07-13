@@ -29,6 +29,7 @@ import {
   CircleStop,
   Clock3,
   Copy,
+  FileDiff,
   FolderOpen,
   Gauge,
   KeyRound,
@@ -70,11 +71,13 @@ import "./styles.css";
 
 type ConfigScope = "local" | "global";
 
+type ConfigEditLayer = "shared" | "override";
+
 type RuntimeState = "running" | "stale";
 
 type RuntimeScope = "global" | "workspace";
 
-type TunnelStatus = RuntimeState | "idle";
+type TunnelStatus = RuntimeState | "idle" | "disabled";
 
 type TagFilterMode = "any" | "all";
 
@@ -117,6 +120,7 @@ type AppCommand =
   | "duplicate_tunnel_entry"
   | "update_tunnel_entry"
   | "remove_tunnel_entry"
+  | "remove_tunnel_override_entry"
   | "set_tunnel_favorite"
   | "set_tunnel_auto_recover"
   | "remove_workspace_history_entry"
@@ -130,6 +134,7 @@ interface WorkspaceSelection {
   workspacePath: string;
   workspaceHistory: string[];
   localConfigPath: string;
+  localOverrideConfigPath: string;
   globalConfigPath: string;
   useGlobal: boolean;
   globalStatePath: string;
@@ -215,6 +220,9 @@ interface ValidationIssueView {
 interface TunnelView {
   id: string;
   runtimeId: string;
+  enabled: boolean;
+  isOverridden: boolean;
+  overridePath: string | null;
   isFavorite: boolean;
   autoRecoverEnabled: boolean;
   description: string | null;
@@ -232,8 +240,23 @@ interface TunnelView {
   identityFile: string | null;
   source: ConfigScope;
   sourcePath: string;
+  shared?: TunnelDefinitionView;
   timeouts: TimeoutView;
   status: RuntimeStatusView | null;
+}
+
+interface TunnelDefinitionView {
+  enabled: boolean;
+  description: string | null;
+  tags: string[];
+  localHost: string;
+  localPort: number;
+  remoteHost: string;
+  remotePort: number;
+  sshUser: string;
+  sshHost: string;
+  sshPort: number | null;
+  identityFile: string | null;
 }
 
 interface TrackedTunnelView {
@@ -288,6 +311,7 @@ interface OperationFailureView {
 interface TunnelFormState {
   scope: ConfigScope;
   id: string;
+  enabled: boolean;
   description: string;
   tags: string;
   localHost: string;
@@ -302,6 +326,7 @@ interface TunnelFormState {
 
 interface TunnelInput {
   id: string;
+  enabled: boolean;
   description: string | null;
   tags: string[];
   localHost: string;
@@ -367,8 +392,8 @@ interface TunnelImportDraft {
 }
 
 type DuplicateTunnelFormState = TunnelFormState;
-type DuplicateTunnelInput = TunnelInput;
-type DuplicateTunnelEditableField = keyof DuplicateTunnelFormState;
+type DuplicateTunnelInput = Omit<TunnelInput, "enabled" | "timeouts">;
+type DuplicateTunnelEditableField = Exclude<keyof DuplicateTunnelFormState, "enabled">;
 type SshImportFormField = keyof SshImportFormState;
 type TunnelImportDraftEditableField = Exclude<keyof TunnelImportDraft, "timeouts">;
 
@@ -491,6 +516,7 @@ const initialPaths: WorkspaceSelection = {
   workspacePath: "",
   workspaceHistory: [],
   localConfigPath: "",
+  localOverrideConfigPath: "",
   globalConfigPath: "",
   useGlobal: true,
   globalStatePath: "",
@@ -503,6 +529,7 @@ const initialPaths: WorkspaceSelection = {
 const initialForm: TunnelFormState = {
   scope: "local",
   id: "",
+  enabled: true,
   description: "",
   tags: "",
   localHost: "127.0.0.1",
@@ -530,6 +557,7 @@ const allStatusFilters = [
   "running",
   "stale",
   "idle",
+  "disabled",
 ] as const satisfies ReadonlyArray<TunnelStatus>;
 const allScopeFilters = ["local", "global"] as const satisfies ReadonlyArray<ConfigScope>;
 
@@ -596,6 +624,7 @@ const statusFilterOptions: ReadonlyArray<{ value: TunnelStatus; label: string }>
   { value: "running", label: "Running" },
   { value: "stale", label: "Stale" },
   { value: "idle", label: "Idle" },
+  { value: "disabled", label: "Disabled" },
 ];
 
 const scopeFilterOptions: ReadonlyArray<{ value: ConfigScope; label: string }> = [
@@ -628,6 +657,7 @@ function App(): ReactElement {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<TunnelView | null>(null);
   const [editTarget, setEditTarget] = useState<TunnelView | null>(null);
+  const [editLayer, setEditLayer] = useState<ConfigEditLayer>("override");
   const [editForm, setEditForm] = useState<TunnelFormState>(initialForm);
   const [duplicateTarget, setDuplicateTarget] = useState<TunnelView | null>(null);
   const [duplicateForm, setDuplicateForm] =
@@ -687,6 +717,7 @@ function App(): ReactElement {
   );
   const filteredTunnelIds = visibleSelectionSummary.ids;
   const selectedVisibleCount = visibleSelectionSummary.selectedCount;
+  const selectableVisibleCount = filteredTunnelIds.length;
   const hasActiveFilters = useMemo<boolean>(
     () => hasActiveTunnelFilters(filters) || queryInput.trim().length > 0,
     [filters, queryInput],
@@ -1518,6 +1549,7 @@ function App(): ReactElement {
       const loaded = await invokeCommand<DashboardState>("update_tunnel_entry", {
         paths: normalizeWorkspaceSelection(paths),
         scope: editTarget.source,
+        layer: editLayer,
         id: editTarget.id,
         tunnel,
       });
@@ -1531,6 +1563,7 @@ function App(): ReactElement {
       setPaths((current) => reconcileWorkspaceSelection(current, loaded.paths));
       setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
       setEditTarget(null);
+      setEditLayer("override");
       setEditFormFeedback(null);
       showOperationToast({ kind: "success", summary: `${tunnel.id} を設定に反映しました` });
     } catch (error) {
@@ -1565,6 +1598,33 @@ function App(): ReactElement {
       showOperationToast({ kind: "success", summary: `${tunnel.id} を設定から削除しました` });
     } catch (error) {
       showOperationToast({ kind: "error", summary: stringifyError(error) });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  /**
+   * local override の個人設定を解除する
+   */
+  async function removeTunnelOverride(tunnel: TunnelView): Promise<void> {
+    setEditFormFeedback(null);
+    setIsBusy(true);
+
+    try {
+      const loaded = await invokeCommand<DashboardState>("remove_tunnel_override_entry", {
+        paths: normalizeWorkspaceSelection(paths),
+        id: tunnel.id,
+      });
+
+      setDashboard((current) => reconcileDashboardState(current, loaded));
+      updateRuntimeNowForDashboard(loaded);
+      setPaths((current) => reconcileWorkspaceSelection(current, loaded.paths));
+      setSelectedIds((current) => keepExistingSelections(current, loaded.tunnels));
+      setEditTarget(null);
+      setEditLayer("override");
+      showOperationToast({ kind: "success", summary: `${tunnel.id} の override を解除しました` });
+    } catch (error) {
+      setEditFormFeedback({ kind: "error", text: stringifyError(error) });
     } finally {
       setIsBusy(false);
     }
@@ -1952,7 +2012,10 @@ function App(): ReactElement {
   /**
    * 追加フォームの変更を反映する
    */
-  function updateForm(field: keyof TunnelFormState, value: string): void {
+  function updateForm(
+    field: keyof TunnelFormState,
+    value: TunnelFormState[keyof TunnelFormState],
+  ): void {
     setFormFeedback(null);
     setForm((current) => ({ ...current, [field]: value }));
   }
@@ -1995,7 +2058,10 @@ function App(): ReactElement {
   /**
    * 編集フォームの変更を反映する
    */
-  function updateEditForm(field: keyof TunnelFormState, value: string): void {
+  function updateEditForm(
+    field: keyof TunnelFormState,
+    value: TunnelFormState[keyof TunnelFormState],
+  ): void {
     setEditFormFeedback(null);
     setEditForm((current) => ({ ...current, [field]: value }));
   }
@@ -2027,8 +2093,23 @@ function App(): ReactElement {
    * 指定トンネルを編集対象として開く
    */
   function openEditTunnel(tunnel: TunnelView): void {
+    const layer: ConfigEditLayer = tunnel.source === "local" ? "override" : "shared";
     setEditTarget(tunnel);
-    setEditForm(formFromTunnel(tunnel));
+    setEditLayer(layer);
+    setEditForm(formFromTunnel(tunnel, layer));
+    setEditFormFeedback(null);
+  }
+
+  /**
+   * 編集対象レイヤーを切り替えて対応する初期値を表示する
+   */
+  function changeEditLayer(layer: ConfigEditLayer): void {
+    if (editTarget === null || (editTarget.source === "global" && layer === "override")) {
+      return;
+    }
+
+    setEditLayer(layer);
+    setEditForm(formFromTunnel(editTarget, layer));
     setEditFormFeedback(null);
   }
 
@@ -2230,6 +2311,12 @@ function App(): ReactElement {
   const handleSubmitEditedTunnel = useStableEvent((event: FormEvent<HTMLFormElement>): void => {
     void submitEditedTunnel(event);
   });
+  const handleChangeEditLayer = useStableEvent((layer: ConfigEditLayer): void => {
+    changeEditLayer(layer);
+  });
+  const handleRemoveTunnelOverride = useStableEvent((tunnel: TunnelView): void => {
+    void removeTunnelOverride(tunnel);
+  });
   const handleBrowseEditIdentityFile = useStableEvent((): void => {
     void browseEditIdentityFile();
   });
@@ -2290,6 +2377,7 @@ function App(): ReactElement {
               selectedIds={selectedIds}
               selectedCount={selectedIdList.length}
               selectedVisibleCount={selectedVisibleCount}
+              selectableVisibleCount={selectableVisibleCount}
               availableTags={availableTags}
               operationProgress={operationProgress}
               runtimeNowUnixSeconds={runtimeNowUnixSeconds}
@@ -2380,13 +2468,18 @@ function App(): ReactElement {
       />
       <EditTunnelModal
         tunnel={editTarget}
+        layer={editLayer}
         form={editForm}
+        localOverridePath={paths.localOverrideConfigPath}
         homePath={homePath}
         feedback={editFormFeedback}
         isBusy={isBusy}
         onChange={updateEditForm}
+        onLayerChange={handleChangeEditLayer}
+        onRemoveOverride={handleRemoveTunnelOverride}
         onCancel={() => {
           setEditTarget(null);
+          setEditLayer("override");
           setEditFormFeedback(null);
         }}
         onSubmit={handleSubmitEditedTunnel}
@@ -2861,6 +2954,7 @@ interface DashboardViewProps {
   selectedIds: Set<string>;
   selectedCount: number;
   selectedVisibleCount: number;
+  selectableVisibleCount: number;
   availableTags: string[];
   operationProgress: OperationProgress | null;
   runtimeNowUnixSeconds: number;
@@ -2908,6 +3002,7 @@ const DashboardView = memo(function DashboardView({
   selectedIds,
   selectedCount,
   selectedVisibleCount,
+  selectableVisibleCount,
   availableTags,
   operationProgress,
   runtimeNowUnixSeconds,
@@ -2947,7 +3042,7 @@ const DashboardView = memo(function DashboardView({
   const shouldShowTrackedPanel =
     (dashboard?.paths.showTrackedRuntimeBar ?? true) && hasTrackedRuntime;
   const hasSelection = selectedCount > 0;
-  const shouldShowSelectionActionBar = hasSelection || filteredTunnels.length > 0;
+  const shouldShowSelectionActionBar = hasSelection || selectableVisibleCount > 0;
   const [selectionBarRef, selectionBarHeight] = useMeasuredElementHeight<HTMLDivElement>(
     shouldShowSelectionActionBar,
   );
@@ -2985,6 +3080,7 @@ const DashboardView = memo(function DashboardView({
         homePath={homePath}
         selectedIds={selectedIds}
         selectedVisibleCount={selectedVisibleCount}
+        selectableVisibleCount={selectableVisibleCount}
         runtimeNowUnixSeconds={runtimeNowUnixSeconds}
         favoriteUpdatingIds={favoriteUpdatingIds}
         autoRecoverUpdatingIds={autoRecoverUpdatingIds}
@@ -3018,7 +3114,7 @@ const DashboardView = memo(function DashboardView({
         <SelectionActionBar
           isVisible={shouldShowSelectionActionBar}
           selectedCount={selectedCount}
-          visibleCount={filteredTunnels.length}
+          visibleCount={selectableVisibleCount}
           selectedVisibleCount={selectedVisibleCount}
           panelRef={selectionBarRef}
           operationProgress={operationProgress}
@@ -3045,7 +3141,7 @@ interface AddTunnelViewProps {
   canUseLocal: boolean;
   isBusy: boolean;
   onModeChange: (mode: AddTunnelMode) => void;
-  onChange: (field: keyof TunnelFormState, value: string) => void;
+  onChange: (field: keyof TunnelFormState, value: TunnelFormState[keyof TunnelFormState]) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onSshImportFormChange: (field: SshImportFormField, value: string | boolean) => void;
   onSshImportDraftChange: (
@@ -3666,6 +3762,11 @@ function PathPanel({
           <h3 className="text-sm font-bold">Configuration files</h3>
         </div>
         <ReadonlyPathField label="Local config" value={paths.localConfigPath} homePath={homePath} />
+        <ReadonlyPathField
+          label="Local override"
+          value={paths.localOverrideConfigPath}
+          homePath={homePath}
+        />
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
           <TextField
             label="Global config"
@@ -4380,7 +4481,7 @@ const TunnelOperationsPanel = memo(function TunnelOperationsPanel({
           </HeroTextField>
 
           <div
-            className="grid grid-cols-3 gap-0.5 rounded-lg border border-border bg-muted p-0.5"
+            className="grid grid-cols-4 gap-0.5 rounded-lg border border-border bg-muted p-0.5"
             role="group"
             aria-label="Status filters"
           >
@@ -5002,6 +5103,7 @@ interface TunnelDeckProps {
   homePath: string | null;
   selectedIds: Set<string>;
   selectedVisibleCount: number;
+  selectableVisibleCount: number;
   runtimeNowUnixSeconds: number;
   favoriteUpdatingIds: Set<string>;
   autoRecoverUpdatingIds: Set<string>;
@@ -5033,6 +5135,7 @@ const TunnelDeck = memo(function TunnelDeck({
   homePath,
   selectedIds,
   selectedVisibleCount,
+  selectableVisibleCount,
   runtimeNowUnixSeconds,
   favoriteUpdatingIds,
   autoRecoverUpdatingIds,
@@ -5101,6 +5204,7 @@ const TunnelDeck = memo(function TunnelDeck({
         query={filters.query}
         selectedIds={selectedIds}
         selectedVisibleCount={selectedVisibleCount}
+        selectableVisibleCount={selectableVisibleCount}
         runtimeNowUnixSeconds={runtimeNowUnixSeconds}
         favoriteUpdatingIds={favoriteUpdatingIds}
         autoRecoverUpdatingIds={autoRecoverUpdatingIds}
@@ -5151,6 +5255,7 @@ interface TunnelSlimListProps {
   query: string;
   selectedIds: Set<string>;
   selectedVisibleCount: number;
+  selectableVisibleCount: number;
   runtimeNowUnixSeconds: number;
   favoriteUpdatingIds: Set<string>;
   autoRecoverUpdatingIds: Set<string>;
@@ -5175,6 +5280,7 @@ function TunnelSlimList({
   query,
   selectedIds,
   selectedVisibleCount,
+  selectableVisibleCount,
   runtimeNowUnixSeconds,
   favoriteUpdatingIds,
   autoRecoverUpdatingIds,
@@ -5190,8 +5296,8 @@ function TunnelSlimList({
   onDuplicate,
   onRemove,
 }: TunnelSlimListProps): ReactElement {
-  const visibleCount = tunnels.length;
-  const isAllVisibleSelected = visibleCount > 0 && selectedVisibleCount === visibleCount;
+  const isAllVisibleSelected =
+    selectableVisibleCount > 0 && selectedVisibleCount === selectableVisibleCount;
   const isPartiallyVisibleSelected = selectedVisibleCount > 0 && !isAllVisibleSelected;
   const headerSelectionLabel = isAllVisibleSelected
     ? "表示中のトンネル選択を解除"
@@ -5229,7 +5335,7 @@ function TunnelSlimList({
                   label={headerSelectionLabel}
                   isSelected={isAllVisibleSelected}
                   isIndeterminate={isPartiallyVisibleSelected}
-                  isDisabled={isBusy || visibleCount === 0}
+                  isDisabled={isBusy || selectableVisibleCount === 0}
                   onChange={toggleVisibleSelection}
                 />
               </Table.Column>
@@ -5319,7 +5425,7 @@ const TunnelSlimRow = memo(function TunnelSlimRow({
   onRemove,
 }: TunnelSlimRowProps): ReactElement {
   const running = tunnel.status?.state === "running";
-  const status = tunnel.status?.state ?? "idle";
+  const status = tunnelStatus(tunnel);
   const runtimeInfo = tunnel.status
     ? runtimeDisplayInfo(tunnel.status, runtimeNowUnixSeconds)
     : null;
@@ -5335,11 +5441,18 @@ const TunnelSlimRow = memo(function TunnelSlimRow({
         <SelectionCheckbox
           label={`${tunnel.id} を選択`}
           isSelected={checked}
+          isDisabled={isBusy || !tunnel.enabled}
           onChange={() => onToggle(tunnel.runtimeId)}
         />
       </Table.Cell>
       <Table.Cell className="tunnel-slim-sticky-cell tunnel-slim-sticky-name tunnel-slim-name-column">
-        <TunnelSlimIdentity id={tunnel.id} source={tunnel.source} query={highlightQuery} />
+        <TunnelSlimIdentity
+          id={tunnel.id}
+          source={tunnel.source}
+          isOverridden={tunnel.isOverridden}
+          overridePath={tunnel.overridePath}
+          query={highlightQuery}
+        />
       </Table.Cell>
       <Table.Cell className="tunnel-slim-sticky-cell tunnel-slim-sticky-status tunnel-slim-status-column">
         <StatusBadge
@@ -5380,7 +5493,7 @@ const TunnelSlimRow = memo(function TunnelSlimRow({
             variant={running ? "ghost" : "primary"}
             className="h-7 w-7 gap-1.5 min-[72rem]:w-auto min-[72rem]:px-2"
             onPress={() => onStart(tunnel.runtimeId)}
-            disabled={isBusy || running}
+            disabled={isBusy || running || !tunnel.enabled}
           >
             <Play size={13} />
             <span className="hidden min-[72rem]:inline">Start</span>
@@ -5431,13 +5544,21 @@ const TunnelSlimRow = memo(function TunnelSlimRow({
 interface TunnelSlimIdentityProps {
   id: string;
   source: ConfigScope;
+  isOverridden: boolean;
+  overridePath: string | null;
   query: string;
 }
 
 /**
  * スリム一覧内の識別名をホバー時に全文確認できる形で表示する
  */
-function TunnelSlimIdentity({ id, source, query }: TunnelSlimIdentityProps): ReactElement {
+function TunnelSlimIdentity({
+  id,
+  source,
+  isOverridden,
+  overridePath,
+  query,
+}: TunnelSlimIdentityProps): ReactElement {
   return (
     <div className="tunnel-slim-identity">
       <div className="tunnel-slim-identity-name text-sm leading-5 font-bold">
@@ -5446,12 +5567,40 @@ function TunnelSlimIdentity({ id, source, query }: TunnelSlimIdentityProps): Rea
       <div aria-hidden className="tunnel-slim-identity-reveal text-sm leading-5 font-bold">
         <HighlightedText text={id} query={query} />
       </div>
-      <div className="mt-1">
+      <div className="mt-1 flex items-center gap-1">
         <span className="inline-flex h-4 max-w-full items-center truncate rounded-sm bg-muted px-1.5 text-[10px] leading-4 font-semibold text-foreground/55">
           <HighlightedText text={source} query={query} />
         </span>
+        {isOverridden ? <OverrideBadge overridePath={overridePath} compact /> : null}
       </div>
     </div>
+  );
+}
+
+interface OverrideBadgeProps {
+  overridePath: string | null;
+  compact?: boolean;
+}
+
+/**
+ * local override の適用状態を差分アイコン付きバッジで表示する
+ */
+function OverrideBadge({ overridePath, compact = false }: OverrideBadgeProps): ReactElement {
+  return (
+    <Chip
+      className={
+        compact
+          ? "h-4 shrink-0 gap-0.5 rounded-sm border-violet-500/40 bg-violet-500/15 px-1.5 py-0 text-[10px] leading-4 font-semibold text-violet-800"
+          : "shrink-0 gap-1 border-violet-500/40 bg-violet-500/15 text-violet-800"
+      }
+      color="accent"
+      size="sm"
+      variant="soft"
+      title={overridePath ?? undefined}
+    >
+      <FileDiff aria-hidden size={compact ? 10 : 12} />
+      Overridden
+    </Chip>
   );
 }
 
@@ -5520,7 +5669,7 @@ const TunnelCard = memo(function TunnelCard({
   onRemove,
 }: TunnelCardProps): ReactElement {
   const running = tunnel.status?.state === "running";
-  const status = tunnel.status?.state ?? "idle";
+  const status = tunnelStatus(tunnel);
   const highlightQuery = query.trim();
   const sourceDisplayPath = formatPathForDisplay(tunnel.sourcePath, homePath);
   const runtimeInfo = tunnel.status
@@ -5546,6 +5695,7 @@ const TunnelCard = memo(function TunnelCard({
           <Checkbox
             className="min-w-0 flex-1 items-start gap-3"
             isSelected={checked}
+            isDisabled={isBusy || !tunnel.enabled}
             onChange={() => onToggle(tunnel.runtimeId)}
           >
             <Checkbox.Control className="mt-1">
@@ -5561,6 +5711,7 @@ const TunnelCard = memo(function TunnelCard({
             </Checkbox.Content>
           </Checkbox>
           <div className="flex shrink-0 items-center gap-1">
+            {tunnel.isOverridden ? <OverrideBadge overridePath={tunnel.overridePath} /> : null}
             <FavoriteButton
               isFavorite={tunnel.isFavorite}
               onPress={() => onToggleFavorite(tunnel)}
@@ -5602,7 +5753,7 @@ const TunnelCard = memo(function TunnelCard({
             variant={running ? "ghost" : "primary"}
             size="sm"
             onPress={() => onStart(tunnel.runtimeId)}
-            isDisabled={isBusy || running}
+            isDisabled={isBusy || running || !tunnel.enabled}
           >
             <Play size={15} />
             Start
@@ -5674,7 +5825,7 @@ function AutoRecoverSwitch({
     <Switch
       size="sm"
       isSelected={tunnel.autoRecoverEnabled}
-      isDisabled={isBusy}
+      isDisabled={isBusy || !tunnel.enabled}
       onChange={() => {
         if (!isUpdating) {
           onToggle(tunnel);
@@ -5761,7 +5912,7 @@ const StatusBadge = memo(function StatusBadge({
     <Chip
       color={color}
       size="sm"
-      variant={status === "idle" ? "secondary" : "soft"}
+      variant={status === "idle" || status === "disabled" ? "secondary" : "soft"}
       title={title}
       aria-label={ariaLabel}
     >
@@ -6058,7 +6209,7 @@ interface TunnelFormProps {
   feedback: AppMessage | null;
   canUseLocal: boolean;
   isBusy: boolean;
-  onChange: (field: keyof TunnelFormState, value: string) => void;
+  onChange: (field: keyof TunnelFormState, value: TunnelFormState[keyof TunnelFormState]) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onOpenSettings: () => void;
   onBrowseIdentityFile: () => void;
@@ -6595,11 +6746,15 @@ interface ConfirmRemoveModalProps {
 
 interface EditTunnelModalProps {
   tunnel: TunnelView | null;
+  layer: ConfigEditLayer;
   form: TunnelFormState;
+  localOverridePath: string;
   homePath: string | null;
   feedback: AppMessage | null;
   isBusy: boolean;
-  onChange: (field: keyof TunnelFormState, value: string) => void;
+  onChange: (field: keyof TunnelFormState, value: TunnelFormState[keyof TunnelFormState]) => void;
+  onLayerChange: (layer: ConfigEditLayer) => void;
+  onRemoveOverride: (tunnel: TunnelView) => void;
   onCancel: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onBrowseIdentityFile: () => void;
@@ -6610,11 +6765,15 @@ interface EditTunnelModalProps {
  */
 function EditTunnelModal({
   tunnel,
+  layer,
   form,
+  localOverridePath,
   homePath,
   feedback,
   isBusy,
   onChange,
+  onLayerChange,
+  onRemoveOverride,
   onCancel,
   onSubmit,
   onBrowseIdentityFile,
@@ -6623,7 +6782,8 @@ function EditTunnelModal({
     return null;
   }
 
-  const sourceDisplayPath = formatPathForDisplay(tunnel.sourcePath, homePath);
+  const selectedPath = layer === "override" ? localOverridePath : tunnel.sourcePath;
+  const sourceDisplayPath = formatPathForDisplay(selectedPath, homePath);
 
   return (
     <Modal
@@ -6649,11 +6809,37 @@ function EditTunnelModal({
                   </div>
                   <p
                     className="mt-1 truncate font-mono text-xs text-foreground/55"
-                    title={tunnel.sourcePath}
+                    title={selectedPath}
                   >
                     {sourceDisplayPath}
                   </p>
                 </div>
+                {tunnel.source === "local" ? (
+                  <div className="grid w-full grid-cols-2 gap-0.5 rounded-lg border border-border bg-muted p-0.5 sm:w-72">
+                    <HeroButton
+                      type="button"
+                      variant={layer === "override" ? "primary" : "ghost"}
+                      size="sm"
+                      fullWidth
+                      onPress={() => onLayerChange("override")}
+                      isDisabled={isBusy}
+                      className="justify-center"
+                    >
+                      Personal override
+                    </HeroButton>
+                    <HeroButton
+                      type="button"
+                      variant={layer === "shared" ? "primary" : "ghost"}
+                      size="sm"
+                      fullWidth
+                      onPress={() => onLayerChange("shared")}
+                      isDisabled={isBusy}
+                      className="justify-center"
+                    >
+                      Shared config
+                    </HeroButton>
+                  </div>
+                ) : null}
               </div>
 
               <div className="max-h-[calc(100vh-13rem)] overflow-y-auto bg-muted/25 p-4">
@@ -6662,11 +6848,27 @@ function EditTunnelModal({
                   <TunnelDraftSummary form={form} />
                   <section className="flex flex-col gap-3">
                     <h4 className="text-xs font-medium text-muted-foreground">Identity</h4>
+                    <div className="rounded-lg border border-border bg-card px-3 py-2">
+                      <Switch
+                        size="sm"
+                        isSelected={form.enabled}
+                        onChange={(selected) => onChange("enabled", selected)}
+                        className="w-full justify-between"
+                      >
+                        <Switch.Content>
+                          <span className="text-sm font-semibold">Enabled</span>
+                        </Switch.Content>
+                        <Switch.Control>
+                          <Switch.Thumb />
+                        </Switch.Control>
+                      </Switch>
+                    </div>
                     <TextField
                       label="Name"
                       value={form.id}
                       onChange={(value) => onChange("id", value)}
                       required
+                      disabled={layer === "override"}
                     />
                     <TextField
                       label="Description"
@@ -6760,20 +6962,35 @@ function EditTunnelModal({
                 </div>
               </div>
 
-              <div className="flex justify-end gap-2 border-t border-border px-5 py-4">
-                <HeroButton
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onPress={onCancel}
-                  isDisabled={isBusy}
-                >
-                  Cancel
-                </HeroButton>
-                <HeroButton type="submit" variant="primary" size="sm" isDisabled={isBusy}>
-                  <Pencil size={16} />
-                  Save
-                </HeroButton>
+              <div className="flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  {layer === "override" && tunnel.source === "local" && tunnel.isOverridden ? (
+                    <HeroButton
+                      type="button"
+                      variant="danger-soft"
+                      size="sm"
+                      onPress={() => onRemoveOverride(tunnel)}
+                      isDisabled={isBusy}
+                    >
+                      Remove override
+                    </HeroButton>
+                  ) : null}
+                </div>
+                <div className="flex justify-end gap-2">
+                  <HeroButton
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onPress={onCancel}
+                    isDisabled={isBusy}
+                  >
+                    Cancel
+                  </HeroButton>
+                  <HeroButton type="submit" variant="primary" size="sm" isDisabled={isBusy}>
+                    <Pencil size={16} />
+                    {layer === "override" ? "Save override" : "Save shared config"}
+                  </HeroButton>
+                </div>
               </div>
             </form>
           </Modal.Dialog>
@@ -7035,7 +7252,11 @@ function ConfirmRemoveModal({
             <div className="px-5 py-4">
               <p className="text-sm leading-6 text-foreground/70 [overflow-wrap:anywhere]">
                 <span className="font-semibold">{tunnel.id}</span> を {tunnel.source}{" "}
-                設定から削除します。この操作は設定ファイルを書き換えます。
+                設定から削除します。
+                {tunnel.source === "local"
+                  ? "対応する local override がある場合は、同じ名前の上書きも削除します。"
+                  : "local 設定と local override には影響しません。"}
+                無効化とは異なり、設定項目そのものを削除します。
               </p>
             </div>
             <div className="flex justify-end gap-2 border-t border-border px-5 py-4">
@@ -7049,7 +7270,7 @@ function ConfirmRemoveModal({
                 onPress={() => onConfirm(tunnel)}
                 isDisabled={isBusy}
               >
-                Remove
+                Delete tunnel
               </HeroButton>
             </div>
           </Modal.Dialog>
@@ -7151,6 +7372,9 @@ function tunnelViewEquals(left: TunnelView, right: TunnelView): boolean {
   return (
     left.id === right.id &&
     left.runtimeId === right.runtimeId &&
+    left.enabled === right.enabled &&
+    left.isOverridden === right.isOverridden &&
+    left.overridePath === right.overridePath &&
     left.isFavorite === right.isFavorite &&
     left.autoRecoverEnabled === right.autoRecoverEnabled &&
     left.description === right.description &&
@@ -7168,8 +7392,45 @@ function tunnelViewEquals(left: TunnelView, right: TunnelView): boolean {
     left.identityFile === right.identityFile &&
     left.source === right.source &&
     left.sourcePath === right.sourcePath &&
+    optionalTunnelDefinitionViewEquals(left.shared, right.shared) &&
     timeoutViewEquals(left.timeouts, right.timeouts) &&
     runtimeStatusViewEquals(left.status, right.status)
+  );
+}
+
+/**
+ * 任意のトンネル本体表示モデルの値が一致するか判定する
+ */
+function optionalTunnelDefinitionViewEquals(
+  left: TunnelDefinitionView | undefined,
+  right: TunnelDefinitionView | undefined,
+): boolean {
+  if (left === undefined || right === undefined) {
+    return left === right;
+  }
+
+  return tunnelDefinitionViewEquals(left, right);
+}
+
+/**
+ * トンネル本体の編集表示値が一致するか判定する
+ */
+function tunnelDefinitionViewEquals(
+  left: TunnelDefinitionView,
+  right: TunnelDefinitionView,
+): boolean {
+  return (
+    left.enabled === right.enabled &&
+    left.description === right.description &&
+    stringArraysEqual(left.tags, right.tags) &&
+    left.localHost === right.localHost &&
+    left.localPort === right.localPort &&
+    left.remoteHost === right.remoteHost &&
+    left.remotePort === right.remotePort &&
+    left.sshUser === right.sshUser &&
+    left.sshHost === right.sshHost &&
+    left.sshPort === right.sshPort &&
+    left.identityFile === right.identityFile
   );
 }
 
@@ -7394,6 +7655,7 @@ function workspaceSelectionEquals(left: WorkspaceSelection, right: WorkspaceSele
     left.workspacePath === right.workspacePath &&
     stringArraysEqual(left.workspaceHistory, right.workspaceHistory) &&
     left.localConfigPath === right.localConfigPath &&
+    left.localOverrideConfigPath === right.localOverrideConfigPath &&
     left.globalConfigPath === right.globalConfigPath &&
     left.useGlobal === right.useGlobal &&
     left.globalStatePath === right.globalStatePath &&
@@ -7534,11 +7796,15 @@ function summarizeVisibleTunnelSelection(
   tunnels: readonly TunnelView[],
   selectedIds: ReadonlySet<string>,
 ): VisibleTunnelSelectionSummary {
-  const ids = new Array<string>(tunnels.length);
+  const ids: string[] = [];
   let selectedCount = 0;
 
-  tunnels.forEach((tunnel, index) => {
-    ids[index] = tunnel.runtimeId;
+  tunnels.forEach((tunnel) => {
+    if (!tunnel.enabled) {
+      return;
+    }
+
+    ids.push(tunnel.runtimeId);
 
     if (selectedIds.has(tunnel.runtimeId)) {
       selectedCount += 1;
@@ -7700,6 +7966,10 @@ function hasActiveTunnelFilters(filters: TunnelFilters): boolean {
  * トンネルの表示用状態を統一する
  */
 function tunnelStatus(tunnel: TunnelView): TunnelStatus {
+  if (!tunnel.enabled) {
+    return "disabled";
+  }
+
   return tunnel.status?.state ?? "idle";
 }
 
@@ -8108,6 +8378,7 @@ function optionalIdentityFileForConfig(value: string, homePath: string | null): 
 function formToTunnelInput(form: TunnelFormState, homePath: string | null): TunnelInput {
   return {
     id: requireText(form.id, "Name"),
+    enabled: form.enabled,
     description: optionalText(form.description),
     tags: parseTags(form.tags),
     localHost: requireText(form.localHost, "Local host"),
@@ -8162,6 +8433,7 @@ function buildImportDrafts(
 function importDraftToTunnelInput(draft: TunnelImportDraft, homePath: string | null): TunnelInput {
   return {
     id: requireText(draft.id, "Name"),
+    enabled: true,
     description: optionalText(draft.description),
     tags: parseTags(draft.tags),
     localHost: requireText(draft.localHost, "Local host"),
@@ -8248,20 +8520,23 @@ function duplicateFormToInput(
 /**
  * 表示用トンネルを編集フォームの初期値へ変換する
  */
-function formFromTunnel(tunnel: TunnelView): TunnelFormState {
+function formFromTunnel(tunnel: TunnelView, layer: ConfigEditLayer = "override"): TunnelFormState {
+  const definition = layer === "shared" ? (tunnel.shared ?? tunnel) : tunnel;
+
   return {
     scope: tunnel.source,
     id: tunnel.id,
-    description: tunnel.description ?? "",
-    tags: tunnel.tags.join(","),
-    localHost: tunnel.localHost,
-    localPort: tunnel.localPort.toString(),
-    remoteHost: tunnel.remoteHost,
-    remotePort: tunnel.remotePort.toString(),
-    sshUser: tunnel.sshUser,
-    sshHost: tunnel.sshHost,
-    sshPort: tunnel.sshPort?.toString() ?? "",
-    identityFile: tunnel.identityFile ?? "",
+    enabled: definition.enabled,
+    description: definition.description ?? "",
+    tags: definition.tags.join(","),
+    localHost: definition.localHost,
+    localPort: definition.localPort.toString(),
+    remoteHost: definition.remoteHost,
+    remotePort: definition.remotePort.toString(),
+    sshUser: definition.sshUser,
+    sshHost: definition.sshHost,
+    sshPort: definition.sshPort?.toString() ?? "",
+    identityFile: definition.identityFile ?? "",
   };
 }
 
@@ -8525,14 +8800,21 @@ function isSearchKeyboardShortcut(event: KeyboardEvent): boolean {
 }
 
 /**
- * 現在存在するトンネルだけを選択状態として残す
+ * 現在存在する有効なトンネルだけを選択状態として残す
  */
 function keepExistingSelections(current: Set<string>, tunnels: TunnelView[]): Set<string> {
   if (current.size === 0) {
     return current;
   }
 
-  const ids = new Set(tunnels.map((tunnel) => tunnel.runtimeId));
+  const ids = new Set<string>();
+
+  tunnels.forEach((tunnel) => {
+    if (tunnel.enabled) {
+      ids.add(tunnel.runtimeId);
+    }
+  });
+
   const next = new Set<string>();
   let hasRemovedSelection = false;
 

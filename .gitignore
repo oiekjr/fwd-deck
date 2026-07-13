@@ -1,5 +1,6 @@
 /target/
 fwd-deck.toml
+fwd-deck.override.toml
 apps/fwd-deck-app/dist/
 apps/fwd-deck-app/node_modules/
 apps/fwd-deck-app/src-tauri/assets/fwd-deck.png

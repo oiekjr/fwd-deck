@@ -67,6 +67,7 @@ import {
 } from "react";
 import type { ChangeEvent, FormEvent, ReactElement, ReactNode, RefObject } from "react";
 import { createRoot } from "react-dom/client";
+import { createCommandDispatcher } from "./lib/command-dispatcher";
 import "./styles.css";
 
 type ConfigScope = "local" | "global";
@@ -8324,8 +8325,10 @@ function trimTrailingPathSeparators(path: string): string {
   return path.slice(0, end);
 }
 
+const dispatchCommand = createCommandDispatcher(invoke);
+
 /**
- * Tauri command を実行環境の有無を確認して呼び出す
+ * Tauri command を実行環境の有無を確認して送信する
  */
 async function invokeCommand<T>(command: AppCommand, args: Record<string, unknown>): Promise<T> {
   if (!isTauriRuntimeAvailable()) {
@@ -8333,7 +8336,7 @@ async function invokeCommand<T>(command: AppCommand, args: Record<string, unknow
   }
 
   try {
-    return await invoke<T>(command, args);
+    return await dispatchCommand<T>(command, args);
   } catch (error) {
     if (isMissingTauriRuntimeError(error)) {
       throw new Error(missingTauriRuntimeMessage);

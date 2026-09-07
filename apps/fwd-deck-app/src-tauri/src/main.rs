@@ -4,6 +4,7 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fs,
+    future::Future,
     io::Write,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -59,6 +60,8 @@ const WORKSPACE_HISTORY_LIMIT: usize = 10;
 const WORKSPACE_STATES_DIR: &str = "workspace-states";
 const STATE_FILE_NAME: &str = "state.toml";
 const START_TUNNELS_PARALLELISM: usize = 4;
+const BACKGROUND_COMMAND_QUEUE_CAPACITY: usize = 64;
+const BACKGROUND_COMMAND_QUITTING: &str = "終了確認中のため操作を開始できません";
 const AUTO_RECOVER_INTERVAL_SECONDS: u64 = 5;
 const AUTO_RECOVER_CONFIRMATION_SECONDS: u64 = 10;
 const AUTO_RECOVER_FIRST_BACKOFF_SECONDS: u64 = 5;
@@ -128,7 +131,8 @@ fn main() -> ExitCode {
 
     set_runtime_application_name();
 
-    let quit_state = QuitConfirmationStateHandle::default();
+    let commands = BackgroundCommandState::default();
+    let quit_state = commands.quit_state.clone();
     let pending_workspace_open =
         workspace_open_request_payload_from_args(std::env::args_os().skip(1));
     let app = tauri::Builder::default()
@@ -137,6 +141,7 @@ fn main() -> ExitCode {
         ))
         .plugin(tauri_plugin_dialog::init())
         .manage(OperationLockState::default())
+        .manage(commands)
         .manage(AutoRecoverState::default())
         .manage(DashboardConfigCacheState::default())
         .manage(TrayState::default())
@@ -149,7 +154,30 @@ fn main() -> ExitCode {
             start_auto_recover_worker(app.handle().clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(handle_app_invoke)
+        .build(tauri::generate_context!())
+        .expect("error while running Fwd Deck application");
+
+    if let Some(payload) = pending_workspace_open {
+        handle_workspace_open_request(app.handle(), payload);
+    }
+
+    app.run(move |app, event| {
+        handle_quit_confirmation_event(app, event, quit_state.clone());
+    });
+
+    ExitCode::SUCCESS
+}
+
+/// IPC の受信時に実行順を確定し、同期 command の応答まで共通キューで処理する
+fn handle_app_invoke(invoke: tauri::ipc::Invoke) -> bool {
+    let app = invoke.message.webview().app_handle().clone();
+    let resolver = invoke.resolver.clone();
+    let result = run_app_command(app, move |_| {
+        let resolver = invoke.resolver.clone();
+        let command = invoke.message.command().to_owned();
+        // command を async にすると、ハンドラーの復帰時点で次の要求が実行される
+        let handler: fn(tauri::ipc::Invoke) -> bool = tauri::generate_handler![
             load_dashboard,
             switch_workspace,
             start_tunnels,
@@ -169,19 +197,20 @@ fn main() -> ExitCode {
             install_cli_integration,
             remove_cli_integration,
             refresh_tray_menu
-        ])
-        .build(tauri::generate_context!())
-        .expect("error while running Fwd Deck application");
-
-    if let Some(payload) = pending_workspace_open {
-        handle_workspace_open_request(app.handle(), payload);
-    }
-
-    app.run(move |app, event| {
-        handle_quit_confirmation_event(app, event, quit_state.clone());
+        ];
+        if !handler(invoke) {
+            resolver.reject(format!("Command {command} not found"));
+        }
+        Ok(())
     });
 
-    ExitCode::SUCCESS
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = result.await {
+            resolver.reject(error);
+        }
+    });
+
+    true
 }
 
 /// 実行環境から CLI 起動として扱うかを判定する
@@ -289,6 +318,102 @@ fn set_runtime_application_name() {}
 /// start / stop 操作の同時実行を防ぐ状態を保持する
 #[derive(Debug, Default)]
 struct OperationLockState(Mutex<()>);
+
+/// 画面、メニュー、終了処理の受け付け順を共有する
+#[derive(Clone)]
+struct BackgroundCommandState {
+    sender: tauri::async_runtime::Sender<BackgroundCommand>,
+    quit_state: QuitConfirmationStateHandle,
+}
+
+/// 共通キューが順番に実行する同期処理を表現する
+type BackgroundCommand = Box<dyn FnOnce() + Send>;
+
+impl Default for BackgroundCommandState {
+    /// 待機中はスレッドを占有しない上限付き実行キューを初期化する
+    fn default() -> Self {
+        let (sender, mut receiver) =
+            tauri::async_runtime::channel::<BackgroundCommand>(BACKGROUND_COMMAND_QUEUE_CAPACITY);
+
+        tauri::async_runtime::spawn(async move {
+            while let Some(command) = receiver.recv().await {
+                // 呼び出し元の中断や処理の panic によって後続の順序を崩さない
+                let _ = tauri::async_runtime::spawn_blocking(command).await;
+            }
+        });
+
+        Self {
+            sender,
+            quit_state: QuitConfirmationStateHandle::default(),
+        }
+    }
+}
+
+impl BackgroundCommandState {
+    /// Future の poll を待たずに通常操作を受け付ける
+    fn run<T, F>(
+        &self,
+        command: F,
+    ) -> impl Future<Output = Result<T, String>> + Send + 'static + use<T, F>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, AppError> + Send + 'static,
+    {
+        self.enqueue(command, false)
+    }
+
+    /// 終了確認中も終了対象の収集処理を受け付ける
+    fn run_quit<T, F>(
+        &self,
+        command: F,
+    ) -> impl Future<Output = Result<T, String>> + Send + 'static + use<T, F>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, AppError> + Send + 'static,
+    {
+        self.enqueue(command, true)
+    }
+
+    /// 終了状態の確認とキューへの投入を同じ排他区間で行う
+    fn enqueue<T, F>(
+        &self,
+        command: F,
+        allow_quitting: bool,
+    ) -> impl Future<Output = Result<T, String>> + Send + 'static + use<T, F>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, AppError> + Send + 'static,
+    {
+        let (sender, mut receiver) = tauri::async_runtime::channel(1);
+        let submitted = {
+            let quit_state = self
+                .quit_state
+                .0
+                .lock()
+                .expect("quit confirmation state should not be poisoned");
+
+            if !allow_quitting && *quit_state != QuitConfirmationState::Idle {
+                Err(BACKGROUND_COMMAND_QUITTING.to_owned())
+            } else {
+                self.sender
+                    .try_send(Box::new(move || {
+                        let _ = sender.try_send(command_result(command()));
+                    }))
+                    .map_err(|_| {
+                        "操作の待機キューが利用できません。少し待って再試行してください".to_owned()
+                    })
+            }
+        };
+
+        async move {
+            submitted?;
+            receiver
+                .recv()
+                .await
+                .ok_or_else(|| "バックグラウンド処理を完了できませんでした".to_owned())?
+        }
+    }
+}
 
 /// 自動復旧 worker の実行状態を保持する
 #[derive(Debug, Default)]
@@ -820,6 +945,14 @@ fn handle_single_instance_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd
 
 /// CLI から受け取った Workspace open 要求を処理する
 fn handle_workspace_open_request(app: &tauri::AppHandle, payload: WorkspaceOpenRequestPayload) {
+    spawn_background_app_action(app, move |app| {
+        execute_workspace_open_request(app, payload);
+        Ok(())
+    });
+}
+
+/// CLI からの Workspace open 結果をトレイと画面へ反映する
+fn execute_workspace_open_request(app: &tauri::AppHandle, payload: WorkspaceOpenRequestPayload) {
     let _ = rebuild_tray_menu(app);
 
     match apply_workspace_open_request(app, payload) {
@@ -969,8 +1102,11 @@ fn handle_tray_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent)
         TRAY_MENU_SHOW => handle_tray_result(app, show_main_window(app)),
         TRAY_MENU_HIDE => handle_tray_result(app, hide_window_to_tray(app, MAIN_WINDOW_LABEL)),
         TRAY_MENU_SETTINGS => open_settings_window(app),
-        TRAY_MENU_HIDE_DOCK_WHEN_HIDDEN => handle_tray_dock_visibility_toggle(app),
-        TRAY_MENU_REFRESH => handle_tray_result(app, rebuild_tray_menu(app)),
+        TRAY_MENU_HIDE_DOCK_WHEN_HIDDEN => spawn_background_app_action(app, |app| {
+            handle_tray_dock_visibility_toggle(app);
+            Ok(())
+        }),
+        TRAY_MENU_REFRESH => spawn_background_app_action(app, rebuild_tray_menu),
         TRAY_MENU_WORKSPACE_BROWSE => handle_tray_workspace_browse(app),
         TRAY_MENU_QUIT => app.exit(0),
         _ => {
@@ -986,21 +1122,10 @@ fn handle_tray_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent)
 
 /// トレイからのトンネル操作をバックグラウンドへ委譲する
 fn handle_tray_tunnel_action(app: &tauri::AppHandle, action: TrayTunnelAction) {
-    let app_for_worker = app.clone();
-    let app_for_error = app.clone();
-
-    let result = thread::Builder::new()
-        .name("tray-tunnel-action".to_owned())
-        .spawn(move || {
-            execute_tray_tunnel_action(&app_for_worker, action);
-        });
-
-    if let Err(error) = result {
-        emit_tray_operation_error(
-            &app_for_error,
-            format!("トレイ操作を開始できませんでした: {error}"),
-        );
-    }
+    spawn_background_app_action(app, move |app| {
+        execute_tray_tunnel_action(app, action);
+        Ok(())
+    });
 }
 
 /// トレイからのトンネル操作を実行して結果を通知する
@@ -1079,8 +1204,11 @@ fn tray_tracked_tunnel_targets_for_source(
 
 /// トレイからのワークスペース切り替えを実行する
 fn handle_tray_workspace_action(app: &tauri::AppHandle, action: TrayWorkspaceAction) {
-    let result = switch_tray_workspace(app, action.workspace_path);
-    emit_tray_workspace_result(app, result);
+    spawn_background_app_action(app, move |app| {
+        let result = switch_tray_workspace(app, action.workspace_path);
+        emit_tray_workspace_result(app, result);
+        Ok(())
+    });
 }
 
 /// トレイからワークスペース選択ダイアログを表示する
@@ -1101,14 +1229,19 @@ fn handle_tray_workspace_browse(app: &tauri::AppHandle) {
             return;
         };
 
-        let result = workspace_path
-            .into_path()
-            .map_err(|error| {
-                AppError::InvalidInput(format!("ワークスペースパスを解決できませんでした: {error}"))
-            })
-            .and_then(|workspace_path| switch_tray_workspace(&app, workspace_path));
+        spawn_background_app_action(&app, move |app| {
+            let result = workspace_path
+                .into_path()
+                .map_err(|error| {
+                    AppError::InvalidInput(format!(
+                        "ワークスペースパスを解決できませんでした: {error}"
+                    ))
+                })
+                .and_then(|workspace_path| switch_tray_workspace(app, workspace_path));
 
-        emit_tray_workspace_result(&app, result);
+            emit_tray_workspace_result(app, result);
+            Ok(())
+        });
     });
 }
 
@@ -1911,39 +2044,52 @@ fn load_tray_menu_model(app: &tauri::AppHandle) -> Result<TrayMenuModel, AppErro
     let runtime_paths = resolve_runtime_paths(app, None)?;
     let config_with_validation = load_config_with_validation(app, &runtime_paths)?;
     let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
-    let config = config_with_validation.config;
-    let validation = config_with_validation.validation;
-    let status_lookup = RuntimeStatusLookup::new(&statuses);
+
+    Ok(build_tray_menu_model(
+        &runtime_paths,
+        &config_with_validation,
+        &statuses,
+    ))
+}
+
+/// 同じ監視周期で読み込んだ設定と状態からトレイ表示モデルを生成する
+fn build_tray_menu_model(
+    runtime_paths: &RuntimePaths,
+    config_with_validation: &ConfigWithValidation,
+    statuses: &[ScopedRuntimeStatus],
+) -> TrayMenuModel {
+    let config = config_with_validation.config.as_ref();
+    let validation = config_with_validation.validation.as_ref();
+    let status_lookup = RuntimeStatusLookup::new(statuses);
     let global_tunnel_items = tray_tunnel_menu_items_for_scope(
-        &config,
+        config,
         &status_lookup,
-        &validation,
+        validation,
         ConfigSourceKind::Global,
     );
     let local_tunnel_items = tray_tunnel_menu_items_for_scope(
-        &config,
+        config,
         &status_lookup,
-        &validation,
+        validation,
         ConfigSourceKind::Local,
     );
     let favorite_tunnel_items = tray_favorite_tunnel_menu_items(
-        &config,
+        config,
         &status_lookup,
-        &validation,
+        validation,
         &runtime_paths.preferences,
     );
     let workspace_items = tray_workspace_menu_items(&runtime_paths.preferences);
-    let icon_kind = tray_icon_kind(&statuses);
+    let icon_kind = tray_icon_kind(statuses);
     let global_config_is_valid =
-        validation_is_valid_for_source(&validation, ConfigSourceKind::Global);
-    let local_config_is_valid =
-        validation_is_valid_for_source(&validation, ConfigSourceKind::Local);
+        validation_is_valid_for_source(validation, ConfigSourceKind::Global);
+    let local_config_is_valid = validation_is_valid_for_source(validation, ConfigSourceKind::Local);
     let global_bulk_state =
-        tray_scope_bulk_state(&config, &statuses, &validation, ConfigSourceKind::Global);
+        tray_scope_bulk_state(config, statuses, validation, ConfigSourceKind::Global);
     let local_bulk_state =
-        tray_scope_bulk_state(&config, &statuses, &validation, ConfigSourceKind::Local);
+        tray_scope_bulk_state(config, statuses, validation, ConfigSourceKind::Local);
 
-    Ok(TrayMenuModel {
+    TrayMenuModel {
         global_start_all_enabled: global_bulk_state.start_enabled,
         local_start_all_enabled: local_bulk_state.start_enabled,
         global_stop_all_enabled: global_bulk_state.stop_enabled,
@@ -1955,14 +2101,23 @@ fn load_tray_menu_model(app: &tauri::AppHandle) -> Result<TrayMenuModel, AppErro
         icon_kind,
         global_config_is_valid,
         local_config_is_valid,
-    })
+    }
 }
 
 /// トレイメニューの表示中に変更可能な状態だけを反映する
 fn refresh_tray_menu_in_place(app: &tauri::AppHandle) -> Result<TrayInPlaceMenuUpdate, AppError> {
     let model = load_tray_menu_model(app)?;
-    let tunnel_items = tray_menu_model_tunnel_items(&model);
-    let bulk_items = tray_menu_model_bulk_items(&model);
+
+    refresh_tray_menu_in_place_from_model(app, &model)
+}
+
+/// 読み込み済みモデルの状態をトレイへ反映する
+fn refresh_tray_menu_in_place_from_model(
+    app: &tauri::AppHandle,
+    model: &TrayMenuModel,
+) -> Result<TrayInPlaceMenuUpdate, AppError> {
+    let tunnel_items = tray_menu_model_tunnel_items(model);
+    let bulk_items = tray_menu_model_bulk_items(model);
 
     update_tray_icon_if_changed(app, model.icon_kind)?;
     app.state::<TrayState>()
@@ -2875,18 +3030,33 @@ fn should_prevent_quit(
         QuitConfirmationState::Idle => quit_state.set(QuitConfirmationState::Prompting),
     }
 
-    match collect_quit_tunnel_context(app) {
-        Ok(context) => handle_collected_quit_context(app, quit_state, request, context),
-        Err(error) => {
+    let worker_app = app.clone();
+    let worker_quit_state = quit_state.clone();
+    let result = app.state::<BackgroundCommandState>().run_quit(move || {
+        let app = &worker_app;
+        let operation_lock = app.state::<OperationLockState>();
+        // 受付済みの起動と実行中の自動復旧が状態を保存してから終了対象を収集する
+        let context = with_operation_lock(&operation_lock, || collect_quit_tunnel_context(app))?;
+        if !handle_collected_quit_context(app, worker_quit_state.clone(), request.clone(), context)
+        {
+            perform_confirmed_quit(app.clone(), worker_quit_state, request);
+        }
+        Ok(())
+    });
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = result.await {
             show_quit_error_dialog(
-                app.clone(),
+                app,
                 quit_state,
                 QUIT_ERROR_TITLE,
                 format!("終了前の状態確認に失敗しました。\n\n{error}"),
             );
-            true
         }
-    }
+    });
+
+    true
 }
 
 /// 収集した終了対象と設定に応じて自動掃除、停止、確認を行う
@@ -2909,7 +3079,6 @@ fn handle_collected_quit_context(
     }
 
     if targets.running.is_empty() {
-        quit_state.set(QuitConfirmationState::Idle);
         return false;
     }
 
@@ -4399,6 +4568,34 @@ fn remove_workspace_history_entry(
     workspace_path: String,
 ) -> Result<PathView, String> {
     command_result(remove_workspace_history_entry_inner(&app, &workspace_path))
+}
+
+/// アプリの同期コマンドを直列化したバックグラウンド処理へ委譲する
+fn run_app_command<T, F>(
+    app: tauri::AppHandle,
+    command: F,
+) -> impl Future<Output = Result<T, String>> + Send + 'static
+where
+    T: Send + 'static,
+    F: FnOnce(&tauri::AppHandle) -> Result<T, AppError> + Send + 'static,
+{
+    let state = app.state::<BackgroundCommandState>().inner().clone();
+
+    state.run(move || command(&app))
+}
+
+/// ネイティブメニュー操作もコマンドと同じ実行境界で直列化する
+fn spawn_background_app_action<F>(app: &tauri::AppHandle, action: F)
+where
+    F: FnOnce(&tauri::AppHandle) -> Result<(), AppError> + Send + 'static,
+{
+    let app = app.clone();
+    let result = run_app_command(app.clone(), action);
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = result.await {
+            emit_tray_operation_error(&app, error);
+        }
+    });
 }
 
 /// command の内部エラーをフロントエンド用文字列へ変換する
@@ -7128,8 +7325,9 @@ fn start_auto_recover_worker(app: tauri::AppHandle) {
 fn run_auto_recover_worker_cycle(app: &tauri::AppHandle) {
     let operation_lock = app.state::<OperationLockState>();
     let auto_recover_state = app.state::<AutoRecoverState>();
+    let commands = app.state::<BackgroundCommandState>();
     let now = current_unix_seconds_for_app();
-    let result = with_operation_lock(&operation_lock, || {
+    let result = run_auto_recover_if_active(&operation_lock, &commands.quit_state, || {
         let mut worker_state = auto_recover_state
             .0
             .lock()
@@ -7138,7 +7336,16 @@ fn run_auto_recover_worker_cycle(app: &tauri::AppHandle) {
         auto_recover_current_stale_tunnels(app, &mut worker_state, now)
     });
 
-    let _ = refresh_tray_menu_in_place(app);
+    let (result, tray_model) = match result {
+        Ok(Some((report, tray_model))) => (Ok(report), tray_model),
+        Ok(None) => return,
+        Err(error) => (Err(error), None),
+    };
+
+    let _ = match tray_model {
+        Some(model) => refresh_tray_menu_in_place_from_model(app, &model),
+        None => refresh_tray_menu_in_place(app),
+    };
 
     let mut worker_state = auto_recover_state
         .0
@@ -7154,35 +7361,91 @@ fn run_auto_recover_worker_cycle(app: &tauri::AppHandle) {
     }
 }
 
+/// 終了時の状態収集と排他し、終了確認中の自動復旧を抑止する
+fn run_auto_recover_if_active<T, F>(
+    operation_lock: &OperationLockState,
+    quit_state: &QuitConfirmationStateHandle,
+    operation: F,
+) -> Result<Option<T>, AppError>
+where
+    F: FnOnce() -> Result<T, AppError>,
+{
+    with_operation_lock(operation_lock, || {
+        if quit_state.get() != QuitConfirmationState::Idle {
+            return Ok(None);
+        }
+
+        operation().map(Some)
+    })
+}
+
 /// 現在の表示対象に含まれる watched stale トンネルを自動復旧する
 fn auto_recover_current_stale_tunnels(
     app: &tauri::AppHandle,
     worker_state: &mut AutoRecoverWorkerState,
     now: u64,
-) -> Result<AutoRecoverReport, AppError> {
+) -> Result<(AutoRecoverReport, Option<TrayMenuModel>), AppError> {
     let runtime_paths = resolve_runtime_paths(app, None)?;
     if auto_recover_scan_can_be_skipped(&runtime_paths, worker_state) {
-        return Ok(AutoRecoverReport::default());
+        return Ok((AutoRecoverReport::default(), None));
     }
 
     let config_with_validation = load_config_with_validation(app, &runtime_paths)?;
-    let config = config_with_validation.config;
-
-    if !config.has_sources() {
-        return Ok(AutoRecoverReport::default());
+    if !config_with_validation.config.has_sources() {
+        return Ok((AutoRecoverReport::default(), None));
     }
 
     ensure_valid_report_for_source(&config_with_validation.validation, None)?;
 
     let statuses = load_scoped_runtime_statuses(&runtime_paths)?;
-    let mut report = confirm_auto_recover_pending(worker_state, &statuses, now);
-    let targets = auto_recover_targets_from_statuses(&runtime_paths, &config, &statuses)?
-        .into_iter()
-        .filter(|target| auto_recover_target_is_retryable(worker_state, target, now))
-        .collect::<Vec<_>>();
-    report.extend(start_auto_recover_targets(&targets, worker_state, now));
 
-    Ok(report)
+    auto_recover_from_loaded_statuses(
+        &runtime_paths,
+        &config_with_validation,
+        &statuses,
+        worker_state,
+        now,
+        start_auto_recover_targets,
+    )
+}
+
+/// 復旧操作が不要な周期では検査済み状態をトレイ表示にも再利用する
+fn auto_recover_from_loaded_statuses<F>(
+    runtime_paths: &RuntimePaths,
+    config_with_validation: &ConfigWithValidation,
+    statuses: &[ScopedRuntimeStatus],
+    worker_state: &mut AutoRecoverWorkerState,
+    now: u64,
+    start_targets: F,
+) -> Result<(AutoRecoverReport, Option<TrayMenuModel>), AppError>
+where
+    F: FnOnce(&[AutoRecoverTarget], &mut AutoRecoverWorkerState, u64) -> AutoRecoverReport,
+{
+    let mut report = confirm_auto_recover_pending(worker_state, statuses, now);
+    let targets = auto_recover_targets_from_statuses(
+        runtime_paths,
+        &config_with_validation.config,
+        statuses,
+    )?
+    .into_iter()
+    .filter(|target| auto_recover_target_is_retryable(worker_state, target, now))
+    .collect::<Vec<_>>();
+
+    if targets.is_empty() {
+        return Ok((
+            report,
+            Some(build_tray_menu_model(
+                runtime_paths,
+                config_with_validation,
+                statuses,
+            )),
+        ));
+    }
+
+    report.extend(start_targets(&targets, worker_state, now));
+
+    // 失敗時もプロセス状態が変わり得るため、復旧を試みた周期では再検査する
+    Ok((report, None))
 }
 
 /// 自動復旧スキャンを省略できるか判定する
@@ -7773,7 +8036,7 @@ fn shorten_home_path_for_config_with_home(path: &str, home: Option<&Path>) -> St
 
 #[cfg(test)]
 mod tests {
-    use std::{net::TcpListener, path::Path};
+    use std::{net::TcpListener, path::Path, sync::mpsc};
 
     use fwd_deck_core::{
         ConfigSource, LoadedConfigFile, TunnelState, TunnelStateFile,
@@ -7782,6 +8045,435 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// コマンドの処理結果を呼び出し元とは異なるスレッドから返すことを検証する
+    #[test]
+    fn background_command_runs_off_the_calling_thread() {
+        let commands = BackgroundCommandState::default();
+        let caller = thread::current().id();
+
+        let worker = tauri::async_runtime::block_on(commands.run(|| Ok(thread::current().id())))
+            .expect("run background command");
+
+        assert_ne!(worker, caller);
+    }
+
+    /// 応答の await 順序によらず起動後の切り替えが最終状態になることを検証する
+    #[test]
+    fn background_commands_preserve_admission_order_before_polling() {
+        let commands = BackgroundCommandState::default();
+        let state = Arc::new(Mutex::new(("A", false)));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let version = commands.run(move || {
+            started_tx.send(()).expect("signal start");
+            release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("wait for release");
+            Ok(())
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("wait for version check");
+        let start_state = state.clone();
+        let start = commands.run(move || {
+            *start_state.lock().expect("lock state") = ("A", true);
+            Ok(())
+        });
+        let switch_state = state.clone();
+        let switch = commands.run(move || {
+            *switch_state.lock().expect("lock state") = ("B", false);
+            Ok(())
+        });
+
+        release_tx.send(()).expect("release version check");
+        tauri::async_runtime::block_on(switch).expect("switch workspace");
+        tauri::async_runtime::block_on(start).expect("start tunnel");
+        tauri::async_runtime::block_on(version).expect("complete version check");
+
+        assert_eq!(*state.lock().expect("lock state"), ("B", false));
+    }
+
+    /// 応答の待機を中断しても起動状態の保存前に後続処理が実行されないことを検証する
+    #[test]
+    fn background_command_cancellation_keeps_running_operation_ordered() {
+        let commands = BackgroundCommandState::default();
+        let saved = Arc::new(Mutex::new(false));
+        let worker_saved = saved.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let command = commands.run(move || {
+            started_tx.send(()).expect("signal start");
+            release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("wait for release");
+            *worker_saved.lock().expect("lock saved") = true;
+            Ok(())
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("wait for start");
+
+        drop(command);
+        let next = commands.run(move || Ok(*saved.lock().expect("lock saved")));
+        release_tx.send(()).expect("release cancelled command");
+        let was_saved = tauri::async_runtime::block_on(next).expect("run next command");
+
+        assert!(was_saved);
+    }
+
+    /// 終了前に受け付けた起動を停止対象に含め、後から届いた起動を拒否することを検証する
+    #[test]
+    fn background_quit_drains_admitted_starts_and_rejects_late_starts() {
+        let commands = BackgroundCommandState::default();
+        let running = Arc::new(Mutex::new(vec!["existing"]));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let version = commands.run(move || {
+            started_tx.send(()).expect("signal start");
+            release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("wait for release");
+            Ok(())
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("wait for version check");
+        let start_running = running.clone();
+        let start = commands.run(move || {
+            start_running.lock().expect("lock running").push("new");
+            Ok(())
+        });
+
+        commands.quit_state.set(QuitConfirmationState::Prompting);
+        let quit_running = running.clone();
+        let quit =
+            commands.run_quit(move || Ok(quit_running.lock().expect("lock running").clone()));
+        let late_running = running.clone();
+        let late = commands.run(move || {
+            late_running.lock().expect("lock running").push("late");
+            Ok(())
+        });
+        release_tx.send(()).expect("release version check");
+        let targets = tauri::async_runtime::block_on(quit).expect("collect quit targets");
+        let late_result = tauri::async_runtime::block_on(late);
+        tauri::async_runtime::block_on(start).expect("complete start");
+        tauri::async_runtime::block_on(version).expect("complete version check");
+
+        assert_eq!(targets, ["existing", "new"]);
+        assert_eq!(late_result, Err(BACKGROUND_COMMAND_QUITTING.to_owned()));
+        assert_eq!(*running.lock().expect("lock running"), ["existing", "new"]);
+    }
+
+    /// 対象収集が完了しても終了確認中は操作を受け付けないことを検証する
+    #[test]
+    fn background_commands_stay_closed_after_quit_collection() {
+        let commands = BackgroundCommandState::default();
+        commands.quit_state.set(QuitConfirmationState::Prompting);
+        tauri::async_runtime::block_on(commands.run_quit(|| Ok(()))).expect("collect targets");
+
+        let result =
+            tauri::async_runtime::block_on(commands.run(|| panic!("must not start during prompt")));
+
+        assert_eq!(result, Err::<(), _>(BACKGROUND_COMMAND_QUITTING.to_owned()));
+    }
+
+    /// 終了確定後も終了イベント処理前に新規操作を開始しないことを検証する
+    #[test]
+    fn background_commands_stay_closed_while_exiting() {
+        let commands = BackgroundCommandState::default();
+        commands.quit_state.set(QuitConfirmationState::Proceeding);
+
+        let result =
+            tauri::async_runtime::block_on(commands.run(|| panic!("must not start while exiting")));
+
+        assert_eq!(result, Err::<(), _>(BACKGROUND_COMMAND_QUITTING.to_owned()));
+    }
+
+    /// 終了キャンセルまたは終了失敗から Idle に戻ると操作を再開できることを検証する
+    #[test]
+    fn background_commands_resume_after_quit_is_cancelled() {
+        let commands = BackgroundCommandState::default();
+        commands.quit_state.set(QuitConfirmationState::Prompting);
+        tauri::async_runtime::block_on(commands.run_quit(|| Ok(()))).expect("collect targets");
+
+        commands.quit_state.set(QuitConfirmationState::Idle);
+        let result = tauri::async_runtime::block_on(commands.run(|| Ok("started")));
+
+        assert_eq!(result, Ok("started"));
+    }
+
+    /// キュー上限を超えた要求を拒否して受け付け済みの要求を最後まで処理することを検証する
+    #[test]
+    fn background_queue_rejects_overflow_without_losing_admitted_commands() {
+        let commands = BackgroundCommandState::default();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first = commands.run(move || {
+            started_tx.send(()).expect("signal start");
+            release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("wait for release");
+            Ok(())
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("wait for start");
+        let pending = (0..BACKGROUND_COMMAND_QUEUE_CAPACITY)
+            .map(|index| commands.run(move || Ok(index)))
+            .collect::<Vec<_>>();
+
+        let overflow = tauri::async_runtime::block_on(
+            commands.run(|| -> Result<(), AppError> { panic!("overflow must not execute") }),
+        );
+        release_tx.send(()).expect("release first command");
+        let completed = pending
+            .into_iter()
+            .map(|command| {
+                tauri::async_runtime::block_on(command).expect("complete admitted command")
+            })
+            .collect::<Vec<_>>();
+        tauri::async_runtime::block_on(first).expect("complete first command");
+
+        assert!(overflow.is_err());
+        assert_eq!(
+            completed,
+            (0..BACKGROUND_COMMAND_QUEUE_CAPACITY).collect::<Vec<_>>()
+        );
+    }
+
+    /// 処理が panic しても失敗を返して後続の操作を実行することを検証する
+    #[test]
+    fn background_command_panic_does_not_block_following_commands() {
+        let commands = BackgroundCommandState::default();
+
+        let failure = tauri::async_runtime::block_on(
+            commands.run(|| -> Result<(), AppError> { panic!("test panic") }),
+        );
+        let next = tauri::async_runtime::block_on(commands.run(|| Ok("completed")));
+
+        assert!(failure.is_err());
+        assert_eq!(next, Ok("completed"));
+    }
+
+    /// コマンド失敗後も後続の操作を実行できることを検証する
+    #[test]
+    fn background_command_error_does_not_block_following_commands() {
+        let commands = BackgroundCommandState::default();
+
+        let failure = tauri::async_runtime::block_on(
+            commands.run(|| Err::<(), _>(AppError::InvalidInput("test failure".to_owned()))),
+        );
+        let next = tauri::async_runtime::block_on(commands.run(|| Ok("completed")));
+
+        assert_eq!(failure, Err("入力が不正です: test failure".to_owned()));
+        assert_eq!(next, Ok("completed"));
+    }
+
+    /// 終了確認中と終了確定後は自動復旧を開始しないことを検証する
+    #[test]
+    fn auto_recover_is_suppressed_while_quitting() {
+        let operation_lock = OperationLockState::default();
+        let quit_state = QuitConfirmationStateHandle::default();
+
+        for state in [
+            QuitConfirmationState::Prompting,
+            QuitConfirmationState::Proceeding,
+        ] {
+            quit_state.set(state);
+            let result = run_auto_recover_if_active(
+                &operation_lock,
+                &quit_state,
+                || -> Result<(), AppError> {
+                    panic!("must not recover while quitting");
+                },
+            );
+
+            assert_eq!(result.expect("skip recovery"), None);
+        }
+    }
+
+    /// 終了をキャンセルすると自動復旧を再開できることを検証する
+    #[test]
+    fn auto_recover_resumes_after_quit_is_cancelled() {
+        let operation_lock = OperationLockState::default();
+        let quit_state = QuitConfirmationStateHandle::default();
+        quit_state.set(QuitConfirmationState::Prompting);
+
+        quit_state.set(QuitConfirmationState::Idle);
+        let result = run_auto_recover_if_active(&operation_lock, &quit_state, || Ok("recovered"));
+
+        assert_eq!(result.expect("resume recovery"), Some("recovered"));
+    }
+
+    /// 終了前から実行中の自動復旧が保存した状態も終了対象に含めることを検証する
+    #[test]
+    fn quit_collection_waits_for_in_flight_auto_recovery() {
+        let commands = BackgroundCommandState::default();
+        let operation_lock = Arc::new(OperationLockState::default());
+        let saved = Arc::new(Mutex::new(false));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker_lock = operation_lock.clone();
+        let worker_saved = saved.clone();
+        let worker_quit_state = commands.quit_state.clone();
+        let recovery = thread::spawn(move || {
+            run_auto_recover_if_active(&worker_lock, &worker_quit_state, || {
+                started_tx.send(()).expect("signal recovery start");
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("wait for release");
+                *worker_saved.lock().expect("lock saved") = true;
+                Ok(())
+            })
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("wait for recovery start");
+
+        commands.quit_state.set(QuitConfirmationState::Prompting);
+        let quit = commands.run_quit(move || {
+            with_operation_lock(&operation_lock, || Ok(*saved.lock().expect("lock saved")))
+        });
+        release_tx.send(()).expect("release recovery");
+        let was_saved = tauri::async_runtime::block_on(quit).expect("collect quit state");
+        recovery
+            .join()
+            .expect("join recovery")
+            .expect("complete recovery");
+
+        assert!(was_saved);
+    }
+
+    /// 正常な監視結果から再検査せず running のトレイ表示を生成することを検証する
+    #[test]
+    fn auto_recover_reuses_running_statuses_for_tray() {
+        let (paths, config, statuses) = auto_recover_snapshot_for_test(ProcessState::Running);
+        let mut worker = AutoRecoverWorkerState::default();
+
+        let (report, model) = auto_recover_from_loaded_statuses(
+            &paths,
+            &config,
+            &statuses,
+            &mut worker,
+            100,
+            |_, _, _| panic!("running tunnels must not restart"),
+        )
+        .expect("inspect running tunnels");
+
+        let model = model.expect("reuse inspected statuses");
+        assert_eq!(report, AutoRecoverReport::default());
+        assert!(model.local_tunnel_items[0].checked);
+        assert_eq!(model.icon_kind, TrayIconKind::Active);
+    }
+
+    /// バックオフ中は復旧を行わず同じ stale 状態をトレイへ渡すことを検証する
+    #[test]
+    fn auto_recover_reuses_stale_statuses_during_backoff() {
+        let (paths, config, statuses) = auto_recover_snapshot_for_test(ProcessState::Stale);
+        let mut worker = AutoRecoverWorkerState::default();
+        worker.backoffs.insert(
+            statuses[0].status.state.runtime_id.clone(),
+            AutoRecoverBackoff {
+                failure_count: 1,
+                retry_after_unix_seconds: 105,
+            },
+        );
+
+        let (report, model) = auto_recover_from_loaded_statuses(
+            &paths,
+            &config,
+            &statuses,
+            &mut worker,
+            100,
+            |_, _, _| panic!("backoff must suppress restart"),
+        )
+        .expect("inspect backoff");
+
+        let model = model.expect("reuse stale statuses");
+        assert_eq!(report, AutoRecoverReport::default());
+        assert!(!model.local_tunnel_items[0].checked);
+        assert_eq!(model.icon_kind, TrayIconKind::Idle);
+    }
+
+    /// 復旧成功直後は再検査を要求し従来の確認待ちと通知条件を維持することを検証する
+    #[test]
+    fn auto_recover_requests_fresh_tray_statuses_after_restart() {
+        let (paths, config, statuses) = auto_recover_snapshot_for_test(ProcessState::Stale);
+        let runtime_id = statuses[0].status.state.runtime_id.clone();
+        let mut worker = AutoRecoverWorkerState::default();
+
+        let (report, model) = auto_recover_from_loaded_statuses(
+            &paths,
+            &config,
+            &statuses,
+            &mut worker,
+            100,
+            |targets, worker, now| {
+                assert_eq!(targets.len(), 1);
+                mark_auto_recover_confirmation_pending(worker, &targets[0], now);
+                AutoRecoverReport::default()
+            },
+        )
+        .expect("restart stale tunnel");
+
+        assert!(model.is_none());
+        assert_eq!(
+            worker.pending_confirmations[&runtime_id].confirm_after_unix_seconds,
+            110
+        );
+        assert!(auto_recover_notification_event(&mut worker, report).is_none());
+    }
+
+    /// 復旧失敗時にも古い状態を再利用せず失敗レポートを維持することを検証する
+    #[test]
+    fn auto_recover_requests_fresh_tray_statuses_after_failed_restart() {
+        let (paths, config, statuses) = auto_recover_snapshot_for_test(ProcessState::Stale);
+        let mut worker = AutoRecoverWorkerState::default();
+        let failure = AutoRecoverOperationFailure {
+            id: "workspace:db".to_owned(),
+            runtime_id: statuses[0].status.state.runtime_id.clone(),
+            message: "restart failed".to_owned(),
+        };
+        let expected = failure.clone();
+
+        let (report, model) = auto_recover_from_loaded_statuses(
+            &paths,
+            &config,
+            &statuses,
+            &mut worker,
+            100,
+            |_, _, _| AutoRecoverReport {
+                succeeded: Vec::new(),
+                failed: vec![failure],
+            },
+        )
+        .expect("report failed restart");
+
+        assert!(model.is_none());
+        assert_eq!(report.failed, [expected]);
+    }
+
+    /// 自動復旧とトレイ表示を検証するための監視状態を生成する
+    fn auto_recover_snapshot_for_test(
+        process_state: ProcessState,
+    ) -> (RuntimePaths, ConfigWithValidation, Vec<ScopedRuntimeStatus>) {
+        let tunnel = resolved_tunnel_with_port("db", PathBuf::from("fwd-deck.toml"), 15432);
+        let status = scoped_runtime_status(&tunnel, RuntimeScope::Workspace, process_state);
+        let mut paths = runtime_paths_with_preferences(AppPreferences {
+            auto_recover_tunnel_runtime_ids: vec![status.status.state.runtime_id.clone()],
+            ..AppPreferences::default()
+        });
+        paths.workspace_state_path = Some(PathBuf::from("workspace-state.toml"));
+        let config = Arc::new(EffectiveConfig::new(Vec::new(), vec![tunnel]));
+        let validation = Arc::new(validate_config(&config));
+
+        (
+            paths,
+            ConfigWithValidation { config, validation },
+            vec![status],
+        )
+    }
 
     /// HOME配下の identity_file をチルダ形式へ短縮することを検証する
     #[test]

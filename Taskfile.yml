@@ -43,6 +43,7 @@ tasks:
       - app:format:check
       - app:build:web
       - app:lint
+      - app:test
       - test
       - lint
 
@@ -69,6 +70,12 @@ tasks:
     dir: apps/fwd-deck-app
     cmds:
       - npm run lint
+
+  app:test:
+    desc: Tauri アプリの画面側コマンド制御をテストする
+    dir: apps/fwd-deck-app
+    cmds:
+      - npm test
 
   app:format:
     desc: Tauri アプリのフロントエンドを Prettier で整形する

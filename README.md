@@ -103,6 +103,10 @@ fwd-deck open ~/projects/my-service
 既存アプリが起動中の場合は、既存ウィンドウで Workspace を切り替えます。  
 切り替え時は旧 Workspace の localスコープのトンネルを停止し、globalスコープのトンネルは維持します。
 
+アプリ終了時は、受付済みのトンネル操作の完了を待ってから停止対象を確認します。  
+終了確認中は新しい操作を受け付けず、自動復旧も一時停止します。  
+終了をキャンセルすると操作の受付と自動復旧を再開します。
+
 アプリ表示中は `Cmd+R` または `Ctrl+R` で Dashboard を再読み込みできます。
 ローカルトンネルの編集画面では、個人用の `Personal override` と共有用の `Shared config` を切り替えられます。  
 ローカルトンネルは、`fwd-deck.toml` 本体または local override のどちらで `enabled = false` にしても、`Disabled` として一覧に残ります。  
@@ -120,6 +124,19 @@ fwd-deck status
 ```sh
 fwd-deck stop dev-db
 ```
+
+## Development
+
+変更後は次のコマンドで整形とチェックを実行します。
+
+```sh
+task fmt
+task app:format
+task check
+```
+
+`task check` には Rust と画面側の回帰テストを含みます。  
+画面側のコマンド制御だけを検証する場合は `task app:test` を実行します。
 
 ## Documentation
 

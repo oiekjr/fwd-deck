@@ -260,8 +260,7 @@ jobs:
             version "$VERSION"
             sha256 "$DMG_SHA256"
 
-            url "https://github.com/oiekjr/fwd-deck/releases/download/v#{version}/fwd-deck-app_#{version}_universal.dmg",
-                verified: "github.com/oiekjr/fwd-deck/"
+            url "https://github.com/oiekjr/fwd-deck/releases/download/v#{version}/fwd-deck-app_#{version}_universal.dmg"
             name "Fwd Deck"
             desc "GUI for fwd-deck local SSH port forwarding profiles"
             homepage "https://github.com/oiekjr/fwd-deck"

@@ -1,6 +1,6 @@
 [package]
 name = "fwd-deck-app"
-version = "26.915.1"
+version = "26.1003.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

@@ -430,8 +430,8 @@ struct TrayState {
     icon_kind: Mutex<Option<TrayIconKind>>,
     tunnel_actions: Mutex<HashMap<String, TrayTunnelAction>>,
     workspace_actions: Mutex<HashMap<String, TrayWorkspaceAction>>,
-    tunnel_items: Mutex<HashMap<String, CheckMenuItem<tauri::Wry>>>,
-    bulk_items: Mutex<HashMap<String, MenuItem<tauri::Wry>>>,
+    tunnel_items: Mutex<HashMap<String, TrayTunnelMenuItemHandle>>,
+    bulk_items: Mutex<HashMap<String, TrayBulkMenuItemHandle>>,
     favorite_submenu: Mutex<Option<Submenu<tauri::Wry>>>,
     favorite_refresh_sequence: AtomicU64,
 }
@@ -521,22 +521,20 @@ impl TrayState {
         items: &[TrayTunnelMenuItem],
         bulk_items: &[TrayBulkMenuItem],
     ) -> Result<TrayInPlaceMenuUpdate, AppError> {
-        let item_handles = self
+        let mut item_handles = self
             .tunnel_items
             .lock()
-            .expect("tray item state should not be poisoned")
-            .clone();
+            .expect("tray item state should not be poisoned");
         let item_ids = item_handles.keys().cloned().collect();
 
         if tray_in_place_menu_update(item_ids, items) == TrayInPlaceMenuUpdate::RebuildRequired {
             return Ok(TrayInPlaceMenuUpdate::RebuildRequired);
         }
 
-        let bulk_item_handles = self
+        let mut bulk_item_handles = self
             .bulk_items
             .lock()
-            .expect("tray bulk item state should not be poisoned")
-            .clone();
+            .expect("tray bulk item state should not be poisoned");
         let bulk_item_ids = bulk_item_handles.keys().cloned().collect();
 
         if tray_in_place_bulk_menu_update(bulk_item_ids, bulk_items)
@@ -546,33 +544,37 @@ impl TrayState {
         }
 
         for item in items {
-            if let Some(menu_item) = item_handles.get(&item.menu_id) {
+            if let Some(cached) = item_handles.get_mut(&item.menu_id) {
+                // チェック状態はクリック時に OS 側でも変わるため、毎回取得する
                 let current = TrayTunnelMenuItemDisplayState {
-                    label: menu_item.text()?,
-                    enabled: menu_item.is_enabled()?,
-                    checked: menu_item.is_checked()?,
+                    label: cached.label.clone(),
+                    enabled: cached.enabled,
+                    checked: cached.handle.is_checked()?,
                 };
                 let changes = tray_tunnel_menu_item_changes(&current, item);
 
                 if changes.label_changed {
-                    menu_item.set_text(&item.label)?;
+                    cached.handle.set_text(&item.label)?;
+                    cached.label.clone_from(&item.label);
                 }
 
                 if changes.enabled_changed {
-                    menu_item.set_enabled(item.enabled)?;
+                    cached.handle.set_enabled(item.enabled)?;
+                    cached.enabled = item.enabled;
                 }
 
                 if changes.checked_changed {
-                    menu_item.set_checked(item.checked)?;
+                    cached.handle.set_checked(item.checked)?;
                 }
             }
         }
 
         for item in bulk_items {
-            if let Some(menu_item) = bulk_item_handles.get(&item.menu_id)
-                && tray_bulk_menu_item_enabled_changed(menu_item.is_enabled()?, item)
+            if let Some(cached) = bulk_item_handles.get_mut(&item.menu_id)
+                && tray_bulk_menu_item_enabled_changed(cached.enabled, item)
             {
-                menu_item.set_enabled(item.enabled)?;
+                cached.handle.set_enabled(item.enabled)?;
+                cached.enabled = item.enabled;
             }
         }
 
@@ -611,6 +613,7 @@ impl TrayState {
             submenu.append(&empty)?;
         } else {
             for item in items {
+                let label = item.label.clone();
                 let menu_item = CheckMenuItem::with_id(
                     app,
                     item.menu_id.clone(),
@@ -620,7 +623,14 @@ impl TrayState {
                     None::<&str>,
                 )?;
                 next_actions.insert(item.menu_id.clone(), item.action);
-                next_item_handles.insert(item.menu_id, menu_item.clone());
+                next_item_handles.insert(
+                    item.menu_id,
+                    TrayTunnelMenuItemHandle {
+                        handle: menu_item.clone(),
+                        label,
+                        enabled: item.enabled,
+                    },
+                );
                 submenu.append(&menu_item)?;
             }
         }
@@ -638,7 +648,7 @@ impl TrayState {
     fn replace_tunnel_item_handles_by_prefix(
         &self,
         menu_id_prefix: &str,
-        next_item_handles: HashMap<String, CheckMenuItem<tauri::Wry>>,
+        next_item_handles: HashMap<String, TrayTunnelMenuItemHandle>,
     ) {
         let mut item_handles = self
             .tunnel_items
@@ -672,7 +682,9 @@ impl TrayState {
             .expect("tray action state should not be poisoned");
 
         for item in items {
-            actions.insert(item.menu_id.clone(), item.action.clone());
+            if actions.get(&item.menu_id) != Some(&item.action) {
+                actions.insert(item.menu_id.clone(), item.action.clone());
+            }
         }
     }
 
@@ -748,9 +760,24 @@ struct TrayMenuActions {
 /// トレイメニューの動的項目ハンドルを保持する
 #[derive(Clone, Default)]
 struct TrayMenuItemHandles {
-    tunnel_items: HashMap<String, CheckMenuItem<tauri::Wry>>,
-    bulk_items: HashMap<String, MenuItem<tauri::Wry>>,
+    tunnel_items: HashMap<String, TrayTunnelMenuItemHandle>,
+    bulk_items: HashMap<String, TrayBulkMenuItemHandle>,
     favorite_submenu: Option<Submenu<tauri::Wry>>,
+}
+
+/// アプリが設定したラベルと有効状態を項目ハンドルと共に保持する
+#[derive(Clone)]
+struct TrayTunnelMenuItemHandle {
+    handle: CheckMenuItem<tauri::Wry>,
+    label: String,
+    enabled: bool,
+}
+
+/// 一括操作項目の適用済み有効状態をハンドルと共に保持する
+#[derive(Clone)]
+struct TrayBulkMenuItemHandle {
+    handle: MenuItem<tauri::Wry>,
+    enabled: bool,
 }
 
 /// トレイ項目ラベルへ設定スコープを含めるかを表現する
@@ -2324,6 +2351,7 @@ fn append_tray_tunnel_menu_items(
     }
 
     for item in items {
+        let label = item.label.clone();
         let menu_item = CheckMenuItem::with_id(
             app,
             item.menu_id.clone(),
@@ -2335,9 +2363,14 @@ fn append_tray_tunnel_menu_items(
         actions
             .tunnel_actions
             .insert(item.menu_id.clone(), item.action);
-        item_handles
-            .tunnel_items
-            .insert(item.menu_id, menu_item.clone());
+        item_handles.tunnel_items.insert(
+            item.menu_id,
+            TrayTunnelMenuItemHandle {
+                handle: menu_item.clone(),
+                label,
+                enabled: item.enabled,
+            },
+        );
         submenu.append(&menu_item)?;
     }
 
@@ -2379,11 +2412,17 @@ fn append_tray_scope_bulk_menu_items(
     );
     item_handles.bulk_items.insert(
         tray_start_all_menu_id_for_source(source_kind).to_owned(),
-        start.clone(),
+        TrayBulkMenuItemHandle {
+            handle: start.clone(),
+            enabled: start_enabled,
+        },
     );
     item_handles.bulk_items.insert(
         tray_stop_all_menu_id_for_source(source_kind).to_owned(),
-        stop.clone(),
+        TrayBulkMenuItemHandle {
+            handle: stop.clone(),
+            enabled: stop_enabled,
+        },
     );
 
     submenu.append(&start)?;

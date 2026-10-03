@@ -297,13 +297,15 @@ where
         start_tunnel_job_chunk(chunk, options, &mut results, &mut on_result);
     }
 
-    let mut has_state_changes = false;
-    for started in results.iter().filter_map(Option::as_ref).flatten() {
-        state_file.upsert(started.state.clone());
-        has_state_changes = true;
-    }
+    let mut started_states = results
+        .iter()
+        .filter_map(Option::as_ref)
+        .flatten()
+        .map(|started| started.state.clone())
+        .peekable();
 
-    if has_state_changes {
+    if started_states.peek().is_some() {
+        state_file.upsert_all(started_states);
         write_state_file(state_path, &state_file)?;
     }
 

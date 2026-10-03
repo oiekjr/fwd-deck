@@ -22,12 +22,12 @@ use fwd_deck_core::{
     ValidationReport, add_tunnel_to_config_file, add_tunnels_to_config_file,
     build_ssh_command_args, default_global_config_path, default_local_config_path,
     default_state_file_path, filter_tunnels_by_tags, filter_tunnels_excluding_tags,
-    format_path_for_display, generate_import_tunnel_name, load_effective_config, normalize_tag,
-    parse_ssh_args, parse_ssh_command, read_config_file,
-    remove_tunnel_and_override_from_config_files, runtime_id_for_resolved_tunnel,
+    format_path_for_display, generate_import_tunnel_name, load_effective_config,
+    normalize_runtime_source_path, normalize_tag, parse_ssh_args, parse_ssh_command,
+    read_config_file, remove_tunnel_and_override_from_config_files, runtime_id_for_resolved_tunnel,
     start_tunnel_with_options, start_tunnels_with_options, stop_tunnels as stop_tunnels_core,
-    tag_is_valid, tunnel_statuses, update_tunnel_and_override_name_in_config_files,
-    validate_config,
+    tag_is_valid, tunnel_runtime_id_from_normalized_source_path, tunnel_statuses,
+    update_tunnel_and_override_name_in_config_files, validate_config,
 };
 use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
 use serde::{Deserialize, Serialize};
@@ -1348,17 +1348,34 @@ fn validate_import_tunnels(
     scope: ConfigSourceKind,
     tunnels: &[TunnelConfig],
 ) -> Result<(), CliError> {
+    let mut existing_by_name = HashMap::new();
+    let mut existing_by_port = HashMap::new();
+    if tunnels.len() > 1 {
+        for existing in source_tunnels_for_scope(config, scope) {
+            existing_by_name
+                .entry(existing.tunnel.name.as_str())
+                .or_insert(existing);
+            existing_by_port
+                .entry(existing.tunnel.local_port)
+                .or_insert(existing);
+        }
+    }
     let mut names = HashSet::new();
-    let mut local_ports = HashMap::<u16, String>::new();
+    let mut local_ports = HashMap::<u16, &str>::new();
 
     for tunnel in tunnels {
-        if !names.insert(tunnel.name.clone()) {
+        if !names.insert(tunnel.name.as_str()) {
             return Err(CliError::ImportDuplicateName {
                 name: tunnel.name.clone(),
             });
         }
 
-        if let Some(conflict) = find_tunnel_id_conflict(config, scope, &tunnel.name) {
+        let name_conflict = if tunnels.len() == 1 {
+            find_tunnel_id_conflict(config, scope, &tunnel.name)
+        } else {
+            existing_by_name.get(tunnel.name.as_str()).copied()
+        };
+        if let Some(conflict) = name_conflict {
             return Err(ConfigEditError::DuplicateName {
                 path: conflict.source.path.clone(),
                 name: tunnel.name.clone(),
@@ -1366,19 +1383,22 @@ fn validate_import_tunnels(
             .into());
         }
 
-        if let Some(conflict) =
+        let port_conflict = if tunnels.len() == 1 {
             find_local_port_conflict(config, scope, &tunnel.name, tunnel.local_port)
-        {
+        } else {
+            existing_by_port.get(&tunnel.local_port).copied()
+        };
+        if let Some(conflict) = port_conflict {
             return Err(CliError::ImportLocalPortConflict {
                 local_port: tunnel.local_port,
                 existing_name: conflict.tunnel.name.clone(),
             });
         }
 
-        if let Some(existing_name) = local_ports.insert(tunnel.local_port, tunnel.name.clone()) {
+        if let Some(existing_name) = local_ports.insert(tunnel.local_port, &tunnel.name) {
             return Err(CliError::ImportDuplicateLocalPort {
                 local_port: tunnel.local_port,
-                existing_name,
+                existing_name: existing_name.to_owned(),
             });
         }
     }
@@ -2211,6 +2231,7 @@ fn recover_command(
     }
 
     let statuses_by_runtime_id = status_index_by_runtime_id(&statuses);
+    let tunnels_by_runtime_id = tunnel_index_by_runtime_id(config);
     let mut failed = false;
 
     for runtime_id in recovery_runtime_ids {
@@ -2231,7 +2252,7 @@ fn recover_command(
             continue;
         }
 
-        let Some(tunnel) = find_tunnel_by_runtime_id(config, &runtime_id) else {
+        let Some(tunnel) = tunnels_by_runtime_id.get(runtime_id.as_str()).copied() else {
             failed = true;
             eprintln!(
                 "{}",
@@ -3493,10 +3514,44 @@ fn find_tunnels_by_names<'a>(
     names: &[String],
     scope: Option<ConfigScopeArg>,
 ) -> Result<Vec<&'a ResolvedTunnelConfig>, ()> {
+    if names.len() <= 1 {
+        return names
+            .iter()
+            .map(|name| find_tunnel_by_name(config, name, scope).ok_or(()))
+            .collect();
+    }
+
+    let by_name = tunnel_index_by_name(config, scope);
     names
         .iter()
-        .map(|name| find_tunnel_by_name(config, name, scope).ok_or(()))
+        .map(|name| by_name.get(name.as_str()).copied().ok_or(()))
         .collect()
+}
+
+/// スコープ指定と local 優先規則を維持した name 索引を生成する
+fn tunnel_index_by_name(
+    config: &EffectiveConfig,
+    scope: Option<ConfigScopeArg>,
+) -> HashMap<&str, &ResolvedTunnelConfig> {
+    let mut by_name: HashMap<&str, &ResolvedTunnelConfig> = HashMap::new();
+    let requested_scope = scope_kind(scope);
+
+    for resolved in &config.tunnels {
+        if requested_scope.is_some_and(|kind| kind != resolved.source.kind) {
+            continue;
+        }
+
+        let current = by_name
+            .entry(resolved.tunnel.name.as_str())
+            .or_insert(resolved);
+        if current.source.kind == ConfigSourceKind::Global
+            && resolved.source.kind == ConfigSourceKind::Local
+        {
+            *current = resolved;
+        }
+    }
+
+    by_name
 }
 
 /// 指定 name のトンネル設定をスコープ優先規則に従って取得する
@@ -3525,24 +3580,24 @@ fn find_tunnel_by_name<'a>(
         })
 }
 
-/// 指定 runtime ID のトンネル設定を取得する
-fn find_tunnel_by_runtime_id<'a>(
-    config: &'a EffectiveConfig,
-    runtime_id: &str,
-) -> Option<&'a ResolvedTunnelConfig> {
-    config
-        .tunnels
-        .iter()
-        .find(|resolved| runtime_id_for_resolved_tunnel(resolved) == runtime_id)
-}
-
 /// 統合済みトンネル設定を runtime ID から参照する索引を生成する
 fn tunnel_index_by_runtime_id(config: &EffectiveConfig) -> HashMap<String, &ResolvedTunnelConfig> {
-    config
-        .tunnels
-        .iter()
-        .map(|resolved| (runtime_id_for_resolved_tunnel(resolved), resolved))
-        .collect()
+    let mut normalized_paths = HashMap::new();
+    let mut by_runtime_id = HashMap::with_capacity(config.tunnels.len());
+
+    for resolved in &config.tunnels {
+        let source_path = normalized_paths
+            .entry(resolved.source.path.as_path())
+            .or_insert_with(|| normalize_runtime_source_path(&resolved.source.path));
+        let runtime_id = tunnel_runtime_id_from_normalized_source_path(
+            resolved.source.kind,
+            source_path,
+            &resolved.tunnel.name,
+        );
+        by_runtime_id.insert(runtime_id, resolved);
+    }
+
+    by_runtime_id
 }
 
 /// 指定 name のトンネル状態をスコープ優先規則に従って取得する
@@ -3551,10 +3606,42 @@ fn find_statuses_by_names<'a>(
     names: &[String],
     scope: Option<ConfigScopeArg>,
 ) -> Result<Vec<&'a TunnelRuntimeStatus>, ()> {
+    if names.len() <= 1 {
+        return names
+            .iter()
+            .map(|name| find_status_by_name(statuses, name, scope).ok_or(()))
+            .collect();
+    }
+
+    let by_name = status_index_by_name(statuses, scope);
     names
         .iter()
-        .map(|name| find_status_by_name(statuses, name, scope).ok_or(()))
+        .map(|name| by_name.get(name.as_str()).copied().ok_or(()))
         .collect()
+}
+
+/// スコープ指定と local 優先規則を維持した状態の name 索引を生成する
+fn status_index_by_name(
+    statuses: &[TunnelRuntimeStatus],
+    scope: Option<ConfigScopeArg>,
+) -> HashMap<&str, &TunnelRuntimeStatus> {
+    let mut by_name: HashMap<&str, &TunnelRuntimeStatus> = HashMap::new();
+    let requested_scope = scope_kind(scope);
+
+    for status in statuses {
+        if requested_scope.is_some_and(|kind| kind != status.state.source_kind) {
+            continue;
+        }
+
+        let current = by_name.entry(status.state.name.as_str()).or_insert(status);
+        if current.state.source_kind == ConfigSourceKind::Global
+            && status.state.source_kind == ConfigSourceKind::Local
+        {
+            *current = status;
+        }
+    }
+
+    by_name
 }
 
 /// 指定 name のトンネル状態をスコープ優先規則に従って取得する
@@ -3644,8 +3731,13 @@ fn recover_watch_stale_tunnels(
     state_path: &Path,
     runtime_ids: &[String],
 ) -> Result<(), CliError> {
+    if runtime_ids.is_empty() {
+        return Ok(());
+    }
+
+    let tunnels_by_runtime_id = tunnel_index_by_runtime_id(config);
     for runtime_id in runtime_ids {
-        let Some(tunnel) = find_tunnel_by_runtime_id(config, runtime_id) else {
+        let Some(tunnel) = tunnels_by_runtime_id.get(runtime_id.as_str()).copied() else {
             eprintln!(
                 "{}",
                 red(
@@ -3669,8 +3761,9 @@ fn recover_watch_stale_tunnels(
 
 /// 未知の name を表示する
 fn print_unknown_names(config: &EffectiveConfig, names: &[String], scope: Option<ConfigScopeArg>) {
+    let by_name = tunnel_index_by_name(config, scope);
     for name in names {
-        if find_tunnel_by_name(config, name, scope).is_none() {
+        if !by_name.contains_key(name.as_str()) {
             eprintln!(
                 "{}",
                 red(
@@ -3688,8 +3781,9 @@ fn print_untracked_names(
     names: &[String],
     scope: Option<ConfigScopeArg>,
 ) {
+    let by_name = status_index_by_name(statuses, scope);
     for name in names {
-        if find_status_by_name(statuses, name, scope).is_none() {
+        if !by_name.contains_key(name.as_str()) {
             eprintln!(
                 "{}",
                 red(
@@ -5214,6 +5308,176 @@ mod tests {
         let tunnel = find_tunnel_by_name(&config, "dev", None);
 
         assert!(tunnel.is_none());
+    }
+
+    /// 複数 name 指定が入力順と重複を維持することを検証する
+    #[test]
+    fn find_tunnels_by_names_preserves_requested_order_and_duplicates() {
+        let config =
+            effective_config_with_tunnels(vec![tunnel("db", 15432), tunnel("cache", 16379)]);
+        let names = vec!["cache".to_owned(), "db".to_owned(), "cache".to_owned()];
+
+        let selected = find_tunnels_by_names(&config, &names, None).expect("known names");
+
+        assert_eq!(tunnel_ids(&selected), vec!["cache", "db", "cache"]);
+    }
+
+    /// 複数 name 指定が local 優先と同一スコープの最初の一致を維持することを検証する
+    #[test]
+    fn find_tunnels_by_names_preserves_scope_precedence_and_first_match() {
+        let mut config = effective_config_with_tunnels(vec![
+            tunnel("db", 1000),
+            tunnel("db", 2000),
+            tunnel("db", 3000),
+        ]);
+        config.tunnels[0].source.kind = ConfigSourceKind::Global;
+        let names = vec!["db".to_owned(), "db".to_owned()];
+
+        let preferred = find_tunnels_by_names(&config, &names, None).expect("local name");
+        let global = find_tunnels_by_names(&config, &names, Some(ConfigScopeArg::Global))
+            .expect("global name");
+        let local = find_tunnels_by_names(&config, &names, Some(ConfigScopeArg::Local))
+            .expect("local name");
+
+        assert_eq!(preferred[0].tunnel.local_port, 2000);
+        assert_eq!(global[0].tunnel.local_port, 1000);
+        assert_eq!(local[0].tunnel.local_port, 2000);
+    }
+
+    /// 未知の name を含む複数指定が失敗することを検証する
+    #[test]
+    fn find_tunnels_by_names_rejects_unknown_name() {
+        let config = effective_config_with_tunnels(vec![tunnel("db", 15432)]);
+
+        let selected =
+            find_tunnels_by_names(&config, &["db".to_owned(), "unknown".to_owned()], None);
+
+        assert!(selected.is_err());
+    }
+
+    /// 状態の複数 name 指定が入力順と重複を維持することを検証する
+    #[test]
+    fn find_statuses_by_names_preserves_requested_order_and_duplicates() {
+        let statuses = vec![
+            runtime_status("db", ProcessState::Running),
+            runtime_status("cache", ProcessState::Stale),
+        ];
+        let names = vec!["cache".to_owned(), "db".to_owned(), "cache".to_owned()];
+
+        let selected = find_statuses_by_names(&statuses, &names, None).expect("tracked names");
+
+        assert_eq!(status_ids(&selected), vec!["cache", "db", "cache"]);
+    }
+
+    /// 状態の複数 name 指定が local 優先と同一スコープの最初の一致を維持することを検証する
+    #[test]
+    fn find_statuses_by_names_preserves_scope_precedence_and_first_match() {
+        let mut statuses = vec![
+            runtime_status("db", ProcessState::Running),
+            runtime_status("db", ProcessState::Stale),
+            runtime_status("db", ProcessState::Running),
+        ];
+        statuses[0].state.source_kind = ConfigSourceKind::Global;
+        let names = vec!["db".to_owned(), "db".to_owned()];
+
+        let preferred = find_statuses_by_names(&statuses, &names, None).expect("local name");
+        let global = find_statuses_by_names(&statuses, &names, Some(ConfigScopeArg::Global))
+            .expect("global name");
+        let local = find_statuses_by_names(&statuses, &names, Some(ConfigScopeArg::Local))
+            .expect("local name");
+
+        assert!(std::ptr::eq(preferred[0], &statuses[1]));
+        assert!(std::ptr::eq(global[0], &statuses[0]));
+        assert!(std::ptr::eq(local[0], &statuses[1]));
+    }
+
+    /// 未追跡の name を含む複数指定が失敗することを検証する
+    #[test]
+    fn find_statuses_by_names_rejects_untracked_name() {
+        let statuses = vec![runtime_status("db", ProcessState::Running)];
+
+        let selected =
+            find_statuses_by_names(&statuses, &["db".to_owned(), "unknown".to_owned()], None);
+
+        assert!(selected.is_err());
+    }
+
+    /// runtime ID 索引が既存ファイルと同一パスの別名を一致させることを検証する
+    #[test]
+    fn tunnel_index_by_runtime_id_normalizes_source_paths() {
+        let directory = tempfile::TempDir::new().expect("temporary config directory");
+        let source_path = directory.path().join("config.toml");
+        fs::write(&source_path, "").expect("fixture config");
+        let mut config =
+            effective_config_with_tunnels(vec![tunnel("db", 15432), tunnel("cache", 16379)]);
+        config.tunnels[0].source.path = source_path.clone();
+        config.tunnels[1].source.path = directory.path().join(".").join("config.toml");
+        let expected_db =
+            fwd_deck_core::tunnel_runtime_id(ConfigSourceKind::Local, &source_path, "db");
+        let expected_cache =
+            fwd_deck_core::tunnel_runtime_id(ConfigSourceKind::Local, &source_path, "cache");
+
+        let indexed = tunnel_index_by_runtime_id(&config);
+
+        assert!(std::ptr::eq(indexed[&expected_db], &config.tunnels[0]));
+        assert!(std::ptr::eq(indexed[&expected_cache], &config.tunnels[1]));
+    }
+
+    /// 取り込み候補内の重複名がポート競合より先に報告されることを検証する
+    #[test]
+    fn validate_import_tunnels_reports_duplicate_name_first() {
+        let config = effective_config_with_tunnels(vec![]);
+        let incoming = vec![tunnel("new", 2000), tunnel("new", 2000)];
+
+        let result = validate_import_tunnels(&config, ConfigSourceKind::Local, &incoming);
+
+        assert!(matches!(result, Err(CliError::ImportDuplicateName { name }) if name == "new"));
+    }
+
+    /// 取り込み候補内の重複ポートが最初の候補名と共に報告されることを検証する
+    #[test]
+    fn validate_import_tunnels_reports_duplicate_port() {
+        let config = effective_config_with_tunnels(vec![]);
+        let incoming = vec![tunnel("first", 2000), tunnel("second", 2000)];
+
+        let result = validate_import_tunnels(&config, ConfigSourceKind::Local, &incoming);
+
+        assert!(
+            matches!(result, Err(CliError::ImportDuplicateLocalPort { local_port: 2000, existing_name }) if existing_name == "first")
+        );
+    }
+
+    /// 取り込み検証が他スコープの名前とポートを競合扱いしないことを検証する
+    #[test]
+    fn validate_import_tunnels_ignores_other_scope() {
+        let mut config = effective_config_with_tunnels(vec![tunnel("db", 2000)]);
+        config.sources[0].source.kind = ConfigSourceKind::Global;
+
+        let result = validate_import_tunnels(
+            &config,
+            ConfigSourceKind::Local,
+            &[tunnel("db", 2000), tunnel("new", 3000)],
+        );
+
+        assert!(result.is_ok());
+    }
+
+    /// 取り込み検証が無効化済み設定のポートも最初の一致として報告することを検証する
+    #[test]
+    fn validate_import_tunnels_reports_first_disabled_port_conflict() {
+        let mut first = tunnel("first", 2000);
+        first.enabled = false;
+        let config = effective_config_with_tunnels(vec![first, tunnel("second", 2000)]);
+
+        let result = validate_import_tunnels(
+            &config,
+            ConfigSourceKind::Local,
+            &[tunnel("new", 2000), tunnel("another", 3000)],
+        );
+
+        assert!(
+            matches!(result, Err(CliError::ImportLocalPortConflict { local_port: 2000, existing_name }) if existing_name == "first")
+        );
     }
 
     /// テスト用の統合済み設定を生成する

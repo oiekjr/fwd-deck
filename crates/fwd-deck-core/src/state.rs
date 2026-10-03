@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env, fs,
     path::{Path, PathBuf},
 };
@@ -37,6 +38,34 @@ impl TunnelStateFile {
         }
 
         self.tunnels.push(tunnel);
+    }
+
+    /// 既存順序と最初の一致への更新を維持して状態を一括追加する
+    pub fn upsert_all(&mut self, tunnels: impl IntoIterator<Item = TunnelState>) {
+        let mut tunnels = tunnels.into_iter().peekable();
+        let Some(first) = tunnels.next() else {
+            return;
+        };
+        if tunnels.peek().is_none() {
+            self.upsert(first);
+            return;
+        }
+
+        let mut positions = HashMap::with_capacity(self.tunnels.len());
+        for (position, tunnel) in self.tunnels.iter().enumerate() {
+            positions
+                .entry(tunnel.runtime_id.clone())
+                .or_insert(position);
+        }
+
+        for tunnel in std::iter::once(first).chain(tunnels) {
+            if let Some(&position) = positions.get(&tunnel.runtime_id) {
+                self.tunnels[position] = tunnel;
+            } else {
+                positions.insert(tunnel.runtime_id.clone(), self.tunnels.len());
+                self.tunnels.push(tunnel);
+            }
+        }
     }
 
     /// 指定 runtime ID のトンネル状態を取得する
@@ -259,6 +288,77 @@ mod tests {
         let loaded = read_state_file(&state_path).expect("read state file");
 
         assert_eq!(loaded, state);
+    }
+
+    /// 一括更新が既存順序と指定順序を維持することを検証する
+    #[test]
+    fn upsert_all_preserves_existing_and_appended_order() {
+        let mut state = TunnelStateFile {
+            tunnels: vec![tunnel_state("db", 1), tunnel_state("cache", 2)],
+        };
+
+        state.upsert_all([
+            tunnel_state("cache", 20),
+            tunnel_state("search", 3),
+            tunnel_state("db", 10),
+        ]);
+
+        assert_eq!(
+            state.tunnels,
+            vec![
+                tunnel_state("db", 10),
+                tunnel_state("cache", 20),
+                tunnel_state("search", 3)
+            ]
+        );
+    }
+
+    /// 一括更新が重複した既存 ID の最初の項目だけを更新することを検証する
+    #[test]
+    fn upsert_all_updates_first_existing_duplicate() {
+        let mut state = TunnelStateFile {
+            tunnels: vec![tunnel_state("db", 1), tunnel_state("db", 2)],
+        };
+
+        state.upsert_all([tunnel_state("db", 10), tunnel_state("cache", 20)]);
+
+        assert_eq!(
+            state.tunnels,
+            vec![
+                tunnel_state("db", 10),
+                tunnel_state("db", 2),
+                tunnel_state("cache", 20)
+            ]
+        );
+    }
+
+    /// 一括指定内で重複した ID が最後の値で更新されることを検証する
+    #[test]
+    fn upsert_all_uses_last_incoming_value() {
+        let mut state = TunnelStateFile::new();
+
+        state.upsert_all([
+            tunnel_state("db", 1),
+            tunnel_state("cache", 2),
+            tunnel_state("db", 10),
+        ]);
+
+        assert_eq!(
+            state.tunnels,
+            vec![tunnel_state("db", 10), tunnel_state("cache", 2)]
+        );
+    }
+
+    /// 空の一括指定で既存状態が変更されないことを検証する
+    #[test]
+    fn upsert_all_leaves_state_unchanged_for_empty_input() {
+        let mut state = TunnelStateFile {
+            tunnels: vec![tunnel_state("db", 1)],
+        };
+
+        state.upsert_all([]);
+
+        assert_eq!(state.tunnels, vec![tunnel_state("db", 1)]);
     }
 
     /// 存在しない状態ファイルが空の状態として扱われることを検証する

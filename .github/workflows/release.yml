@@ -67,11 +67,13 @@ jobs:
             exit 1
           fi
 
-          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "app_asset_name=fwd-deck-app_${version}_universal.dmg" >> "$GITHUB_OUTPUT"
-          echo "cli_aarch64_asset_name=fwd-deck_${version}_aarch64-apple-darwin.tar.gz" >> "$GITHUB_OUTPUT"
-          echo "cli_x86_64_asset_name=fwd-deck_${version}_x86_64-apple-darwin.tar.gz" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag_name=$tag_name"
+            echo "version=$version"
+            echo "app_asset_name=fwd-deck-app_${version}_universal.dmg"
+            echo "cli_aarch64_asset_name=fwd-deck_${version}_aarch64-apple-darwin.tar.gz"
+            echo "cli_x86_64_asset_name=fwd-deck_${version}_x86_64-apple-darwin.tar.gz"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create release
         env:
@@ -172,18 +174,22 @@ jobs:
             tar -czf "$asset_path" -C "$staging_dir" fwd-deck
             shasum -a 256 "$asset_path" | awk '{ print $1 }' > "$checksum_path"
 
-            echo "${output_prefix}_asset_path=$asset_path" >> "$GITHUB_OUTPUT"
-            echo "${output_prefix}_checksum_path=$checksum_path" >> "$GITHUB_OUTPUT"
-            echo "${output_prefix}_sha256=$(cat "$checksum_path")" >> "$GITHUB_OUTPUT"
+            {
+              echo "${output_prefix}_asset_path=$asset_path"
+              echo "${output_prefix}_checksum_path=$checksum_path"
+              echo "${output_prefix}_sha256=$(cat "$checksum_path")"
+            } >> "$GITHUB_OUTPUT"
           }
 
           package_cli_asset "aarch64-apple-darwin" "$CLI_AARCH64_ASSET_NAME" "cli_aarch64"
           package_cli_asset "x86_64-apple-darwin" "$CLI_X86_64_ASSET_NAME" "cli_x86_64"
 
-          echo "app_asset_path=$app_asset_path" >> "$GITHUB_OUTPUT"
-          echo "app_checksum_path=$app_checksum_path" >> "$GITHUB_OUTPUT"
-          echo "dmg_sha256=$(cat "$app_checksum_path")" >> "$GITHUB_OUTPUT"
-          echo "app_bundle_name=$app_bundle_name" >> "$GITHUB_OUTPUT"
+          {
+            echo "app_asset_path=$app_asset_path"
+            echo "app_checksum_path=$app_checksum_path"
+            echo "dmg_sha256=$(cat "$app_checksum_path")"
+            echo "app_bundle_name=$app_bundle_name"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Upload release assets
         env:
@@ -230,20 +236,16 @@ jobs:
           class FwdDeck < Formula
             desc "Manage SSH local port forwarding profiles"
             homepage "https://github.com/oiekjr/fwd-deck"
-            version "$VERSION"
+            if Hardware::CPU.arm?
+              url "https://github.com/oiekjr/fwd-deck/releases/download/v$VERSION/fwd-deck_${VERSION}_aarch64-apple-darwin.tar.gz"
+              sha256 "$CLI_AARCH64_SHA256"
+            else
+              url "https://github.com/oiekjr/fwd-deck/releases/download/v$VERSION/fwd-deck_${VERSION}_x86_64-apple-darwin.tar.gz"
+              sha256 "$CLI_X86_64_SHA256"
+            end
             license "MIT"
 
-            on_macos do
-              on_arm do
-                url "https://github.com/oiekjr/fwd-deck/releases/download/v#{version}/fwd-deck_#{version}_aarch64-apple-darwin.tar.gz"
-                sha256 "$CLI_AARCH64_SHA256"
-              end
-
-              on_intel do
-                url "https://github.com/oiekjr/fwd-deck/releases/download/v#{version}/fwd-deck_#{version}_x86_64-apple-darwin.tar.gz"
-                sha256 "$CLI_X86_64_SHA256"
-              end
-            end
+            depends_on :macos
 
             def install
               bin.install "fwd-deck"
@@ -265,6 +267,8 @@ jobs:
             desc "GUI for fwd-deck local SSH port forwarding profiles"
             homepage "https://github.com/oiekjr/fwd-deck"
 
+            depends_on :macos
+
             app "$APP_BUNDLE_NAME", target: "Fwd Deck.app"
 
             zap trash: [
@@ -277,6 +281,22 @@ jobs:
 
           ruby -c Formula/fwd-deck.rb
           ruby -c Casks/fwd-deck-app.rb
+
+      - name: Validate Homebrew tap
+        working-directory: homebrew-tap
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          tap_path="$(brew --repository)/Library/Taps/oiekjr/homebrew-tap"
+          mkdir -p "$(dirname "$tap_path")"
+          ln -s "$PWD" "$tap_path"
+
+          brew style oiekjr/tap
+          brew readall --aliases --os=all --arch=all oiekjr/tap
+          brew audit --except=installed --tap=oiekjr/tap
 
       - name: Commit Homebrew tap update
         working-directory: homebrew-tap

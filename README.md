@@ -22,7 +22,7 @@
 
 ## Install
 
-Homebrew tap から CLI と macOSアプリをインストールできます。
+macOS では Homebrew tap から CLI と macOSアプリをインストールできます。
 
 ```sh
 brew install oiekjr/tap/fwd-deck
@@ -137,6 +137,9 @@ task check
 
 `task check` には Rust と画面側の回帰テストを含みます。  
 画面側のコマンド制御だけを検証する場合は `task app:test` を実行します。
+
+リリース処理では、生成した Homebrew 定義に `brew style`、全 OS・アーキテクチャの `brew readall`、`brew audit` を実行します。
+いずれかが失敗した場合、Homebrew tap への更新は送信しません。
 
 ## Documentation
 

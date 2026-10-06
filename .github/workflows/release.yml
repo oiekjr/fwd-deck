@@ -300,7 +300,7 @@ jobs:
           mkdir -p "$(dirname "$tap_path")"
           ln -s "$PWD" "$tap_path"
 
-          brew style oiekjr/tap
+          brew style Formula Casks
           brew readall --aliases --os=all --arch=all oiekjr/tap
           brew audit --except=installed --tap=oiekjr/tap
 

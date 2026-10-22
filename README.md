@@ -125,6 +125,30 @@ fwd-deck status
 fwd-deck stop dev-db
 ```
 
+## AI Agent Skills
+
+Codex・Claude Code から CLI を使うための英文スキル [fwd-deck-cli](skills/fwd-deck-cli/SKILL.md) を公開しています。  
+トンネルの設定、起動、停止、状態確認、復旧、診断を案内します。
+
+`fwd-deck` CLI は [Install](#install) の手順で別途インストールしてください。  
+スキルの導入には Node.js 22.20.0 以降が必要です。
+
+利用するツールのコマンドを実行すると、全プロジェクトで使えるユーザー個人の領域へ導入します。
+
+```sh
+# Codex
+npx skills add oiekjr/fwd-deck --skill fwd-deck-cli --agent codex --global
+
+# Claude Code
+npx skills add oiekjr/fwd-deck --skill fwd-deck-cli --agent claude-code --global
+```
+
+`--skill fwd-deck-cli` は CLI利用者向けのスキルだけを指定します。
+導入方法の詳細は [Skills CLI](https://github.com/vercel-labs/skills#install-a-skill) を参照してください。
+
+導入後は、たとえば Codex では `$fwd-deck-cli 設定済みトンネルを確認してください`、Claude Code では `/fwd-deck-cli 設定済みトンネルを確認してください` と依頼できます。  
+CLI利用の依頼に応じて、各ツールがスキルを自動で選択することもできます。
+
 ## Development
 
 変更後は次のコマンドで整形とチェックを実行します。
